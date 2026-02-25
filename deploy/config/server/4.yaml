@@ -1,0 +1,7 @@
+role: server
+bind_ip: 0.0.0.0
+remote_addr: ""
+remote_port: 45004
+tun_name: mpq4
+tun_cidr: 10.200.4.2/30
+log_level: info

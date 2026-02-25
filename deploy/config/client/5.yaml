@@ -1,0 +1,7 @@
+role: client
+bind_ip: if:enp7s7
+remote_addr: VPS_PUBLIC_IP
+remote_port: 45005
+tun_name: mpq5
+tun_cidr: 10.200.5.1/30
+log_level: info
