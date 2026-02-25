@@ -5,6 +5,11 @@ Questa guida rende persistente la logica validata in test:
 - VPS: forward + NAT verso Internet
 - VPS: route di ritorno per `172.16.1.0/30 ... 172.16.6.0/30` su `mpq1..mpq6`
 
+Regola operativa SSH VPS (IPS):
+- Host alias da usare: `vps-it-mpquic`
+- Non usare `ssh vps-it-mpquic 'comando'`
+- Usare sempre: `ssh vps-it-mpquic` -> comandi -> `exit`
+
 ## 1) Client MPQUIC — policy routing 1:1
 
 Installazione script + service:

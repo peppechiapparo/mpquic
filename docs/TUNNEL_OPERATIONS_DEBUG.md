@@ -2,6 +2,24 @@
 
 Questa guida è la runbook pratica per esercire e debuggare i tunnel `mpq1..mpq6` su TBOX/MPQUIC.
 
+## 0) Regola SSH operativa (IPS)
+
+Host VPS canonicale: `vps-it-mpquic`.
+
+Per evitare disconnessioni IPS, su VPS usare sempre sequenza interattiva:
+
+```bash
+ssh vps-it-mpquic
+# esegui i comandi dentro la sessione
+exit
+```
+
+Da evitare su VPS:
+
+```bash
+ssh vps-it-mpquic 'comando'
+```
+
 ## 1) Uso operativo quotidiano
 
 ## 1.1 Stato rapido client
