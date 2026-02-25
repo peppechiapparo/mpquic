@@ -240,6 +240,10 @@ ip -br a | grep '^mpq'
 - `deploy/config/client/*.yaml`
 - `deploy/config/server/*.yaml`
 
+Guide operative aggiuntive:
+- `docs/OPERATIVE_ROUTING_NAT.md`
+- `docs/TUNNEL_OPERATIONS_DEBUG.md`
+
 ## Note operative
 
 - TLS ora usa file persistenti (`/etc/mpquic/tls/*`) e trust esplicito client.

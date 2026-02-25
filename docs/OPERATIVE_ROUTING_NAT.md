@@ -133,6 +133,11 @@ sudo systemctl restart mpquic-routing.service
 for i in 1 2 3 4 5 6; do systemctl is-active mpquic@$i.service; done
 ```
 
+## 7) Debug operativo
+
+Per troubleshooting strutturato (symptom-based), usare:
+- `docs/TUNNEL_OPERATIONS_DEBUG.md`
+
 Server:
 ```bash
 for i in 1 2 3 4 5 6; do sudo systemctl restart mpquic@$i.service; done
