@@ -8,6 +8,30 @@ have_ipv4() {
   ip -4 addr show dev "$1" 2>/dev/null | grep -q "inet "
 }
 
+tun_healthy() {
+  local inst="$1"
+  local env_file="/etc/mpquic/instances/${inst}.env"
+
+  if [[ ! -f "$env_file" ]]; then
+    return 1
+  fi
+
+  local tun_name
+  local tun_cidr
+  tun_name="$(grep -E '^TUN_NAME=' "$env_file" | cut -d= -f2-)"
+  tun_cidr="$(grep -E '^TUN_CIDR=' "$env_file" | cut -d= -f2-)"
+
+  if [[ -z "$tun_name" || -z "$tun_cidr" ]]; then
+    return 1
+  fi
+
+  ip link show dev "$tun_name" >/dev/null 2>&1 || return 1
+  ip link show dev "$tun_name" | head -n1 | grep -q "UP" || return 1
+  ip -4 addr show dev "$tun_name" | grep -q "inet ${tun_cidr}" || return 1
+
+  return 0
+}
+
 changed=0
 
 for idx in "${!WAN_DEVS[@]}"; do
@@ -17,6 +41,9 @@ for idx in "${!WAN_DEVS[@]}"; do
 
   if have_ipv4 "$dev"; then
     if ! systemctl is-active --quiet "$svc"; then
+      systemctl restart "$svc" || true
+      changed=1
+    elif ! tun_healthy "$inst"; then
       systemctl restart "$svc" || true
       changed=1
     fi

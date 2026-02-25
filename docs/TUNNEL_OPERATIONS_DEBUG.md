@@ -169,6 +169,9 @@ for i in 1 2 3 4 5 6; do
 done
 ```
 
+Nota: il watchdog verifica sia `is-active` sia salute TUN (`TUN_NAME/TUN_CIDR` presenti e interfaccia `UP`).
+Se il processo è attivo ma il tunnel è rotto (es. `write tun: input/output error`), forza restart dell'istanza.
+
 Recovery:
 ```bash
 for i in 1 2 3 4 5 6; do systemctl restart mpquic@$i.service; done
