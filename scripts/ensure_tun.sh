@@ -10,7 +10,7 @@ if [[ -z "$TUN_NAME" || -z "$TUN_CIDR" ]]; then
   exit 1
 fi
 
-if ! ip tuntap show dev "$TUN_NAME" >/dev/null 2>&1; then
+if ! ip link show dev "$TUN_NAME" >/dev/null 2>&1; then
   ip tuntap add dev "$TUN_NAME" mode tun
 fi
 
