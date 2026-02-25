@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IFACE_NAME="${IFACE:-}"
+MODE="${MODE:-}"
+
+if [ -z "$IFACE_NAME" ] || [ -z "$MODE" ]; then
+  exit 0
+fi
+
+/usr/local/lib/mpquic/mpquic-if-event.sh "$IFACE_NAME" "$MODE"

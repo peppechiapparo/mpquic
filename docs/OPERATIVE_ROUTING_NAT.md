@@ -97,3 +97,45 @@ tcpdump -ni enp7s6 udp port 45004
 tcpdump -ni enp7s7 udp port 45005
 tcpdump -ni enp7s8 udp port 45006
 ```
+
+## 5) Auto-heal tunnel (watchdog + hook eventi interfaccia)
+
+Obiettivo:
+- se una WAN va giù, fermare il tunnel associato
+- se la WAN torna su, riavviare il tunnel associato
+- riallineare automaticamente policy routing
+
+Installazione (client):
+```bash
+sudo install -m 0755 scripts/mpquic-tunnel-watchdog.sh /usr/local/lib/mpquic/mpquic-tunnel-watchdog.sh
+sudo install -m 0755 scripts/mpquic-if-event.sh /usr/local/lib/mpquic/mpquic-if-event.sh
+sudo install -m 0644 deploy/systemd/mpquic-watchdog.service /etc/systemd/system/mpquic-watchdog.service
+sudo install -m 0644 deploy/systemd/mpquic-watchdog.timer /etc/systemd/system/mpquic-watchdog.timer
+sudo install -m 0755 deploy/hooks/mpquic-ifupdown-hook /etc/network/if-up.d/mpquic-auto
+sudo install -m 0755 deploy/hooks/mpquic-ifupdown-hook /etc/network/if-post-down.d/mpquic-auto
+sudo systemctl daemon-reload
+sudo systemctl enable --now mpquic-watchdog.timer
+```
+
+Verifica:
+```bash
+systemctl is-active mpquic-watchdog.timer
+systemctl status mpquic-watchdog.timer --no-pager
+journalctl -u mpquic-watchdog.service -n 20 --no-pager
+```
+
+## 6) Restart completo tunnel dopo restart rete
+
+Client:
+```bash
+for i in 1 2 3 4 5 6; do sudo systemctl restart mpquic@$i.service; done
+sudo systemctl restart mpquic-routing.service
+for i in 1 2 3 4 5 6; do systemctl is-active mpquic@$i.service; done
+```
+
+Server:
+```bash
+for i in 1 2 3 4 5 6; do sudo systemctl restart mpquic@$i.service; done
+sudo systemctl restart mpquic-vps-routes.service
+for i in 1 2 3 4 5 6; do systemctl is-active mpquic@$i.service; done
+```
