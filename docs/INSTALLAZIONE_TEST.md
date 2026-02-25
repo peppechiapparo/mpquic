@@ -27,7 +27,8 @@ sudo ./scripts/install_server.sh
 Verifica file:
 ```bash
 ls -l /etc/systemd/system/mpquic@.service
-ls -l /etc/mpquic/instances/{1..6}.yaml
+ls -l /etc/mpquic/instances/{1..6}.yaml.tpl
+cat /etc/mpquic/global.env
 ```
 
 ## 4) Installazione lato CLIENT (VM MPQUIC)
@@ -37,18 +38,19 @@ sudo ./scripts/install_client.sh
 ```
 Verifica file:
 ```bash
-ls -l /etc/mpquic/instances/{1..6}.yaml
+ls -l /etc/mpquic/instances/{1..6}.yaml.tpl
 ```
 
 ## 5) Parametrizzazione endpoint
 ### Client
-Imposta IP pubblico VPS in tutti i file client:
+Imposta IP pubblico VPS una sola volta (vale per tutte le istanze):
 ```bash
-sudo sed -i 's/VPS_PUBLIC_IP/<IP_PUBBLICO_VPS>/g' /etc/mpquic/instances/*.yaml
+sudo sed -i 's/^VPS_PUBLIC_IP=.*/VPS_PUBLIC_IP=172.238.232.223/' /etc/mpquic/global.env
+cat /etc/mpquic/global.env
 ```
 Verifica:
 ```bash
-grep -R "remote_addr" /etc/mpquic/instances/*.yaml
+grep -R "remote_addr" /etc/mpquic/instances/*.yaml.tpl
 ```
 
 ### Server

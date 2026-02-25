@@ -150,7 +150,7 @@ ls -l /etc/mpquic/tls/server.crt /etc/mpquic/tls/server.key /etc/mpquic/tls/ca.c
 Client:
 ```bash
 ls -l /etc/mpquic/tls/ca.crt
-grep -R "tls_" /etc/mpquic/instances/*.yaml
+grep -R "tls_" /etc/mpquic/instances/*.yaml.tpl /etc/mpquic/instances/*.yaml
 ```
 
 ## 4.2 Errori tipici

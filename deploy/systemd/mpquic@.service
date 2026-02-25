@@ -5,9 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+EnvironmentFile=-/etc/mpquic/global.env
 EnvironmentFile=/etc/mpquic/instances/%i.env
 ExecStartPre=/bin/sh -c '/usr/local/lib/mpquic/ensure_tun.sh "$TUN_NAME" "$TUN_CIDR" "${TUN_MTU:-1300}"'
-ExecStart=/usr/local/bin/mpquic --config /etc/mpquic/instances/%i.yaml
+ExecStartPre=/bin/sh -c '/usr/local/lib/mpquic/render_config.sh "%i"'
+ExecStart=/usr/local/bin/mpquic --config /run/mpquic/%i.yaml
 Restart=always
 RestartSec=2
 User=root

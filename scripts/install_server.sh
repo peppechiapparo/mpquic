@@ -11,4 +11,4 @@ fi
 sudo "$ROOT_DIR/scripts/install_mpquic.sh" server
 
 echo "Installazione server completata."
-echo "Prossimo step: verifica/edita /etc/mpquic/instances/*.yaml e avvia mpquic@1.service"
+echo "Prossimo step: verifica/edita /etc/mpquic/instances/*.yaml.tpl e avvia mpquic@1.service"

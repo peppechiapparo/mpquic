@@ -70,6 +70,8 @@ tls_server_name: mpquic-server
 tls_insecure_skip_verify: false
 ```
 
+`remote_addr` può rimanere `VPS_PUBLIC_IP` nei template: il valore reale viene letto da `/etc/mpquic/global.env` e renderizzato automaticamente in `/run/mpquic/%i.yaml` ad ogni start.
+
 ## E) systemd unit template
 
 File: `deploy/systemd/mpquic@.service`
@@ -114,7 +116,8 @@ sudo ./scripts/install_mpquic.sh client
 Verifica:
 ```bash
 ls -l /etc/systemd/system/mpquic@.service
-ls -l /etc/mpquic/instances/{1..6}.yaml
+ls -l /etc/mpquic/instances/{1..6}.yaml.tpl
+cat /etc/mpquic/global.env
 ```
 
 ### 3. Installazione lato SERVER (VPS)
@@ -125,17 +128,22 @@ sudo ./scripts/install_mpquic.sh server
 ```
 Verifica:
 ```bash
-ls -l /etc/mpquic/instances/{1..6}.yaml
+ls -l /etc/mpquic/instances/{1..6}.yaml.tpl
 ```
 
 ### 4. Configurazione endpoint
 
 #### Client
-Aggiorna `remote_addr` in tutti i file `/etc/mpquic/instances/1..6.yaml` con IP pubblico VPS.
+Imposta IP pubblico VPS una sola volta in `/etc/mpquic/global.env`:
 
-Verifica:
 ```bash
-grep -R "remote_addr" /etc/mpquic/instances/*.yaml
+sudo sed -i 's/^VPS_PUBLIC_IP=.*/VPS_PUBLIC_IP=172.238.232.223/' /etc/mpquic/global.env
+cat /etc/mpquic/global.env
+```
+
+Verifica template:
+```bash
+grep -R "remote_addr" /etc/mpquic/instances/*.yaml.tpl
 ```
 
 #### Server
@@ -143,7 +151,7 @@ Se vuoi bind dedicato, modifica `bind_ip` nei file server da `0.0.0.0` a IP spec
 
 Verifica:
 ```bash
-grep -R "bind_ip" /etc/mpquic/instances/*.yaml
+grep -R "bind_ip" /etc/mpquic/instances/*.yaml.tpl
 ```
 
 ### 4.1 Materiale TLS persistente (obbligatorio)
@@ -160,7 +168,7 @@ Copia `/etc/mpquic/tls/ca.crt` dal server al client in `/etc/mpquic/tls/ca.crt`.
 Verifica:
 ```bash
 ls -l /etc/mpquic/tls/ca.crt
-grep -R "tls_" /etc/mpquic/instances/*.yaml
+grep -R "tls_" /etc/mpquic/instances/*.yaml.tpl
 ```
 
 ### 5. Bring-up iniziale 1 tunnel (POC minimo)

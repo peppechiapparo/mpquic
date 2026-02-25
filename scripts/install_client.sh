@@ -11,4 +11,4 @@ fi
 sudo "$ROOT_DIR/scripts/install_mpquic.sh" client
 
 echo "Installazione client completata."
-echo "Prossimo step: imposta remote_addr in /etc/mpquic/instances/*.yaml e avvia mpquic@1.service"
+echo "Prossimo step: imposta VPS_PUBLIC_IP in /etc/mpquic/global.env e avvia mpquic@1.service"
