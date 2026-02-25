@@ -5,3 +5,6 @@ remote_port: 45005
 tun_name: mpq5
 tun_cidr: 10.200.5.1/30
 log_level: info
+tls_ca_file: /etc/mpquic/tls/ca.crt
+tls_server_name: mpquic-server
+tls_insecure_skip_verify: false

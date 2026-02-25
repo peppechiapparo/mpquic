@@ -50,6 +50,11 @@ Ogni YAML contiene:
 - `tun_name`
 - `tun_cidr`
 - `log_level`
+- `tls_cert_file` (server)
+- `tls_key_file` (server)
+- `tls_ca_file` (client)
+- `tls_server_name` (client)
+- `tls_insecure_skip_verify` (client)
 
 Esempio (client, istanza 1):
 ```yaml
@@ -60,6 +65,9 @@ remote_port: 45001
 tun_name: mpq1
 tun_cidr: 10.200.1.1/30
 log_level: info
+tls_ca_file: /etc/mpquic/tls/ca.crt
+tls_server_name: mpquic-server
+tls_insecure_skip_verify: false
 ```
 
 ## E) systemd unit template
@@ -136,6 +144,23 @@ Se vuoi bind dedicato, modifica `bind_ip` nei file server da `0.0.0.0` a IP spec
 Verifica:
 ```bash
 grep -R "bind_ip" /etc/mpquic/instances/*.yaml
+```
+
+### 4.1 Materiale TLS persistente (obbligatorio)
+
+#### Server
+```bash
+sudo /usr/local/lib/mpquic/generate_tls_certs.sh /etc/mpquic/tls mpquic-server 825
+sudo ls -l /etc/mpquic/tls
+```
+
+#### Client
+Copia `/etc/mpquic/tls/ca.crt` dal server al client in `/etc/mpquic/tls/ca.crt`.
+
+Verifica:
+```bash
+ls -l /etc/mpquic/tls/ca.crt
+grep -R "tls_" /etc/mpquic/instances/*.yaml
 ```
 
 ### 5. Bring-up iniziale 1 tunnel (POC minimo)
@@ -217,6 +242,7 @@ ip -br a | grep '^mpq'
 
 ## Note operative
 
-- Certificato TLS server è self-signed runtime (POC). In produzione sostituire con PKI stabile.
+- TLS ora usa file persistenti (`/etc/mpquic/tls/*`) e trust esplicito client.
+- `tls_insecure_skip_verify` deve restare `false` in ambienti operativi.
 - MTU default TUN impostata a `1300` per ridurre frammentazione su QUIC DATAGRAM.
 - Il bind `if:<ifname>` risolve l'IPv4 corrente dell'interfaccia (utile su WAN DHCP).

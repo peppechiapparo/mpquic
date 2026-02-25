@@ -2,17 +2,12 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
-	"math/big"
 	"net"
 	"os"
 	"os/signal"
@@ -26,13 +21,18 @@ import (
 )
 
 type Config struct {
-	Role       string `yaml:"role"`
-	BindIP     string `yaml:"bind_ip"`
-	RemoteAddr string `yaml:"remote_addr"`
-	RemotePort int    `yaml:"remote_port"`
-	TunName    string `yaml:"tun_name"`
-	TunCIDR    string `yaml:"tun_cidr"`
-	LogLevel   string `yaml:"log_level"`
+	Role                  string `yaml:"role"`
+	BindIP                string `yaml:"bind_ip"`
+	RemoteAddr            string `yaml:"remote_addr"`
+	RemotePort            int    `yaml:"remote_port"`
+	TunName               string `yaml:"tun_name"`
+	TunCIDR               string `yaml:"tun_cidr"`
+	LogLevel              string `yaml:"log_level"`
+	TLSCertFile           string `yaml:"tls_cert_file"`
+	TLSKeyFile            string `yaml:"tls_key_file"`
+	TLSCAFile             string `yaml:"tls_ca_file"`
+	TLSServerName         string `yaml:"tls_server_name"`
+	TLSInsecureSkipVerify bool   `yaml:"tls_insecure_skip_verify"`
 }
 
 type datagramConn interface {
@@ -134,6 +134,19 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.Role == "client" && cfg.RemoteAddr == "" {
 		return nil, fmt.Errorf("remote_addr required for client")
 	}
+	if cfg.Role == "server" {
+		if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
+			return nil, fmt.Errorf("tls_cert_file and tls_key_file required for server")
+		}
+	}
+	if cfg.Role == "client" {
+		if !cfg.TLSInsecureSkipVerify && cfg.TLSCAFile == "" {
+			return nil, fmt.Errorf("tls_ca_file required for client when tls_insecure_skip_verify=false")
+		}
+		if cfg.TLSServerName == "" {
+			cfg.TLSServerName = "mpquic-server"
+		}
+	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
@@ -145,9 +158,13 @@ func runServer(ctx context.Context, cfg *Config, logger *Logger) error {
 	if err != nil {
 		return err
 	}
+	tlsConf, err := loadServerTLSConfig(cfg)
+	if err != nil {
+		return err
+	}
 	listenAddr := net.JoinHostPort(bindIP, fmt.Sprintf("%d", cfg.RemotePort))
 	logger.Infof("server listen=%s tun=%s", listenAddr, cfg.TunName)
-	listener, err := quic.ListenAddr(listenAddr, generateTLSConfig(), &quic.Config{
+	listener, err := quic.ListenAddr(listenAddr, tlsConf, &quic.Config{
 		EnableDatagrams: true,
 		KeepAlivePeriod: 15 * time.Second,
 		MaxIdleTimeout:  60 * time.Second,
@@ -203,12 +220,13 @@ func runClientOnce(ctx context.Context, cfg *Config, logger *Logger) error {
 	if err != nil {
 		return err
 	}
+	tlsConf, err := loadClientTLSConfig(cfg)
+	if err != nil {
+		return err
+	}
 
 	transport := quic.Transport{Conn: udpConn}
-	conn, err := transport.Dial(ctx, remoteUDP, &tls.Config{
-		InsecureSkipVerify: true,
-		NextProtos:         []string{"mpquic-ip"},
-	}, &quic.Config{
+	conn, err := transport.Dial(ctx, remoteUDP, tlsConf, &quic.Config{
 		EnableDatagrams: true,
 		KeepAlivePeriod: 15 * time.Second,
 		MaxIdleTimeout:  60 * time.Second,
@@ -300,31 +318,35 @@ func resolveBindIP(value string) (string, error) {
 	return value, nil
 }
 
-func generateTLSConfig() *tls.Config {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+func loadServerTLSConfig(cfg *Config) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	tmpl := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{CommonName: "mpquic"},
-		NotBefore: time.Now().Add(-1 * time.Hour),
-		NotAfter:  time.Now().Add(3650 * 24 * time.Hour),
-		KeyUsage:  x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{
-			x509.ExtKeyUsageServerAuth,
-		},
-		BasicConstraintsValid: true,
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		NextProtos:   []string{"mpquic-ip"},
+		MinVersion:   tls.VersionTLS13,
+	}, nil
+}
+
+func loadClientTLSConfig(cfg *Config) (*tls.Config, error) {
+	tlsConf := &tls.Config{
+		InsecureSkipVerify: cfg.TLSInsecureSkipVerify,
+		ServerName:         cfg.TLSServerName,
+		NextProtos:         []string{"mpquic-ip"},
+		MinVersion:         tls.VersionTLS13,
 	}
-	certDER, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
-	if err != nil {
-		panic(err)
+	if cfg.TLSCAFile != "" {
+		caPEM, err := os.ReadFile(cfg.TLSCAFile)
+		if err != nil {
+			return nil, err
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("failed loading tls_ca_file: %s", cfg.TLSCAFile)
+		}
+		tlsConf.RootCAs = roots
 	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		panic(err)
-	}
-	return &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"mpquic-ip"}}
+	return tlsConf, nil
 }

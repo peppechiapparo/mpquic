@@ -12,9 +12,11 @@ fi
 install -d /usr/local/bin
 install -d /usr/local/lib/mpquic
 install -d /etc/mpquic/instances
+install -d /etc/mpquic/tls
 
 install -m 0755 "$ROOT_DIR/bin/mpquic" /usr/local/bin/mpquic
 install -m 0755 "$ROOT_DIR/scripts/ensure_tun.sh" /usr/local/lib/mpquic/ensure_tun.sh
+install -m 0755 "$ROOT_DIR/scripts/generate_tls_certs.sh" /usr/local/lib/mpquic/generate_tls_certs.sh
 install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic@.service" /etc/systemd/system/mpquic@.service
 
 for i in 1 2 3 4 5 6; do
