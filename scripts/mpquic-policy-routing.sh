@@ -63,11 +63,27 @@ gw_for_dev() {
 remote_ip_for_idx() {
   local idx="$1"
   local n=$((idx+1))
-  local cfg="/etc/mpquic/instances/${n}.yaml"
   local ip=""
-  if [ -r "$cfg" ]; then
-    ip="$(awk -F': *' '/^remote_addr:/{print $2}' "$cfg" | tr -d '"' | tail -n 1)"
+  local cfg_runtime="/run/mpquic/${n}.yaml"
+  local cfg_template="/etc/mpquic/instances/${n}.yaml.tpl"
+  local cfg_legacy="/etc/mpquic/instances/${n}.yaml"
+
+  if [ -r "$cfg_runtime" ]; then
+    ip="$(awk -F': *' '/^remote_addr:/{print $2}' "$cfg_runtime" | tr -d '"' | tail -n 1)"
   fi
+
+  if [ -z "$ip" ] && [ -r "$cfg_template" ]; then
+    ip="$(awk -F': *' '/^remote_addr:/{print $2}' "$cfg_template" | tr -d '"' | tail -n 1)"
+  fi
+
+  if [ -z "$ip" ] && [ -r "$cfg_legacy" ]; then
+    ip="$(awk -F': *' '/^remote_addr:/{print $2}' "$cfg_legacy" | tr -d '"' | tail -n 1)"
+  fi
+
+  if [ "$ip" = "VPS_PUBLIC_IP" ] && [ -r /etc/mpquic/global.env ]; then
+    ip="$(awk -F= '/^VPS_PUBLIC_IP=/{print $2}' /etc/mpquic/global.env | tail -n 1)"
+  fi
+
   echo "$ip"
 }
 
