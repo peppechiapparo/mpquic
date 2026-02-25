@@ -28,6 +28,9 @@ install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-server-watchdog.service" /etc/s
 install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-server-watchdog.timer" /etc/systemd/system/mpquic-server-watchdog.timer
 
 if [[ "$ROLE" == "client" ]]; then
+  install -m 0755 "$ROOT_DIR/scripts/mpquic-policy-routing.sh" /usr/local/sbin/mpquic-policy-routing.sh
+  install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-routing.service" /etc/systemd/system/mpquic-routing.service
+
   install -d /etc/network/if-up.d /etc/network/if-post-down.d
   install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-ifupdown-hook" /etc/network/if-up.d/mpquic-auto
   install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-ifupdown-hook" /etc/network/if-post-down.d/mpquic-auto
@@ -53,6 +56,7 @@ for i in 1 2 3 4 5 6; do
   systemctl enable mpquic@"$i".service
 done
 if [[ "$ROLE" == "client" ]]; then
+  systemctl enable --now mpquic-routing.service
   systemctl enable --now mpquic-watchdog.timer
   systemctl disable --now mpquic-server-watchdog.timer >/dev/null 2>&1 || true
 else
