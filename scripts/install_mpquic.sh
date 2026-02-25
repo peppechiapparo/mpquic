@@ -42,6 +42,12 @@ if [[ ! -f /etc/mpquic/global.env ]]; then
   install -m 0644 "$ROOT_DIR/deploy/config/global.env" /etc/mpquic/global.env
 fi
 
+if [[ "$ROLE" == "server" ]]; then
+  if [[ ! -s /etc/mpquic/tls/server.crt || ! -s /etc/mpquic/tls/server.key || ! -s /etc/mpquic/tls/ca.crt ]]; then
+    /usr/local/lib/mpquic/generate_tls_certs.sh /etc/mpquic/tls mpquic-server 825
+  fi
+fi
+
 systemctl daemon-reload
 for i in 1 2 3 4 5 6; do
   systemctl enable mpquic@"$i".service
