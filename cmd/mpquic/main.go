@@ -158,6 +158,12 @@ func runServer(ctx context.Context, cfg *Config, logger *Logger) error {
 	if err != nil {
 		return err
 	}
+	tun, err := water.New(water.Config{DeviceType: water.TUN, PlatformSpecificParams: water.PlatformSpecificParams{Name: cfg.TunName}})
+	if err != nil {
+		return err
+	}
+	defer tun.Close()
+
 	tlsConf, err := loadServerTLSConfig(cfg)
 	if err != nil {
 		return err
@@ -183,7 +189,7 @@ func runServer(ctx context.Context, cfg *Config, logger *Logger) error {
 			return err
 		}
 		logger.Infof("accepted remote=%s", conn.RemoteAddr())
-		if err := runTunnel(ctx, cfg, conn, logger); err != nil {
+		if err := runTunnelWithTUN(ctx, conn, tun, logger); err != nil {
 			logger.Errorf("tunnel closed: %v", err)
 		}
 	}
@@ -246,6 +252,11 @@ func runTunnel(ctx context.Context, cfg *Config, conn datagramConn, logger *Logg
 		return err
 	}
 	defer tun.Close()
+
+	return runTunnelWithTUN(ctx, conn, tun, logger)
+}
+
+func runTunnelWithTUN(ctx context.Context, conn datagramConn, tun *water.Interface, logger *Logger) error {
 
 	errCh := make(chan error, 1)
 	go func() {
