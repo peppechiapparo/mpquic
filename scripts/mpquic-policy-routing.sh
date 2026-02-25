@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LAN_SUBNETS=(
+  "172.16.1.0/30"
+  "172.16.2.0/30"
+  "172.16.3.0/30"
+  "172.16.4.0/30"
+  "172.16.5.0/30"
+  "172.16.6.0/30"
+)
+
+WAN_DEVS=(
+  "enp7s3"
+  "enp7s4"
+  "enp7s5"
+  "enp7s6"
+  "enp7s7"
+  "enp7s8"
+)
+
+TUN_DEVS=(
+  "mpq1"
+  "mpq2"
+  "mpq3"
+  "mpq4"
+  "mpq5"
+  "mpq6"
+)
+
+WAN_TABLES=("100" "101" "102" "103" "104" "105")
+RULE_PRIOS=("1001" "1002" "1003" "1004" "1005" "1006")
+
+MGMT_NETS=("10.10.10.0/24" "10.10.11.0/24")
+MGMT_DEVS=("enp6s19" "enp6s18")
+
+TRANSIT_SUPERNET="172.16.0.0/16"
+TRANSIT_DEV="enp6s20"
+
+WAIT_SECS=2
+
+have_ipv4() {
+  ip -4 addr show dev "$1" 2>/dev/null | grep -q "inet "
+}
+
+have_tun_up() {
+  ip link show dev "$1" 2>/dev/null | grep -q "UP"
+}
+
+gw_for_dev() {
+  local dev="$1"
+  local lease="/var/lib/dhcp/dhclient.${dev}.leases"
+  local gw=""
+  if [ -r "$lease" ]; then
+    gw="$(awk '/option routers /{gsub(";","",$3); print $3}' "$lease" | tail -n 1)"
+  fi
+  if [ -z "$gw" ]; then
+    gw="$(ip -4 route show dev "$dev" default 2>/dev/null | awk '/default via/{print $3}' | tail -n 1)"
+  fi
+  echo "$gw"
+}
+
+remote_ip_for_idx() {
+  local idx="$1"
+  local n=$((idx+1))
+  local cfg="/etc/mpquic/instances/${n}.yaml"
+  local ip=""
+  if [ -r "$cfg" ]; then
+    ip="$(awk -F': *' '/^remote_addr:/{print $2}' "$cfg" | tr -d '"' | tail -n 1)"
+  fi
+  echo "$ip"
+}
+
+is_ipv4_lit() {
+  [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+}
+
+safe_ip() { "$@" 2>/dev/null || true; }
+
+sleep "$WAIT_SECS"
+
+for idx in $(seq 0 5); do
+  safe_ip ip rule del from "${LAN_SUBNETS[$idx]}" priority "${RULE_PRIOS[$idx]}"
+done
+
+for idx in $(seq 0 5); do
+  table="${WAN_TABLES[$idx]}"
+  dev="${WAN_DEVS[$idx]}"
+  tun="${TUN_DEVS[$idx]}"
+  subnet="${LAN_SUBNETS[$idx]}"
+  prio="${RULE_PRIOS[$idx]}"
+
+  safe_ip ip route flush table "$table"
+
+  safe_ip ip route add "${MGMT_NETS[0]}" dev "${MGMT_DEVS[0]}" table "$table"
+  safe_ip ip route add "${MGMT_NETS[1]}" dev "${MGMT_DEVS[1]}" table "$table"
+  safe_ip ip route add "$TRANSIT_SUPERNET" dev "$TRANSIT_DEV" table "$table"
+
+  if have_ipv4 "$dev" && have_tun_up "$tun"; then
+    gw="$(gw_for_dev "$dev")"
+    rip="$(remote_ip_for_idx "$idx")"
+
+    if [ -n "$gw" ] && is_ipv4_lit "$rip"; then
+      safe_ip ip route add "${rip}/32" via "$gw" dev "$dev" table "$table"
+    fi
+
+    safe_ip ip route add default dev "$tun" table "$table"
+  else
+    safe_ip ip route add blackhole default table "$table"
+  fi
+
+  safe_ip ip rule add from "$subnet" lookup "$table" priority "$prio"
+done
+
+exit 0

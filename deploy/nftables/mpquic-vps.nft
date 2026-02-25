@@ -1,0 +1,45 @@
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+  chain input {
+    type filter hook input priority filter;
+    policy accept;
+  }
+
+  chain forward {
+    type filter hook forward priority filter;
+    policy drop;
+
+    ct state established,related accept
+
+    iifname "mpq1" oifname "eth0" accept
+    iifname "mpq2" oifname "eth0" accept
+    iifname "mpq3" oifname "eth0" accept
+    iifname "mpq4" oifname "eth0" accept
+    iifname "mpq5" oifname "eth0" accept
+    iifname "mpq6" oifname "eth0" accept
+
+    iifname "eth0" oifname "mpq1" ct state established,related accept
+    iifname "eth0" oifname "mpq2" ct state established,related accept
+    iifname "eth0" oifname "mpq3" ct state established,related accept
+    iifname "eth0" oifname "mpq4" ct state established,related accept
+    iifname "eth0" oifname "mpq5" ct state established,related accept
+    iifname "eth0" oifname "mpq6" ct state established,related accept
+  }
+}
+
+table ip nat {
+  chain postrouting {
+    type nat hook postrouting priority srcnat;
+    policy accept;
+
+    oifname "eth0" ip saddr 172.16.1.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.2.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.3.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.4.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.5.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.6.0/30 masquerade
+  }
+}

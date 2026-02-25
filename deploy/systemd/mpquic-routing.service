@@ -1,0 +1,12 @@
+[Unit]
+Description=MPQUIC client policy routing refresh
+After=network-online.target mpquic@1.service mpquic@2.service mpquic@3.service mpquic@4.service mpquic@5.service mpquic@6.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mpquic-policy-routing.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
