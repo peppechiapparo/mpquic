@@ -156,6 +156,27 @@ systemctl restart mpquic-watchdog.timer
 systemctl restart mpquic-watchdog.service
 ```
 
+## 3.5 Su VPS i tunnel restano down
+
+Check:
+```bash
+systemctl is-active mpquic-server-watchdog.timer
+systemctl status mpquic-server-watchdog.timer --no-pager
+journalctl -u mpquic-server-watchdog.service -n 50 --no-pager
+for i in 1 2 3 4 5 6; do
+  printf "@%s=" "$i"
+  systemctl is-active mpquic@$i.service || true
+done
+```
+
+Recovery:
+```bash
+for i in 1 2 3 4 5 6; do systemctl restart mpquic@$i.service; done
+systemctl restart mpquic-vps-routes.service
+systemctl restart mpquic-server-watchdog.timer
+systemctl restart mpquic-server-watchdog.service
+```
+
 ## 4) TLS debug
 
 ## 4.1 File certificati

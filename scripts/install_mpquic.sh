@@ -19,14 +19,19 @@ install -m 0755 "$ROOT_DIR/scripts/ensure_tun.sh" /usr/local/lib/mpquic/ensure_t
 install -m 0755 "$ROOT_DIR/scripts/render_config.sh" /usr/local/lib/mpquic/render_config.sh
 install -m 0755 "$ROOT_DIR/scripts/generate_tls_certs.sh" /usr/local/lib/mpquic/generate_tls_certs.sh
 install -m 0755 "$ROOT_DIR/scripts/mpquic-tunnel-watchdog.sh" /usr/local/lib/mpquic/mpquic-tunnel-watchdog.sh
+install -m 0755 "$ROOT_DIR/scripts/mpquic-server-watchdog.sh" /usr/local/lib/mpquic/mpquic-server-watchdog.sh
 install -m 0755 "$ROOT_DIR/scripts/mpquic-if-event.sh" /usr/local/lib/mpquic/mpquic-if-event.sh
 install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic@.service" /etc/systemd/system/mpquic@.service
 install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-watchdog.service" /etc/systemd/system/mpquic-watchdog.service
 install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-watchdog.timer" /etc/systemd/system/mpquic-watchdog.timer
+install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-server-watchdog.service" /etc/systemd/system/mpquic-server-watchdog.service
+install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-server-watchdog.timer" /etc/systemd/system/mpquic-server-watchdog.timer
 
-install -d /etc/network/if-up.d /etc/network/if-post-down.d
-install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-ifupdown-hook" /etc/network/if-up.d/mpquic-auto
-install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-ifupdown-hook" /etc/network/if-post-down.d/mpquic-auto
+if [[ "$ROLE" == "client" ]]; then
+  install -d /etc/network/if-up.d /etc/network/if-post-down.d
+  install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-ifupdown-hook" /etc/network/if-up.d/mpquic-auto
+  install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-ifupdown-hook" /etc/network/if-post-down.d/mpquic-auto
+fi
 
 for i in 1 2 3 4 5 6; do
   install -m 0644 "$ROOT_DIR/deploy/config/$ROLE/$i.yaml" "/etc/mpquic/instances/$i.yaml.tpl"
@@ -41,6 +46,12 @@ systemctl daemon-reload
 for i in 1 2 3 4 5 6; do
   systemctl enable mpquic@"$i".service
 done
-systemctl enable --now mpquic-watchdog.timer
+if [[ "$ROLE" == "client" ]]; then
+  systemctl enable --now mpquic-watchdog.timer
+  systemctl disable --now mpquic-server-watchdog.timer >/dev/null 2>&1 || true
+else
+  systemctl enable --now mpquic-server-watchdog.timer
+  systemctl disable --now mpquic-watchdog.timer >/dev/null 2>&1 || true
+fi
 
 echo "Installed role=$ROLE. Set VPS_PUBLIC_IP in /etc/mpquic/global.env and edit /etc/mpquic/instances/*.yaml.tpl if needed."

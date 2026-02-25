@@ -1,0 +1,11 @@
+[Unit]
+Description=Run MPQUIC server watchdog every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=mpquic-server-watchdog.service
+
+[Install]
+WantedBy=timers.target

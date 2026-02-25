@@ -106,9 +106,6 @@ tcpdump -ni enp7s8 udp port 45006
 ## 5) Auto-heal tunnel (watchdog + hook eventi interfaccia)
 
 Obiettivo:
-- se una WAN va giù, fermare il tunnel associato
-- se la WAN torna su, riavviare il tunnel associato
-- riallineare automaticamente policy routing
 
 Installazione (client):
 ```bash
@@ -127,6 +124,28 @@ Verifica:
 systemctl is-active mpquic-watchdog.timer
 systemctl status mpquic-watchdog.timer --no-pager
 journalctl -u mpquic-watchdog.service -n 20 --no-pager
+```
+
+## 6) VPS auto-heal tunnel (watchdog server)
+
+Obiettivo:
+- se un servizio `mpquic@X` lato VPS non è attivo, riavviarlo automaticamente
+- riallineare `mpquic-vps-routes.service`
+
+Installazione (VPS):
+```bash
+sudo install -m 0755 scripts/mpquic-server-watchdog.sh /usr/local/lib/mpquic/mpquic-server-watchdog.sh
+sudo install -m 0644 deploy/systemd/mpquic-server-watchdog.service /etc/systemd/system/mpquic-server-watchdog.service
+sudo install -m 0644 deploy/systemd/mpquic-server-watchdog.timer /etc/systemd/system/mpquic-server-watchdog.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now mpquic-server-watchdog.timer
+```
+
+Verifica:
+```bash
+systemctl is-active mpquic-server-watchdog.timer
+systemctl status mpquic-server-watchdog.timer --no-pager
+journalctl -u mpquic-server-watchdog.service -n 50 --no-pager
 ```
 
 ## 6) Restart completo tunnel dopo restart rete
