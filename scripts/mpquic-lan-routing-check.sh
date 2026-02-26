@@ -114,6 +114,13 @@ for idx in $IDX_LIST; do
   fi
 
   got="$(default_route_kind "$table")"
+
+  if [[ "$MODE" == "fix" && "$expected" == "tun" && "$got" == "missing" ]]; then
+    systemctl restart mpquic-routing.service || true
+    sleep 1
+    got="$(default_route_kind "$table")"
+  fi
+
   ok_rule=0
   ok_default=0
 
