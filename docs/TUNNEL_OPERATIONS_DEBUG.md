@@ -60,6 +60,13 @@ systemctl restart mpquic-vps-routes.service
 systemctl restart nftables
 ```
 
+Regola firewall obbligatoria su VPS (nftables input policy drop):
+```bash
+nft list chain inet filter input
+# deve esistere una riga equivalente a:
+# udp dport 45001-45006 accept
+```
+
 ## 2) Mapping e comportamento atteso
 
 - `LAN1 (172.16.1.0/30)` -> `mpq1` -> QUIC `udp/45001` su `enp7s3`
@@ -98,6 +105,7 @@ nft list ruleset | sed -n '1,220p'
 Controlla:
 - ritorno verso LAN su `mpqX` (non su `eth0`)
 - NAT attivo su `eth0` per subnet `172.16.x.0/30`
+- apertura UDP `45001-45006` nella chain `inet filter input` (altrimenti client in timeout continuo)
 
 ## 3.2 Messaggio `no ipv4 found on enp7sX`
 

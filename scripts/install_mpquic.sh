@@ -49,6 +49,18 @@ if [[ "$ROLE" == "server" ]]; then
   if [[ ! -s /etc/mpquic/tls/server.crt || ! -s /etc/mpquic/tls/server.key || ! -s /etc/mpquic/tls/ca.crt ]]; then
     /usr/local/lib/mpquic/generate_tls_certs.sh /etc/mpquic/tls mpquic-server 825
   fi
+
+  if command -v nft >/dev/null 2>&1; then
+    if nft list chain inet filter input >/dev/null 2>&1; then
+      if ! nft list chain inet filter input | grep -q 'udp dport 45001-45006 accept'; then
+        nft add rule inet filter input udp dport 45001-45006 accept
+      fi
+      if [[ -f /etc/nftables.conf ]]; then
+        nft list ruleset > /etc/nftables.conf
+      fi
+      systemctl restart nftables >/dev/null 2>&1 || true
+    fi
+  fi
 fi
 
 systemctl daemon-reload
