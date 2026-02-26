@@ -23,6 +23,10 @@
 - di conseguenza `mpquic@1..@3` non possono bindare su WAN1..WAN3
 - stato fase baseline: `3/6` tunnel realmente operativi
 
+### Nota operativa (25/02)
+- WAN1 e WAN2 sono temporaneamente senza modem collegato: il test DHCP/bring-up è pianificato a venerdì mattina.
+- Questo è considerato scenario reale di esercizio (modem unplug/offline): il sistema deve degradare in modo controllato (istanza WAN assente stop, istanze sane up).
+
 ## Roadmap aggiornata
 
 ## Fase 1 — Baseline 6 sessioni QUIC 1:1 (NO multipath) [in corso]
@@ -96,12 +100,17 @@ Evoluzione richiesta:
 
 ## Prossimo step operativo (immediato)
 
-1. Portare IPv4 su `enp7s3` (WAN1)
-2. Avviare e validare `mpquic@1`
-3. Implementare routing persistente `LAN1 -> mpq1`
+1. (Venerdì mattina) Portare IPv4 su `enp7s3` (WAN1) e `enp7s4` (WAN2) con modem collegati
+2. Avviare e validare `mpquic@1` e `mpquic@2`
+3. Implementare/validare routing persistente `LAN1 -> mpq1`
 4. Eseguire test con doppia evidenza:
    - forwarding LAN1 dentro `mpq1`
    - incapsulamento QUIC su `enp7s3:45001`
+
+5. Eseguire test resilienza “modem unplug”:
+  - scollegare una WAN attiva
+  - verificare stop automatico sola istanza associata
+  - verificare continuità delle altre istanze
 
 ## Comandi base di verifica
 

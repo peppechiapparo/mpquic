@@ -30,6 +30,7 @@ TUN_DEVS=(
 
 WAN_TABLES=("100" "101" "102" "103" "104" "105")
 RULE_PRIOS=("1001" "1002" "1003" "1004" "1005" "1006")
+SRC_RULE_PRIOS=("1101" "1102" "1103" "1104" "1105" "1106")
 
 MGMT_NETS=("10.10.10.0/24" "10.10.11.0/24")
 MGMT_DEVS=("enp6s19" "enp6s18")
@@ -38,13 +39,33 @@ TRANSIT_SUPERNET="172.16.0.0/16"
 TRANSIT_DEV="enp6s20"
 
 WAIT_SECS=2
+ENFORCE_WAN_SOURCE="${MPQUIC_ENFORCE_WAN_SOURCE:-0}"
 
 have_ipv4() {
   ip -4 addr show dev "$1" 2>/dev/null | grep -q "inet "
 }
 
+have_carrier() {
+  local dev="$1"
+  local carrier_file="/sys/class/net/${dev}/carrier"
+  if [[ -r "$carrier_file" ]]; then
+    [[ "$(cat "$carrier_file" 2>/dev/null || echo 0)" = "1" ]]
+    return
+  fi
+  ip link show dev "$dev" 2>/dev/null | grep -q "LOWER_UP"
+}
+
+wan_usable() {
+  local dev="$1"
+  have_ipv4 "$dev" && have_carrier "$dev"
+}
+
 have_tun_up() {
   ip link show dev "$1" 2>/dev/null | grep -q "UP"
+}
+
+ipv4_for_dev() {
+  ip -4 -o addr show dev "$1" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1
 }
 
 gw_for_dev() {
@@ -97,6 +118,7 @@ sleep "$WAIT_SECS"
 
 for idx in $(seq 0 5); do
   safe_ip ip rule del from "${LAN_SUBNETS[$idx]}" priority "${RULE_PRIOS[$idx]}"
+  safe_ip ip rule del priority "${SRC_RULE_PRIOS[$idx]}"
 done
 
 for idx in $(seq 0 5); do
@@ -105,6 +127,7 @@ for idx in $(seq 0 5); do
   tun="${TUN_DEVS[$idx]}"
   subnet="${LAN_SUBNETS[$idx]}"
   prio="${RULE_PRIOS[$idx]}"
+  src_prio="${SRC_RULE_PRIOS[$idx]}"
 
   safe_ip ip route flush table "$table"
 
@@ -112,7 +135,7 @@ for idx in $(seq 0 5); do
   safe_ip ip route add "${MGMT_NETS[1]}" dev "${MGMT_DEVS[1]}" table "$table"
   safe_ip ip route add "$TRANSIT_SUPERNET" dev "$TRANSIT_DEV" table "$table"
 
-  if have_ipv4 "$dev" && have_tun_up "$tun"; then
+  if wan_usable "$dev" && have_tun_up "$tun"; then
     gw="$(gw_for_dev "$dev")"
     rip="$(remote_ip_for_idx "$idx")"
 
@@ -126,6 +149,13 @@ for idx in $(seq 0 5); do
   fi
 
   safe_ip ip rule add from "$subnet" lookup "$table" priority "$prio"
+
+  if [ "$ENFORCE_WAN_SOURCE" = "1" ]; then
+    src_ip="$(ipv4_for_dev "$dev")"
+    if [ -n "$src_ip" ]; then
+      safe_ip ip rule add from "${src_ip}/32" lookup "$table" priority "$src_prio"
+    fi
+  fi
 done
 
 exit 0

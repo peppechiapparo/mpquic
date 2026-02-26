@@ -8,6 +8,21 @@ have_ipv4() {
   ip -4 addr show dev "$1" 2>/dev/null | grep -q "inet "
 }
 
+have_carrier() {
+  local dev="$1"
+  local carrier_file="/sys/class/net/${dev}/carrier"
+  if [[ -r "$carrier_file" ]]; then
+    [[ "$(cat "$carrier_file" 2>/dev/null || echo 0)" = "1" ]]
+    return
+  fi
+  ip link show dev "$dev" 2>/dev/null | grep -q "LOWER_UP"
+}
+
+wan_usable() {
+  local dev="$1"
+  have_ipv4 "$dev" && have_carrier "$dev"
+}
+
 tun_healthy() {
   local inst="$1"
   local env_file="/etc/mpquic/instances/${inst}.env"
@@ -39,7 +54,7 @@ for idx in "${!WAN_DEVS[@]}"; do
   inst="${INSTANCES[$idx]}"
   svc="mpquic@${inst}.service"
 
-  if have_ipv4 "$dev"; then
+  if wan_usable "$dev"; then
     if ! systemctl is-active --quiet "$svc"; then
       systemctl restart "$svc" || true
       changed=1
