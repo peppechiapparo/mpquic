@@ -101,6 +101,14 @@ Gap tecnici residui Fase 4:
 
 Track diagnostica stabilità (in parallelo):
 - raccolta long-running (`mpquic-long-diagnostics.sh`) su client/server per correlare eventi crash/flap con stato path, routing e journal.
+- parser post-mortem (`mpquic-postmortem.sh`) per timeline e contatori aggregati client/server.
+
+Stato sintetico roadmap (26/02):
+- Fase 1: parziale (operatività reale su subset WAN attive)
+- Fase 2: in progresso (routing/checking LAN->tunnel automatizzato)
+- Fase 3: non completata end-to-end su tutte le WAN
+- Fase 4: Step 1 completato sperimentale, Step 2 avviato (policy statiche)
+- Fase 5: hardening TLS in progresso (SAN + trust allineati)
 
 ## Fase 5 — Sicurezza TLS hardening
 Obiettivo: canale cifrato con gestione certificati persistente.
@@ -117,7 +125,7 @@ Evoluzione richiesta:
 ## Prossimo step operativo (immediato)
 
 1. Stabilizzare test multipath senza contesa con `mpquic@4/@5/@6` (sessione dedicata di test o finestre controllate)
-2. Implementare prima versione policy engine cross-sessione (regole statiche per classi traffico)
+2. Estendere policy engine oltre static path-only: mapping classi traffico -> policy (`critical|bulk|default`)
 3. Aggiungere metriche RTT/loss per path e reporting strutturato
 4. Validare scenario modem unplug su path multipath:
   - down di una WAN attiva

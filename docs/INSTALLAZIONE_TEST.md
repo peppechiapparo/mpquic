@@ -125,6 +125,19 @@ Output:
 ls -lh /var/log/mpquic-diag-*/
 ```
 
+Post-mortem automatico (dopo crash/flap):
+```bash
+sudo /usr/local/sbin/mpquic-postmortem.sh \
+	/var/log/mpquic-diag-client-<timestamp> \
+	/var/log/mpquic-diag-server-<timestamp> \
+	/tmp/mpquic-postmortem.txt
+```
+
+Uso rapido (ultime cartelle disponibili):
+```bash
+sudo /usr/local/sbin/mpquic-postmortem.sh > /tmp/mpquic-postmortem-latest.txt
+```
+
 ## 9) Persistenza al reboot
 ```bash
 sudo reboot
