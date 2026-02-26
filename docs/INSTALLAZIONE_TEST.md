@@ -117,3 +117,41 @@ Dopo reboot:
 for i in 1 2 3 4 5 6; do systemctl is-enabled mpquic@$i.service; systemctl is-active mpquic@$i.service; done
 ip -br a | grep '^mpq'
 ```
+
+## 10) Checklist roadmap (temporanea, da rimuovere a completamento)
+
+### 10.1 VPS (sessione dedicata)
+```bash
+ssh vps-it-mpquic
+sudo /usr/local/sbin/mpquic-update.sh
+sudo /usr/local/sbin/mpquic-healthcheck.sh server fix
+for i in 1 2 3 4 5 6; do systemctl is-active mpquic@$i.service; done
+ss -lunp | egrep '4500[1-6]'
+exit
+```
+
+### 10.2 Client (sessione dedicata)
+```bash
+ssh mpquic
+sudo /usr/local/sbin/mpquic-update.sh
+ip -4 -br a show dev enp7s3
+ip -4 -br a show dev enp7s4
+sudo systemctl restart mpquic@1.service mpquic@2.service
+sudo /usr/local/sbin/mpquic-healthcheck.sh client fix
+sudo /usr/local/sbin/mpquic-lan-routing-check.sh fix 1
+for i in 1 2 3 4 5 6; do systemctl is-active mpquic@$i.service; done
+ip -br a | egrep '^mpq[1-6]'
+ping -I mpq1 -c 3 10.200.1.2
+ping -I mpq2 -c 3 10.200.2.2
+sudo tcpdump -ni enp7s3 udp port 45001 -c 20
+exit
+```
+
+### 10.3 Fasi successive immediate (dopo LAN1 validata)
+```bash
+# estensione a LAN2..LAN6 (stessa logica Fase 3)
+sudo /usr/local/sbin/mpquic-lan-routing-check.sh check all
+
+# test resilienza modem unplug
+sudo /usr/local/sbin/mpquic-healthcheck.sh client check
+```

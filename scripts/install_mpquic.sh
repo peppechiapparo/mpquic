@@ -24,6 +24,7 @@ install -m 0755 "$ROOT_DIR/scripts/mpquic-server-watchdog.sh" /usr/local/lib/mpq
 install -m 0755 "$ROOT_DIR/scripts/mpquic-if-event.sh" /usr/local/lib/mpquic/mpquic-if-event.sh
 install -m 0755 "$ROOT_DIR/scripts/mpquic-healthcheck.sh" /usr/local/sbin/mpquic-healthcheck.sh
 install -m 0755 "$ROOT_DIR/scripts/mpquic-update.sh" /usr/local/sbin/mpquic-update.sh
+install -m 0755 "$ROOT_DIR/scripts/mpquic-lan-routing-check.sh" /usr/local/sbin/mpquic-lan-routing-check.sh
 install -m 0755 "$ROOT_DIR/scripts/mpquic-vps-routes.sh" /usr/local/sbin/mpquic-vps-routes.sh
 install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic@.service" /etc/systemd/system/mpquic@.service
 install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-watchdog.service" /etc/systemd/system/mpquic-watchdog.service
