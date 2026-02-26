@@ -108,6 +108,23 @@ Check + auto-fix lato server:
 sudo /usr/local/sbin/mpquic-healthcheck.sh server fix
 ```
 
+Diagnostica lunga (cattura eventi intermittenti/crash):
+
+Client:
+```bash
+sudo /usr/local/sbin/mpquic-long-diagnostics.sh client 21600 20
+```
+
+Server:
+```bash
+sudo /usr/local/sbin/mpquic-long-diagnostics.sh server 21600 20
+```
+
+Output:
+```bash
+ls -lh /var/log/mpquic-diag-*/
+```
+
 ## 9) Persistenza al reboot
 ```bash
 sudo reboot

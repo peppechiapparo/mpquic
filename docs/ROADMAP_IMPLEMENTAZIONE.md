@@ -78,6 +78,7 @@ Stato avanzamento (26/02):
 - Backward compatibility mantenuta: configurazioni single-path esistenti invariate.
 - Aggiunta degradazione controllata: il multipath parte con subset path attivi se almeno un path è disponibile.
 - Aggiunta telemetria path-level base su log runtime (`path telemetry ...`).
+- Avviata prima versione policy engine statico (`multipath_policy`: `priority|failover|balanced`).
 - TLS allineato a Go moderno: certificato server con SAN e trust CA esplicito lato client.
 
 Capacità target (da documenti fornitore):
@@ -89,14 +90,17 @@ Capacità target (da documenti fornitore):
 
 Passi:
 1. introdurre sessione logica multipath con scheduler path-aware (completato, sperimentale)
-2. aggiungere orchestrazione cross-sessione (policy engine) (in corso)
+2. aggiungere orchestrazione cross-sessione (policy engine) (in corso: policy statiche path-level disponibili)
 3. implementare telemetria path-level (RTT/loss/capacità) (in corso: baseline log counters disponibile)
 4. validare su scenari LEO variabili (handover/jitter)
 
 Gap tecnici residui Fase 4:
-- QoS applicativa per classi traffico non ancora implementata (oggi tuning via `priority/weight`).
+- QoS applicativa per classi traffico non ancora implementata (oggi tuning via `priority/weight` e `multipath_policy`).
 - Duplication mission-critical non ancora implementata.
 - Metriche RTT/loss/capacità non ancora persistite/esposte via endpoint strutturato.
+
+Track diagnostica stabilità (in parallelo):
+- raccolta long-running (`mpquic-long-diagnostics.sh`) su client/server per correlare eventi crash/flap con stato path, routing e journal.
 
 ## Fase 5 — Sicurezza TLS hardening
 Obiettivo: canale cifrato con gestione certificati persistente.

@@ -76,6 +76,11 @@ La sessione multipath parte se almeno un path è up. Se uno o più path sono non
 - `priority`: priorità relativa (valore più basso = path più preferito)
 - `weight`: peso di preferenza (valore più alto = lieve favore in selezione)
 
+### Policy multipath (`multipath_policy`)
+- `priority` (default): bilancia priorità/peso/penalità errori
+- `failover`: usa preferenzialmente il path con priorità più alta (valore numerico più basso), con fallback sui successivi
+- `balanced`: aumenta l'effetto del `weight` per distribuire di più sui path a peso alto
+
 ### Limiti min/max path
 - minimo configurabile: 1 path
 - minimo operativo: almeno 1 path inizialmente attivo

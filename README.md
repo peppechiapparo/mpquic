@@ -48,6 +48,7 @@ Ogni YAML contiene:
 - `remote_addr`
 - `remote_port`
 - `multipath_enabled` (client, opzionale)
+- `multipath_policy` (client, opzionale: `priority|failover|balanced`)
 - `multipath_paths` (client, opzionale)
 - `tun_name`
 - `tun_cidr`
@@ -78,6 +79,7 @@ Esempio multipath client (single logical tunnel):
 ```yaml
 role: client
 multipath_enabled: true
+multipath_policy: priority
 multipath_paths:
   - name: wan3
     bind_ip: if:enp7s5
@@ -107,6 +109,11 @@ Semantica campi:
 - `priority`: priorità di selezione (più basso = più preferito)
 - `weight`: peso relativo (più alto = più preferito a parità di contesto)
 
+Policy disponibili (`multipath_policy`):
+- `priority` (default): path-aware classico con priorità + peso + penalità fail
+- `failover`: privilegia strettamente il path con `priority` più bassa
+- `balanced`: favorisce maggiormente il `weight` a parità di priorità
+
 Limiti:
 - minimo configurabile: 1 path
 - la sessione parte se almeno 1 path è up
@@ -128,6 +135,25 @@ Oggi il tuning disponibile è path-aware:
 Verifica runtime:
 - cerca in log `path telemetry ...` per stato/counter per path
 - cerca `path up`, `path down`, `path recovered` per il lifecycle
+
+## D3) Diagnostica lunga (crash analysis)
+
+Per catturare eventi intermittenti durante ore di esercizio:
+
+Client:
+```bash
+sudo /usr/local/sbin/mpquic-long-diagnostics.sh client 21600 20
+```
+
+Server:
+```bash
+sudo /usr/local/sbin/mpquic-long-diagnostics.sh server 21600 20
+```
+
+Output in `/var/log/mpquic-diag-<role>-<timestamp>/` con:
+- `journal-follow.log`
+- `snapshots.log`
+- `startup.txt`
 
 ## E) systemd unit template
 

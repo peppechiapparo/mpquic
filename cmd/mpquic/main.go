@@ -27,6 +27,7 @@ type Config struct {
 	RemoteAddr            string                `yaml:"remote_addr"`
 	RemotePort            int                   `yaml:"remote_port"`
 	MultipathEnabled      bool                  `yaml:"multipath_enabled"`
+	MultipathPolicy       string                `yaml:"multipath_policy"`
 	MultipathPaths        []MultipathPathConfig `yaml:"multipath_paths"`
 	TunName               string                `yaml:"tun_name"`
 	TunCIDR               string                `yaml:"tun_cidr"`
@@ -169,6 +170,13 @@ func loadConfig(path string) (*Config, error) {
 		}
 	}
 	if cfg.Role == "client" && cfg.MultipathEnabled {
+		cfg.MultipathPolicy = strings.ToLower(strings.TrimSpace(cfg.MultipathPolicy))
+		if cfg.MultipathPolicy == "" {
+			cfg.MultipathPolicy = "priority"
+		}
+		if cfg.MultipathPolicy != "priority" && cfg.MultipathPolicy != "failover" && cfg.MultipathPolicy != "balanced" {
+			return nil, fmt.Errorf("multipath_policy must be one of: priority, failover, balanced")
+		}
 		if len(cfg.MultipathPaths) == 0 {
 			return nil, fmt.Errorf("multipath_paths required when multipath_enabled=true")
 		}
@@ -353,7 +361,7 @@ func runClientOnceMultipath(ctx context.Context, cfg *Config, logger *Logger) er
 	}
 	defer mpConn.closeAll(0, "shutdown")
 
-	logger.Infof("connected multipath paths=%d tun=%s", len(cfg.MultipathPaths), cfg.TunName)
+	logger.Infof("connected multipath paths=%d policy=%s tun=%s", len(cfg.MultipathPaths), cfg.MultipathPolicy, cfg.TunName)
 	return runTunnel(ctx, cfg, mpConn, logger)
 }
 
@@ -477,6 +485,10 @@ func (m *multipathConn) selectBestPath() (int, quic.Connection) {
 	bestIdx := -1
 	bestScore := int(^uint(0) >> 1)
 	start := m.rr % len(m.paths)
+	policy := m.cfg.MultipathPolicy
+	if policy == "" {
+		policy = "priority"
+	}
 
 	for i := 0; i < len(m.paths); i++ {
 		idx := (start + i) % len(m.paths)
@@ -487,10 +499,7 @@ func (m *multipathConn) selectBestPath() (int, quic.Connection) {
 		if now.Before(p.cooldownUntil) {
 			continue
 		}
-		score := p.cfg.Priority*1000 + p.consecutiveFails*100
-		if p.cfg.Weight > 1 {
-			score -= (p.cfg.Weight - 1) * 10
-		}
+		score := pathPolicyScore(policy, p)
 		if score < bestScore {
 			bestScore = score
 			bestIdx = idx
@@ -503,6 +512,28 @@ func (m *multipathConn) selectBestPath() (int, quic.Connection) {
 
 	m.rr = (bestIdx + 1) % len(m.paths)
 	return bestIdx, m.paths[bestIdx].conn
+}
+
+func pathPolicyScore(policy string, p *multipathPathState) int {
+	base := p.cfg.Priority * 1000
+	failPenalty := p.consecutiveFails * 100
+
+	switch policy {
+	case "failover":
+		return base + failPenalty
+	case "balanced":
+		weightBonus := 0
+		if p.cfg.Weight > 1 {
+			weightBonus = (p.cfg.Weight - 1) * 120
+		}
+		return base + failPenalty - weightBonus
+	default:
+		weightBonus := 0
+		if p.cfg.Weight > 1 {
+			weightBonus = (p.cfg.Weight - 1) * 10
+		}
+		return base + failPenalty - weightBonus
+	}
 }
 
 func (m *multipathConn) markTxSuccess(idx int) {
