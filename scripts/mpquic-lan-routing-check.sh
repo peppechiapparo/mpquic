@@ -74,6 +74,23 @@ default_route_kind() {
   echo "missing"
 }
 
+resolve_default_kind() {
+  local table="$1"
+  local expected="$2"
+  local got
+  local tries
+
+  got="$(default_route_kind "$table")"
+  if [[ "$expected" == "tun" && "$got" == "missing" ]]; then
+    for tries in 1 2 3; do
+      sleep 1
+      got="$(default_route_kind "$table")"
+      [[ "$got" != "missing" ]] && break
+    done
+  fi
+  echo "$got"
+}
+
 indexes() {
   if [[ "$TARGET" == "all" ]]; then
     echo "0 1 2 3 4 5"
@@ -113,12 +130,12 @@ for idx in $IDX_LIST; do
     expected="tun"
   fi
 
-  got="$(default_route_kind "$table")"
+  got="$(resolve_default_kind "$table" "$expected")"
 
   if [[ "$MODE" == "fix" && "$expected" == "tun" && "$got" == "missing" ]]; then
     systemctl restart mpquic-routing.service || true
     sleep 1
-    got="$(default_route_kind "$table")"
+    got="$(resolve_default_kind "$table" "$expected")"
   fi
 
   ok_rule=0
