@@ -19,7 +19,7 @@ Nel file applicativo client multipath:
 ```yaml
 role: client
 multipath_enabled: true
-dataplane_config_file: ./dataplane.yaml
+dataplane_config_file: /etc/mpquic/instances/dataplane.yaml
 ...
 ```
 
@@ -129,7 +129,7 @@ Le regole sono valutate in ordine; il primo match vince.
 ### Flusso consigliato
 1. orchestrator genera nuovo `dataplane.yaml`
 2. valida schema e riferimenti path lato control-plane
-3. distribuisce file sul nodo MPQUIC
+3. distribuisce file sul nodo MPQUIC in `/etc/mpquic/instances/dataplane.yaml`
 4. applica policy via Control API (`/dataplane/reload`) oppure restart controllato istanza
 5. verifica log runtime `class telemetry` e `path telemetry`
 
@@ -185,6 +185,90 @@ Sicurezza operativa:
 - non esporre la Control API su IP pubblici
 - usare sempre token Bearer quando possibile
 - limitare accesso con firewall locale/host policy
+
+## Come generare e usare il token (pratico)
+
+### 1) Genera token strong
+
+Opzione A (openssl):
+
+```bash
+TOKEN="$(openssl rand -hex 32)"
+echo "$TOKEN"
+```
+
+Opzione B (fallback senza openssl):
+
+```bash
+TOKEN="$(head -c 32 /dev/urandom | xxd -p -c 256)"
+echo "$TOKEN"
+```
+
+### 2) Configura token e bind API
+
+Nel file client multipath dell'istanza (es. `/etc/mpquic/instances/4.yaml.tpl`):
+
+```yaml
+control_api_listen: 127.0.0.1:19090
+control_api_auth_token: REPLACE_WITH_TOKEN
+```
+
+Poi restart istanza:
+
+```bash
+sudo systemctl restart mpquic@4.service
+```
+
+### 3) Chiamate API base
+
+```bash
+TOKEN="<token_generato>"
+BASE="http://127.0.0.1:19090"
+
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/healthz"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/dataplane"
+```
+
+### 4) Valida prima di applicare
+
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/yaml' \
+  --data-binary @/etc/mpquic/instances/dataplane.yaml \
+  "$BASE/dataplane/validate"
+```
+
+### 5) Applica policy runtime
+
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/yaml' \
+  --data-binary @/etc/mpquic/instances/dataplane.yaml \
+  "$BASE/dataplane/apply"
+```
+
+### 6) Reload da file dedicato
+
+Usa quando hai già aggiornato `dataplane_config_file` su disco:
+
+```bash
+curl -sS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  "$BASE/dataplane/reload"
+```
+
+### 7) Verifica post-apply
+
+```bash
+journalctl -u mpquic@4.service -n 200 --no-pager | egrep 'class telemetry|path telemetry|dataplane policy applied'
+```
+
+### Errori tipici
+- `401 unauthorized`: token errato/mancante.
+- `400 ...`: policy non valida (classe/path/DSCP/porte/CIDR).
+- timeout curl: API non attiva o bind diverso da `127.0.0.1:19090`.
 
 ### Convenzioni operative
 - tenere i nomi path stabili (`wan4`, `wan5`, `wan6`)

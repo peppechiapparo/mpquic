@@ -63,10 +63,15 @@ Per policy avanzate (`critical/default/bulk`, classifier L3/L4, duplication) son
 ### Modello consigliato: file dataplane dedicato
 Nel file applicativo client (es. `/etc/mpquic/instances/multipath.yaml.tpl`) aggiungi:
 ```yaml
-dataplane_config_file: ./dataplane.yaml
+dataplane_config_file: /etc/mpquic/instances/dataplane.yaml
 ```
 
-E crea `dataplane.yaml` nello stesso path del file applicativo:
+E crea/copia `dataplane.yaml` in path assoluto:
+```bash
+sudo install -m 0644 /opt/mpquic/deploy/config/client/dataplane.yaml /etc/mpquic/instances/dataplane.yaml
+```
+
+Contenuto esempio:
 ```yaml
 default_class: default
 classes:
@@ -109,10 +114,24 @@ control_api_listen: 127.0.0.1:19090
 control_api_auth_token: change-me
 ```
 
+Generazione token (consigliata):
+```bash
+TOKEN="$(openssl rand -hex 32)"
+echo "$TOKEN"
+```
+
+Sostituisci `change-me` con il token nel file YAML e riavvia istanza:
+```bash
+sudo systemctl restart mpquic@4.service
+```
+
 Esempio verifica:
 ```bash
-curl -sS -H 'Authorization: Bearer change-me' http://127.0.0.1:19090/healthz
-curl -sS -H 'Authorization: Bearer change-me' http://127.0.0.1:19090/dataplane
+TOKEN="<token_generato>"
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:19090/healthz
+curl -sS -H "Authorization: Bearer $TOKEN" http://127.0.0.1:19090/dataplane
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/yaml' --data-binary @/etc/mpquic/instances/dataplane.yaml http://127.0.0.1:19090/dataplane/validate
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/yaml' --data-binary @/etc/mpquic/instances/dataplane.yaml http://127.0.0.1:19090/dataplane/apply
 ```
 
 ### Verifica operativa
@@ -122,6 +141,31 @@ journalctl -u mpquic@4.service -n 200 --no-pager | egrep 'path telemetry|class t
 ```
 
 Per schema completo, pattern QoS e flusso orchestrator esterno: `docs/DATAPLANE_ORCHESTRATOR.md`.
+
+### Test automatico Control API + Load-balancing + Failover (mpq3/mpq4/mpq5)
+
+Script pronto:
+```bash
+sudo /usr/local/sbin/mpquic-controlapi-lb-failover-test.sh 4 vps-it-mpquic
+```
+
+Con trigger traffico da OpenWRT (`mwan3 use SL1/SL2/SL3`):
+```bash
+sudo /usr/local/sbin/mpquic-controlapi-lb-failover-test.sh 4 vps-it-mpquic openwrt-host
+```
+
+Cosa fa:
+1. backup config `4.yaml.tpl`
+2. applica config test multipath su path `wan3/wan4/wan5` con Control API locale
+3. verifica API (`/healthz`, `/dataplane`)
+4. misura distribuzione traffico su UDP `45003/45004/45005` (load-balancing)
+5. simula failover fermando `mpquic@4` lato VPS e rimisura il traffico
+6. riporta automaticamente la configurazione originale al termine
+
+Output:
+- `/tmp/mpquic-lb-capture-4.txt`
+- `/tmp/mpquic-failover-capture-4.txt`
+- riepilogo finale su stdout
 
 ## 6) Test incrementale: prima 1 tunnel
 ### Server

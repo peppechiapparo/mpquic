@@ -26,6 +26,7 @@ install -m 0755 "$ROOT_DIR/scripts/mpquic-healthcheck.sh" /usr/local/sbin/mpquic
 install -m 0755 "$ROOT_DIR/scripts/mpquic-update.sh" /usr/local/sbin/mpquic-update.sh
 install -m 0755 "$ROOT_DIR/scripts/mpquic-lan-routing-check.sh" /usr/local/sbin/mpquic-lan-routing-check.sh
 install -m 0755 "$ROOT_DIR/scripts/mpquic-multipath-smoke.sh" /usr/local/sbin/mpquic-multipath-smoke.sh
+install -m 0755 "$ROOT_DIR/scripts/mpquic-controlapi-lb-failover-test.sh" /usr/local/sbin/mpquic-controlapi-lb-failover-test.sh
 install -m 0755 "$ROOT_DIR/scripts/mpquic-long-diagnostics.sh" /usr/local/sbin/mpquic-long-diagnostics.sh
 install -m 0755 "$ROOT_DIR/scripts/mpquic-postmortem.sh" /usr/local/sbin/mpquic-postmortem.sh
 install -m 0755 "$ROOT_DIR/scripts/mpquic-postmortem-remote.sh" /usr/local/sbin/mpquic-postmortem-remote.sh

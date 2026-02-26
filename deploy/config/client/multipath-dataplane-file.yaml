@@ -1,7 +1,7 @@
 role: client
 multipath_enabled: true
 multipath_policy: priority
-dataplane_config_file: ./dataplane.yaml
+dataplane_config_file: /etc/mpquic/instances/dataplane.yaml
 control_api_listen: 127.0.0.1:19090
 control_api_auth_token: change-me
 multipath_paths:
