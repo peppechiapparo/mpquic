@@ -79,6 +79,11 @@ Stato avanzamento (26/02):
 - Aggiunta degradazione controllata: il multipath parte con subset path attivi se almeno un path è disponibile.
 - Aggiunta telemetria path-level base su log runtime (`path telemetry ...`).
 - Avviata prima versione policy engine statico (`multipath_policy`: `priority|failover|balanced`).
+- Implementato policy engine dataplane class-based:
+  - classifier L3/L4 (`protocol`, `src/dst_cidrs`, `src/dst_ports`, `dscp`)
+  - mapping classi (`critical|default|bulk`) -> policy scheduler
+  - supporto duplication per classi critiche
+  - configurazione sia inline (`dataplane`) sia via file separato (`dataplane_config_file`, consigliato)
 - TLS allineato a Go moderno: certificato server con SAN e trust CA esplicito lato client.
 
 Capacità target (da documenti fornitore):
@@ -90,13 +95,12 @@ Capacità target (da documenti fornitore):
 
 Passi:
 1. introdurre sessione logica multipath con scheduler path-aware (completato, sperimentale)
-2. aggiungere orchestrazione cross-sessione (policy engine) (in corso: policy statiche path-level disponibili)
+2. aggiungere orchestrazione cross-sessione (policy engine) (completato: policy engine dataplane class-based da config)
 3. implementare telemetria path-level (RTT/loss/capacità) (in corso: baseline log counters disponibile)
 4. validare su scenari LEO variabili (handover/jitter)
 
 Gap tecnici residui Fase 4:
-- QoS applicativa per classi traffico non ancora implementata (oggi tuning via `priority/weight` e `multipath_policy`).
-- Duplication mission-critical non ancora implementata.
+- API di controllo orchestrator non ancora implementata (oggi provisioning via YAML).
 - Metriche RTT/loss/capacità non ancora persistite/esposte via endpoint strutturato.
 
 Track diagnostica stabilità (in parallelo):
@@ -107,7 +111,7 @@ Stato sintetico roadmap (26/02):
 - Fase 1: parziale (operatività reale su subset WAN attive)
 - Fase 2: in progresso (routing/checking LAN->tunnel automatizzato)
 - Fase 3: non completata end-to-end su tutte le WAN
-- Fase 4: Step 1 completato sperimentale, Step 2 avviato (policy statiche)
+- Fase 4: Step 1 completato sperimentale, Step 2 completato (policy engine class-based)
 - Fase 5: hardening TLS in progresso (SAN + trust allineati)
 
 ## Fase 5 — Sicurezza TLS hardening
@@ -125,7 +129,8 @@ Evoluzione richiesta:
 ## Prossimo step operativo (immediato)
 
 1. Stabilizzare test multipath senza contesa con `mpquic@4/@5/@6` (sessione dedicata di test o finestre controllate)
-2. Estendere policy engine oltre static path-only: mapping classi traffico -> policy (`critical|bulk|default`)
+2. Aggiungere API di gestione policy per integrazione orchestrator esterno (load/validate/apply)
+  - riferimento configurazione: `docs/DATAPLANE_ORCHESTRATOR.md`
 3. Aggiungere metriche RTT/loss per path e reporting strutturato
 4. Validare scenario modem unplug su path multipath:
   - down di una WAN attiva

@@ -56,6 +56,60 @@ grep -R "remote_addr" /etc/mpquic/instances/*.yaml.tpl
 ### Server
 Opzionale: bind dedicato (`bind_ip`) al posto di `0.0.0.0`.
 
+## 5.1) Configurazione dataplane multipath (completa)
+
+Per policy avanzate (`critical/default/bulk`, classifier L3/L4, duplication) sono supportati due modelli:
+
+### Modello consigliato: file dataplane dedicato
+Nel file applicativo client (es. `/etc/mpquic/instances/multipath.yaml.tpl`) aggiungi:
+```yaml
+dataplane_config_file: ./dataplane.yaml
+```
+
+E crea `dataplane.yaml` nello stesso path del file applicativo:
+```yaml
+default_class: default
+classes:
+	default:
+		scheduler_policy: balanced
+	critical:
+		scheduler_policy: failover
+		preferred_paths: [wan4, wan5]
+		duplicate: true
+		duplicate_copies: 2
+	bulk:
+		scheduler_policy: balanced
+		excluded_paths: [wan4]
+classifiers:
+	- name: voip
+		class: critical
+		protocol: udp
+		dst_ports: ["5060", "10000-20000"]
+		dscp: [46]
+	- name: backup
+		class: bulk
+		protocol: tcp
+		dst_ports: ["5001-6000"]
+```
+
+### Modello alternativo: dataplane inline nello YAML applicativo
+Nel medesimo file YAML client, usa sezione `dataplane:` con la stessa struttura di cui sopra.
+
+### Precedenza di configurazione
+Se presenti entrambe:
+- `dataplane` inline
+- `dataplane_config_file`
+
+il file dedicato (`dataplane_config_file`) ha precedenza.
+
+### Verifica operativa
+Dopo riavvio istanza multipath, controlla:
+```bash
+journalctl -u mpquic@4.service -n 200 --no-pager | egrep 'path telemetry|class telemetry'
+```
+
+Per schema completo, pattern QoS e flusso orchestrator esterno: `docs/DATAPLANE_ORCHESTRATOR.md`.
+
 ## 6) Test incrementale: prima 1 tunnel
 ### Server
 ```bash

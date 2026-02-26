@@ -50,6 +50,8 @@ Ogni YAML contiene:
 - `multipath_enabled` (client, opzionale)
 - `multipath_policy` (client, opzionale: `priority|failover|balanced`)
 - `multipath_paths` (client, opzionale)
+- `dataplane_config_file` (client multipath, opzionale: file YAML policy engine dedicato)
+- `dataplane` (client multipath, opzionale: sezione inline alternativa a file dedicato)
 - `tun_name`
 - `tun_cidr`
 - `log_level`
@@ -125,15 +127,30 @@ Degradazione e recovery:
 
 ## D2) QoS attuale e tuning
 
-QoS applicativa completa (policy engine per classi traffico, duplication mission-critical) non è ancora implementata.
+Il policy engine dataplane è disponibile in runtime multipath e consente:
+- classificazione traffico L3/L4 (protocollo, CIDR src/dst, porte src/dst, DSCP)
+- mapping classe -> strategia scheduler (`priority|failover|balanced`)
+- vincoli per classe (`preferred_paths`, `excluded_paths`)
+- duplication per classe critica (`duplicate: true`, `duplicate_copies: 2..3`)
 
-Oggi il tuning disponibile è path-aware:
-- **failover**: `priority` distanti (es. 10,100,200), `weight: 1`
-- **bilanciamento leggero**: `priority` uguali, `weight` diversi (es. 3,2,1)
-- **backup costoso**: `priority` alta per path di riserva
+Classi tipiche consigliate:
+- `critical`: failover aggressivo + duplication (se richiesto)
+- `default`: bilanciamento generale
+- `bulk`: bilanciamento con esclusione path costosi
+
+Scelta consigliata (pulizia/orchestrazione futura):
+- mettere la policy in file separato con `dataplane_config_file`
+- mantenere nel file applicativo solo endpoint/path/TLS
+- usare `dataplane` inline solo per bootstrap rapido o ambienti piccoli
+
+Regola merge:
+- se sono presenti sia `dataplane` inline che `dataplane_config_file`, il file dedicato ha precedenza.
+
+Guida orchestrator/QoS completa: `docs/DATAPLANE_ORCHESTRATOR.md`.
 
 Verifica runtime:
 - cerca in log `path telemetry ...` per stato/counter per path
+- cerca in log `class telemetry ...` per contatori per classe (`tx_pkts/tx_err/tx_dups`)
 - cerca `path up`, `path down`, `path recovered` per il lifecycle
 
 ## D3) Diagnostica lunga (crash analysis)

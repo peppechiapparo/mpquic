@@ -112,13 +112,20 @@ Il runtime multipath emette periodicamente log telemetrici per ciascun path:
 
 Formato log: `path telemetry name=... state=... tx_pkts=...`.
 
+Il runtime emette anche telemetria per classe dataplane:
+- `class telemetry class=... tx_pkts=... tx_err=... tx_dups=...`
+
 ## QoS: stato reale e direzione roadmap
 
-QoS applicativa completa (policy engine per classi traffico, duplication per classi mission-critical) non è ancora implementata.
+QoS applicativa dataplane disponibile in runtime multipath:
+- classificazione L3/L4 per protocollo, CIDR src/dst, porte src/dst e DSCP
+- classi traffico con policy scheduler dedicate (`priority|failover|balanced`)
+- selezione path per classe con `preferred_paths` / `excluded_paths`
+- duplication per classi critiche (`duplicate` + `duplicate_copies`)
 
-Attualmente è disponibile QoS "di selezione path" attraverso:
-- `priority` (primario)
-- `weight` (fine tuning)
+Modalità di configurazione supportate:
+- `dataplane` inline nello YAML applicativo
+- `dataplane_config_file` separato (raccomandato per integrazione orchestrator)
 
 Per QoS L3/L2 avanzata si possono applicare policy Linux esterne (`tc`, queueing) sulle WAN fisiche.
 
@@ -135,5 +142,5 @@ Per QoS L3/L2 avanzata si possono applicare policy Linux esterne (`tc`, queueing
 
 ## Limiti deliberati (fase corrente)
 - Multipath in singola connessione QUIC disponibile in modalità sperimentale (scheduler path-aware con priorità/peso e fail-cooldown)
-- Nessuna logica di orchestrazione cross-sessione (policy engine QoS applicativa)
+- Nessun endpoint/API di controllo dinamico runtime (oggi policy caricata da YAML a startup)
 - TLS server self-signed runtime (POC)

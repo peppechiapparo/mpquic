@@ -1,0 +1,56 @@
+role: client
+multipath_enabled: true
+multipath_policy: priority
+multipath_paths:
+  - name: wan4
+    bind_ip: if:enp7s6
+    remote_addr: VPS_PUBLIC_IP
+    remote_port: 45004
+    priority: 10
+    weight: 2
+  - name: wan5
+    bind_ip: if:enp7s7
+    remote_addr: VPS_PUBLIC_IP
+    remote_port: 45005
+    priority: 20
+    weight: 2
+  - name: wan6
+    bind_ip: if:enp7s8
+    remote_addr: VPS_PUBLIC_IP
+    remote_port: 45006
+    priority: 30
+    weight: 1
+dataplane:
+  default_class: default
+  classes:
+    default:
+      scheduler_policy: balanced
+      preferred_paths: [wan4, wan5, wan6]
+    critical:
+      scheduler_policy: failover
+      preferred_paths: [wan4, wan5]
+      duplicate: true
+      duplicate_copies: 2
+    bulk:
+      scheduler_policy: balanced
+      excluded_paths: [wan4]
+  classifiers:
+    - name: voip-sip
+      class: critical
+      protocol: udp
+      dst_ports: ["5060", "10000-20000"]
+      dscp: [46]
+    - name: telemetry-control
+      class: critical
+      protocol: tcp
+      dst_ports: ["443", "8443"]
+    - name: backup-stream
+      class: bulk
+      protocol: tcp
+      dst_ports: ["5001-6000"]
+tun_name: mpqm
+tun_cidr: 10.201.0.1/30
+log_level: info
+tls_ca_file: /etc/mpquic/tls/ca.crt
+tls_server_name: mpquic-server
+tls_insecure_skip_verify: false

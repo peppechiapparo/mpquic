@@ -4,13 +4,18 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,6 +33,8 @@ type Config struct {
 	RemotePort            int                   `yaml:"remote_port"`
 	MultipathEnabled      bool                  `yaml:"multipath_enabled"`
 	MultipathPolicy       string                `yaml:"multipath_policy"`
+	DataplaneConfigFile   string                `yaml:"dataplane_config_file"`
+	Dataplane             DataplaneConfig       `yaml:"dataplane"`
 	MultipathPaths        []MultipathPathConfig `yaml:"multipath_paths"`
 	TunName               string                `yaml:"tun_name"`
 	TunCIDR               string                `yaml:"tun_cidr"`
@@ -46,6 +53,69 @@ type MultipathPathConfig struct {
 	RemotePort int    `yaml:"remote_port"`
 	Priority   int    `yaml:"priority"`
 	Weight     int    `yaml:"weight"`
+}
+
+type DataplaneConfig struct {
+	DefaultClass string                          `yaml:"default_class"`
+	Classes      map[string]DataplaneClassPolicy `yaml:"classes"`
+	Classifiers  []DataplaneClassifierRule       `yaml:"classifiers"`
+}
+
+type DataplaneClassPolicy struct {
+	SchedulerPolicy string   `yaml:"scheduler_policy"`
+	PreferredPaths  []string `yaml:"preferred_paths"`
+	ExcludedPaths   []string `yaml:"excluded_paths"`
+	Duplicate       bool     `yaml:"duplicate"`
+	DuplicateCopies int      `yaml:"duplicate_copies"`
+}
+
+type DataplaneClassifierRule struct {
+	Name      string   `yaml:"name"`
+	ClassName string   `yaml:"class"`
+	Protocol  string   `yaml:"protocol"`
+	SrcCIDRs  []string `yaml:"src_cidrs"`
+	DstCIDRs  []string `yaml:"dst_cidrs"`
+	SrcPorts  []string `yaml:"src_ports"`
+	DstPorts  []string `yaml:"dst_ports"`
+	DSCP      []int    `yaml:"dscp"`
+}
+
+type compiledDataplane struct {
+	defaultClass string
+	classes      map[string]DataplaneClassPolicy
+	classifiers  []compiledClassifierRule
+}
+
+type compiledClassifierRule struct {
+	name      string
+	className string
+	protocol  string
+	srcCIDRs  []netip.Prefix
+	dstCIDRs  []netip.Prefix
+	srcPorts  []portRange
+	dstPorts  []portRange
+	dscp      map[uint8]struct{}
+}
+
+type portRange struct {
+	from uint16
+	to   uint16
+}
+
+type packetMeta struct {
+	protocol string
+	srcAddr  netip.Addr
+	dstAddr  netip.Addr
+	srcPort  uint16
+	dstPort  uint16
+	hasPorts bool
+	dscp     uint8
+}
+
+type trafficClassCounters struct {
+	txPackets    uint64
+	txErrors     uint64
+	txDuplicates uint64
 }
 
 type multipathPathState struct {
@@ -74,6 +144,8 @@ type multipathConn struct {
 	rr      int
 	logger  *Logger
 	cfg     *Config
+	dataplane compiledDataplane
+	classTx   map[string]*trafficClassCounters
 	baseCtx context.Context
 }
 
@@ -198,6 +270,9 @@ func loadConfig(path string) (*Config, error) {
 				p.Weight = 1
 			}
 		}
+		if err := loadAndValidateDataplaneConfig(path, cfg); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.TunName == "" {
 		return nil, fmt.Errorf("tun_name required")
@@ -225,6 +300,157 @@ func loadConfig(path string) (*Config, error) {
 		cfg.LogLevel = "info"
 	}
 	return cfg, nil
+}
+
+func loadAndValidateDataplaneConfig(configPath string, cfg *Config) error {
+	dp := cfg.Dataplane
+
+	if cfg.DataplaneConfigFile != "" {
+		dpPath := cfg.DataplaneConfigFile
+		if !filepath.IsAbs(dpPath) {
+			dpPath = filepath.Join(filepath.Dir(configPath), dpPath)
+		}
+		b, err := os.ReadFile(dpPath)
+		if err != nil {
+			return fmt.Errorf("dataplane_config_file read failed: %w", err)
+		}
+		fileDP := DataplaneConfig{}
+		if err := yaml.Unmarshal(b, &fileDP); err != nil {
+			return fmt.Errorf("dataplane_config_file parse failed: %w", err)
+		}
+		dp = mergeDataplaneConfig(dp, fileDP)
+	}
+
+	normalizeDataplaneConfig(&dp, cfg.MultipathPolicy)
+	if err := validateDataplaneConfig(dp, cfg.MultipathPaths); err != nil {
+		return err
+	}
+	cfg.Dataplane = dp
+	return nil
+}
+
+func mergeDataplaneConfig(base DataplaneConfig, override DataplaneConfig) DataplaneConfig {
+	out := base
+	if strings.TrimSpace(override.DefaultClass) != "" {
+		out.DefaultClass = override.DefaultClass
+	}
+	if len(override.Classes) > 0 {
+		if out.Classes == nil {
+			out.Classes = make(map[string]DataplaneClassPolicy, len(override.Classes))
+		}
+		for className, policy := range override.Classes {
+			out.Classes[className] = policy
+		}
+	}
+	if len(override.Classifiers) > 0 {
+		out.Classifiers = override.Classifiers
+	}
+	return out
+}
+
+func normalizeDataplaneConfig(dp *DataplaneConfig, fallbackPolicy string) {
+	if fallbackPolicy == "" {
+		fallbackPolicy = "priority"
+	}
+	dp.DefaultClass = strings.ToLower(strings.TrimSpace(dp.DefaultClass))
+	if dp.DefaultClass == "" {
+		dp.DefaultClass = "default"
+	}
+
+	if dp.Classes == nil {
+		dp.Classes = map[string]DataplaneClassPolicy{}
+	}
+	if len(dp.Classes) == 0 {
+		dp.Classes[dp.DefaultClass] = DataplaneClassPolicy{SchedulerPolicy: fallbackPolicy}
+	}
+
+	normalizedClasses := make(map[string]DataplaneClassPolicy, len(dp.Classes))
+	for className, policy := range dp.Classes {
+		n := strings.ToLower(strings.TrimSpace(className))
+		if n == "" {
+			continue
+		}
+		policy.SchedulerPolicy = strings.ToLower(strings.TrimSpace(policy.SchedulerPolicy))
+		if policy.SchedulerPolicy == "" {
+			policy.SchedulerPolicy = fallbackPolicy
+		}
+		if policy.Duplicate && policy.DuplicateCopies < 2 {
+			policy.DuplicateCopies = 2
+		}
+		if policy.DuplicateCopies > 3 {
+			policy.DuplicateCopies = 3
+		}
+		normalizedClasses[n] = policy
+	}
+	dp.Classes = normalizedClasses
+
+	for i := range dp.Classifiers {
+		r := &dp.Classifiers[i]
+		r.Name = strings.TrimSpace(r.Name)
+		r.ClassName = strings.ToLower(strings.TrimSpace(r.ClassName))
+		r.Protocol = strings.ToLower(strings.TrimSpace(r.Protocol))
+	}
+}
+
+func validateDataplaneConfig(dp DataplaneConfig, paths []MultipathPathConfig) error {
+	if len(dp.Classes) == 0 {
+		return fmt.Errorf("dataplane.classes must not be empty")
+	}
+	if _, ok := dp.Classes[dp.DefaultClass]; !ok {
+		return fmt.Errorf("dataplane.default_class=%q not found in dataplane.classes", dp.DefaultClass)
+	}
+
+	pathSet := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		pathSet[p.Name] = struct{}{}
+	}
+
+	for className, policy := range dp.Classes {
+		if policy.SchedulerPolicy != "priority" && policy.SchedulerPolicy != "failover" && policy.SchedulerPolicy != "balanced" {
+			return fmt.Errorf("dataplane.classes[%s].scheduler_policy must be one of: priority, failover, balanced", className)
+		}
+		for _, name := range policy.PreferredPaths {
+			if _, ok := pathSet[name]; !ok {
+				return fmt.Errorf("dataplane.classes[%s].preferred_paths references unknown path: %s", className, name)
+			}
+		}
+		for _, name := range policy.ExcludedPaths {
+			if _, ok := pathSet[name]; !ok {
+				return fmt.Errorf("dataplane.classes[%s].excluded_paths references unknown path: %s", className, name)
+			}
+		}
+	}
+
+	for i, rule := range dp.Classifiers {
+		if rule.ClassName == "" {
+			return fmt.Errorf("dataplane.classifiers[%d].class required", i)
+		}
+		if _, ok := dp.Classes[rule.ClassName]; !ok {
+			return fmt.Errorf("dataplane.classifiers[%d].class references unknown class: %s", i, rule.ClassName)
+		}
+		if rule.Protocol != "" && rule.Protocol != "udp" && rule.Protocol != "tcp" && rule.Protocol != "icmp" && rule.Protocol != "icmpv6" {
+			return fmt.Errorf("dataplane.classifiers[%d].protocol invalid: %s", i, rule.Protocol)
+		}
+		if _, err := parseCIDRs(rule.SrcCIDRs); err != nil {
+			return fmt.Errorf("dataplane.classifiers[%d].src_cidrs invalid: %w", i, err)
+		}
+		if _, err := parseCIDRs(rule.DstCIDRs); err != nil {
+			return fmt.Errorf("dataplane.classifiers[%d].dst_cidrs invalid: %w", i, err)
+		}
+		if _, err := parsePortRanges(rule.SrcPorts); err != nil {
+			return fmt.Errorf("dataplane.classifiers[%d].src_ports invalid: %w", i, err)
+		}
+		if _, err := parsePortRanges(rule.DstPorts); err != nil {
+			return fmt.Errorf("dataplane.classifiers[%d].dst_ports invalid: %w", i, err)
+		}
+		for _, dscp := range rule.DSCP {
+			if dscp < 0 || dscp > 63 {
+				return fmt.Errorf("dataplane.classifiers[%d].dscp value out of range: %d", i, dscp)
+			}
+		}
+	}
+
+	return nil
 }
 
 func runServer(ctx context.Context, cfg *Config, logger *Logger) error {
@@ -366,12 +592,22 @@ func runClientOnceMultipath(ctx context.Context, cfg *Config, logger *Logger) er
 }
 
 func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multipathConn, error) {
+	dpRuntime, err := compileDataplaneConfig(cfg.Dataplane)
+	if err != nil {
+		return nil, err
+	}
+
 	mp := &multipathConn{
 		recvCh:  make(chan []byte, 512),
 		errCh:   make(chan error, 1),
 		logger:  logger,
 		cfg:     cfg,
+		dataplane: dpRuntime,
+		classTx: make(map[string]*trafficClassCounters),
 		baseCtx: ctx,
+	}
+	for className := range dpRuntime.classes {
+		mp.classTx[className] = &trafficClassCounters{}
 	}
 
 	aliveCount := 0
@@ -452,11 +688,18 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 }
 
 func (m *multipathConn) SendDatagram(pkt []byte) error {
+	className, classPolicy := m.resolvePacketClass(pkt)
+
+	if classPolicy.Duplicate {
+		return m.sendDuplicate(pkt, className, classPolicy)
+	}
+
 	deadline := time.Now().Add(1200 * time.Millisecond)
 	for {
-		idx, conn := m.selectBestPath()
+		idx, conn := m.selectBestPath(classPolicy, nil)
 		if idx < 0 || conn == nil {
 			if time.Now().After(deadline) {
+				m.markClassError(className)
 				return fmt.Errorf("multipath: no active path available")
 			}
 			time.Sleep(100 * time.Millisecond)
@@ -469,11 +712,55 @@ func (m *multipathConn) SendDatagram(pkt []byte) error {
 		}
 
 		m.markTxSuccess(idx)
+		m.markClassTx(className)
 		return nil
 	}
 }
 
-func (m *multipathConn) selectBestPath() (int, quic.Connection) {
+func (m *multipathConn) sendDuplicate(pkt []byte, className string, classPolicy DataplaneClassPolicy) error {
+	copies := classPolicy.DuplicateCopies
+	if copies < 2 {
+		copies = 2
+	}
+
+	skip := make(map[int]struct{}, copies)
+	sent := 0
+	deadline := time.Now().Add(1200 * time.Millisecond)
+
+	for sent < copies {
+		idx, conn := m.selectBestPath(classPolicy, skip)
+		if idx < 0 || conn == nil {
+			if sent > 0 || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(80 * time.Millisecond)
+			continue
+		}
+
+		if err := conn.SendDatagram(pkt); err != nil {
+			m.markTxError(idx, err)
+			skip[idx] = struct{}{}
+			continue
+		}
+
+		m.markTxSuccess(idx)
+		skip[idx] = struct{}{}
+		sent++
+	}
+
+	if sent == 0 {
+		m.markClassError(className)
+		return fmt.Errorf("multipath: no active path available for duplicated send")
+	}
+
+	m.markClassTx(className)
+	if sent > 1 {
+		m.markClassDuplicate(className, uint64(sent-1))
+	}
+	return nil
+}
+
+func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip map[int]struct{}) (int, quic.Connection) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -485,24 +772,64 @@ func (m *multipathConn) selectBestPath() (int, quic.Connection) {
 	bestIdx := -1
 	bestScore := int(^uint(0) >> 1)
 	start := m.rr % len(m.paths)
-	policy := m.cfg.MultipathPolicy
+	policy := classPolicy.SchedulerPolicy
+	if policy == "" {
+		policy = m.cfg.MultipathPolicy
+	}
 	if policy == "" {
 		policy = "priority"
 	}
 
-	for i := 0; i < len(m.paths); i++ {
-		idx := (start + i) % len(m.paths)
-		p := m.paths[idx]
-		if !p.alive || p.conn == nil {
-			continue
+	excluded := make(map[string]struct{}, len(classPolicy.ExcludedPaths))
+	for _, name := range classPolicy.ExcludedPaths {
+		excluded[name] = struct{}{}
+	}
+
+	preferred := make(map[string]struct{}, len(classPolicy.PreferredPaths))
+	for _, name := range classPolicy.PreferredPaths {
+		preferred[name] = struct{}{}
+	}
+	preferredOnly := len(preferred) > 0
+
+	for pass := 0; pass < 2; pass++ {
+		bestIdx = -1
+		bestScore = int(^uint(0) >> 1)
+
+		for i := 0; i < len(m.paths); i++ {
+			idx := (start + i) % len(m.paths)
+			if skip != nil {
+				if _, blocked := skip[idx]; blocked {
+					continue
+				}
+			}
+
+			p := m.paths[idx]
+			if _, blocked := excluded[p.cfg.Name]; blocked {
+				continue
+			}
+			if preferredOnly && pass == 0 {
+				if _, ok := preferred[p.cfg.Name]; !ok {
+					continue
+				}
+			}
+			if !p.alive || p.conn == nil {
+				continue
+			}
+			if now.Before(p.cooldownUntil) {
+				continue
+			}
+			score := pathPolicyScore(policy, p)
+			if score < bestScore {
+				bestScore = score
+				bestIdx = idx
+			}
 		}
-		if now.Before(p.cooldownUntil) {
-			continue
+
+		if bestIdx >= 0 {
+			break
 		}
-		score := pathPolicyScore(policy, p)
-		if score < bestScore {
-			bestScore = score
-			bestIdx = idx
+		if !preferredOnly {
+			break
 		}
 	}
 
@@ -534,6 +861,60 @@ func pathPolicyScore(policy string, p *multipathPathState) int {
 		}
 		return base + failPenalty - weightBonus
 	}
+}
+
+func (m *multipathConn) resolvePacketClass(pkt []byte) (string, DataplaneClassPolicy) {
+	meta, ok := parsePacketMeta(pkt)
+	if ok {
+		for _, rule := range m.dataplane.classifiers {
+			if rule.matches(meta) {
+				if classPolicy, found := m.dataplane.classes[rule.className]; found {
+					return rule.className, classPolicy
+				}
+			}
+		}
+	}
+
+	className := m.dataplane.defaultClass
+	classPolicy, found := m.dataplane.classes[className]
+	if !found {
+		className = "default"
+		classPolicy = DataplaneClassPolicy{SchedulerPolicy: "priority"}
+	}
+	return className, classPolicy
+}
+
+func (m *multipathConn) markClassTx(className string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := m.classTx[className]
+	if c == nil {
+		c = &trafficClassCounters{}
+		m.classTx[className] = c
+	}
+	c.txPackets++
+}
+
+func (m *multipathConn) markClassError(className string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := m.classTx[className]
+	if c == nil {
+		c = &trafficClassCounters{}
+		m.classTx[className] = c
+	}
+	c.txErrors++
+}
+
+func (m *multipathConn) markClassDuplicate(className string, duplicates uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := m.classTx[className]
+	if c == nil {
+		c = &trafficClassCounters{}
+		m.classTx[className] = c
+	}
+	c.txDuplicates += duplicates
 }
 
 func (m *multipathConn) markTxSuccess(idx int) {
@@ -790,6 +1171,24 @@ func (m *multipathConn) logTelemetrySnapshot() {
 			formatTime(p.lastDown),
 		)
 	}
+	classes := make([]string, 0, len(m.classTx))
+	for className := range m.classTx {
+		classes = append(classes, className)
+	}
+	sort.Strings(classes)
+	for _, className := range classes {
+		c := m.classTx[className]
+		if c == nil {
+			continue
+		}
+		m.logger.Infof(
+			"class telemetry class=%s tx_pkts=%d tx_err=%d tx_dups=%d",
+			className,
+			c.txPackets,
+			c.txErrors,
+			c.txDuplicates,
+		)
+	}
 }
 
 func formatTime(t time.Time) string {
@@ -926,4 +1325,228 @@ func loadClientTLSConfig(cfg *Config) (*tls.Config, error) {
 		tlsConf.RootCAs = roots
 	}
 	return tlsConf, nil
+}
+
+func compileDataplaneConfig(dp DataplaneConfig) (compiledDataplane, error) {
+	out := compiledDataplane{
+		defaultClass: dp.DefaultClass,
+		classes:      make(map[string]DataplaneClassPolicy, len(dp.Classes)),
+	}
+
+	for className, policy := range dp.Classes {
+		out.classes[className] = policy
+	}
+
+	out.classifiers = make([]compiledClassifierRule, 0, len(dp.Classifiers))
+	for _, rule := range dp.Classifiers {
+		srcCIDRs, err := parseCIDRs(rule.SrcCIDRs)
+		if err != nil {
+			return compiledDataplane{}, err
+		}
+		dstCIDRs, err := parseCIDRs(rule.DstCIDRs)
+		if err != nil {
+			return compiledDataplane{}, err
+		}
+		srcPorts, err := parsePortRanges(rule.SrcPorts)
+		if err != nil {
+			return compiledDataplane{}, err
+		}
+		dstPorts, err := parsePortRanges(rule.DstPorts)
+		if err != nil {
+			return compiledDataplane{}, err
+		}
+		dscp := make(map[uint8]struct{}, len(rule.DSCP))
+		for _, value := range rule.DSCP {
+			dscp[uint8(value)] = struct{}{}
+		}
+
+		out.classifiers = append(out.classifiers, compiledClassifierRule{
+			name:      rule.Name,
+			className: rule.ClassName,
+			protocol:  rule.Protocol,
+			srcCIDRs:  srcCIDRs,
+			dstCIDRs:  dstCIDRs,
+			srcPorts:  srcPorts,
+			dstPorts:  dstPorts,
+			dscp:      dscp,
+		})
+	}
+
+	return out, nil
+}
+
+func parseCIDRs(values []string) ([]netip.Prefix, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	out := make([]netip.Prefix, 0, len(values))
+	for _, raw := range values {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(v)
+		if err != nil {
+			return nil, fmt.Errorf("%q: %w", v, err)
+		}
+		out = append(out, prefix)
+	}
+	return out, nil
+}
+
+func parsePortRanges(values []string) ([]portRange, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	out := make([]portRange, 0, len(values))
+	for _, raw := range values {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		if strings.Contains(v, "-") {
+			parts := strings.SplitN(v, "-", 2)
+			start, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+			if err != nil {
+				return nil, fmt.Errorf("invalid port range start %q", v)
+			}
+			end, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if err != nil {
+				return nil, fmt.Errorf("invalid port range end %q", v)
+			}
+			if start < 1 || start > 65535 || end < 1 || end > 65535 || end < start {
+				return nil, fmt.Errorf("invalid port range %q", v)
+			}
+			out = append(out, portRange{from: uint16(start), to: uint16(end)})
+			continue
+		}
+
+		port, err := strconv.Atoi(v)
+		if err != nil || port < 1 || port > 65535 {
+			return nil, fmt.Errorf("invalid port value %q", v)
+		}
+		out = append(out, portRange{from: uint16(port), to: uint16(port)})
+	}
+	return out, nil
+}
+
+func (r compiledClassifierRule) matches(meta packetMeta) bool {
+	if r.protocol != "" && r.protocol != meta.protocol {
+		return false
+	}
+	if len(r.srcCIDRs) > 0 && !matchAddrPrefixes(meta.srcAddr, r.srcCIDRs) {
+		return false
+	}
+	if len(r.dstCIDRs) > 0 && !matchAddrPrefixes(meta.dstAddr, r.dstCIDRs) {
+		return false
+	}
+	if len(r.srcPorts) > 0 {
+		if !meta.hasPorts || !matchPortRanges(meta.srcPort, r.srcPorts) {
+			return false
+		}
+	}
+	if len(r.dstPorts) > 0 {
+		if !meta.hasPorts || !matchPortRanges(meta.dstPort, r.dstPorts) {
+			return false
+		}
+	}
+	if len(r.dscp) > 0 {
+		if _, ok := r.dscp[meta.dscp]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func matchAddrPrefixes(addr netip.Addr, prefixes []netip.Prefix) bool {
+	if !addr.IsValid() {
+		return false
+	}
+	for _, p := range prefixes {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchPortRanges(port uint16, ranges []portRange) bool {
+	for _, r := range ranges {
+		if port >= r.from && port <= r.to {
+			return true
+		}
+	}
+	return false
+}
+
+func parsePacketMeta(pkt []byte) (packetMeta, bool) {
+	if len(pkt) < 1 {
+		return packetMeta{}, false
+	}
+
+	version := pkt[0] >> 4
+	switch version {
+	case 4:
+		if len(pkt) < 20 {
+			return packetMeta{}, false
+		}
+		ihl := int(pkt[0]&0x0f) * 4
+		if ihl < 20 || len(pkt) < ihl {
+			return packetMeta{}, false
+		}
+
+		src := netip.AddrFrom4([4]byte{pkt[12], pkt[13], pkt[14], pkt[15]})
+		dst := netip.AddrFrom4([4]byte{pkt[16], pkt[17], pkt[18], pkt[19]})
+		meta := packetMeta{
+			protocol: ipProtocolName(pkt[9]),
+			srcAddr:  src,
+			dstAddr:  dst,
+			dscp:     pkt[1] >> 2,
+		}
+		if (meta.protocol == "tcp" || meta.protocol == "udp") && len(pkt) >= ihl+4 {
+			meta.srcPort = binary.BigEndian.Uint16(pkt[ihl : ihl+2])
+			meta.dstPort = binary.BigEndian.Uint16(pkt[ihl+2 : ihl+4])
+			meta.hasPorts = true
+		}
+		return meta, true
+
+	case 6:
+		if len(pkt) < 40 {
+			return packetMeta{}, false
+		}
+
+		var srcArr, dstArr [16]byte
+		copy(srcArr[:], pkt[8:24])
+		copy(dstArr[:], pkt[24:40])
+		trafficClass := ((pkt[0] & 0x0f) << 4) | (pkt[1] >> 4)
+		meta := packetMeta{
+			protocol: ipProtocolName(pkt[6]),
+			srcAddr:  netip.AddrFrom16(srcArr),
+			dstAddr:  netip.AddrFrom16(dstArr),
+			dscp:     trafficClass >> 2,
+		}
+		if (meta.protocol == "tcp" || meta.protocol == "udp") && len(pkt) >= 44 {
+			meta.srcPort = binary.BigEndian.Uint16(pkt[40:42])
+			meta.dstPort = binary.BigEndian.Uint16(pkt[42:44])
+			meta.hasPorts = true
+		}
+		return meta, true
+	}
+
+	return packetMeta{}, false
+}
+
+func ipProtocolName(proto uint8) string {
+	switch proto {
+	case 6:
+		return "tcp"
+	case 17:
+		return "udp"
+	case 1:
+		return "icmp"
+	case 58:
+		return "icmpv6"
+	default:
+		return strconv.Itoa(int(proto))
+	}
 }

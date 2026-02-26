@@ -1,0 +1,29 @@
+role: client
+multipath_enabled: true
+multipath_policy: priority
+dataplane_config_file: ./dataplane.yaml
+multipath_paths:
+  - name: wan4
+    bind_ip: if:enp7s6
+    remote_addr: VPS_PUBLIC_IP
+    remote_port: 45004
+    priority: 10
+    weight: 2
+  - name: wan5
+    bind_ip: if:enp7s7
+    remote_addr: VPS_PUBLIC_IP
+    remote_port: 45005
+    priority: 20
+    weight: 2
+  - name: wan6
+    bind_ip: if:enp7s8
+    remote_addr: VPS_PUBLIC_IP
+    remote_port: 45006
+    priority: 30
+    weight: 1
+tun_name: mpqm
+tun_cidr: 10.201.0.1/30
+log_level: info
+tls_ca_file: /etc/mpquic/tls/ca.crt
+tls_server_name: mpquic-server
+tls_insecure_skip_verify: false
