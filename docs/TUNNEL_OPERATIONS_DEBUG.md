@@ -91,6 +91,31 @@ nft list chain inet filter input
 # udp dport 45001-45006 accept
 ```
 
+## 1.5 Smoke test multipath (Fase 4 Step 1, sperimentale)
+
+Config template di riferimento:
+- `deploy/config/client/multipath.yaml`
+
+Client (esegue test non distruttivo con TUN dedicata `mpqm`):
+```bash
+export VPS_PUBLIC_IP=<IP_VPS>
+sudo /usr/local/sbin/mpquic-multipath-smoke.sh
+```
+
+Atteso:
+- output `smoke test PASS`
+- nel log compaiono `connected multipath paths=` e almeno un `path up name=`
+
+Controllo VPS (sequenza SSH obbligatoria):
+```bash
+ssh vps-it-mpquic
+ss -lunp | egrep '4500[4-6]'
+journalctl -u mpquic@4.service -n 30 --no-pager
+journalctl -u mpquic@5.service -n 30 --no-pager
+journalctl -u mpquic@6.service -n 30 --no-pager
+exit
+```
+
 ## 2) Mapping e comportamento atteso
 
 - `LAN1 (172.16.1.0/30)` -> `mpq1` -> QUIC `udp/45001` su `enp7s3`

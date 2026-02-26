@@ -62,6 +62,6 @@ Ogni YAML include:
 - `Restart=always` mantiene sessioni attive in caso di fault
 
 ## Limiti deliberati (fase corrente)
-- Nessun multipath in singola connessione QUIC
+- Multipath in singola connessione QUIC disponibile in modalità sperimentale (scheduler path-aware con priorità/peso e fail-cooldown)
 - Nessuna logica di orchestrazione cross-sessione
 - TLS server self-signed runtime (POC)

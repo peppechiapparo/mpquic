@@ -73,6 +73,10 @@ Passi:
 ## Fase 4 — Multipath QUIC (single logical connection)
 Obiettivo: superare limite single-flow e implementare aggregazione/strategie dinamiche.
 
+Stato avanzamento (26/02):
+- Step 1 avviato in modalità sperimentale nel runtime (`multipath_enabled` + `multipath_paths` con scheduler path-aware e recovery path-level).
+- Backward compatibility mantenuta: configurazioni single-path esistenti invariate.
+
 Capacità target (da documenti fornitore):
 - bonding (aggregazione)
 - backup/failover

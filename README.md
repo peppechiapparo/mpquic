@@ -12,7 +12,7 @@ Motivazione:
 
 Scope deliberato:
 - Solo multi-sessione parallela 1:1 (`mpquic@1`..`@6`).
-- Nessun multipath single-connection.
+- Multipath single-connection disponibile in modalità sperimentale (`multipath_enabled: true`).
 
 ## B) Implementazione minimale funzionante (1 tunnel)
 
@@ -47,6 +47,8 @@ Ogni YAML contiene:
 - `bind_ip`
 - `remote_addr`
 - `remote_port`
+- `multipath_enabled` (client, opzionale)
+- `multipath_paths` (client, opzionale)
 - `tun_name`
 - `tun_cidr`
 - `log_level`
@@ -71,6 +73,31 @@ tls_insecure_skip_verify: false
 ```
 
 `remote_addr` può rimanere `VPS_PUBLIC_IP` nei template: il valore reale viene letto da `/etc/mpquic/global.env` e renderizzato automaticamente in `/run/mpquic/%i.yaml` ad ogni start.
+
+Esempio multipath client (single logical tunnel):
+```yaml
+role: client
+multipath_enabled: true
+multipath_paths:
+  - name: wan3
+    bind_ip: if:enp7s5
+    remote_addr: VPS_PUBLIC_IP
+    remote_port: 45003
+    priority: 10
+    weight: 1
+  - name: wan4
+    bind_ip: if:enp7s6
+    remote_addr: VPS_PUBLIC_IP
+    remote_port: 45004
+    priority: 10
+    weight: 1
+tun_name: mpq3
+tun_cidr: 10.200.3.1/30
+log_level: info
+tls_ca_file: /etc/mpquic/tls/ca.crt
+tls_server_name: mpquic-server
+tls_insecure_skip_verify: false
+```
 
 ## E) systemd unit template
 
@@ -237,7 +264,7 @@ ip -br a | grep '^mpq'
 - Nessuna modifica alla logica L3 esistente (source-based policy routing + NAT su WAN fisiche).
 - Il tunnel si inserisce sopra: ogni istanza QUIC usa bind WAN dedicato.
 - Multi-sessione 1:1 (`6` connessioni QUIC indipendenti).
-- Nessun multipath su singola connessione.
+- Multipath su singola connessione disponibile in modalità sperimentale (opzionale, lato client).
 
 ## File principali
 
@@ -258,3 +285,4 @@ Guide operative aggiuntive:
 - `tls_insecure_skip_verify` deve restare `false` in ambienti operativi.
 - MTU default TUN impostata a `1300` per ridurre frammentazione su QUIC DATAGRAM.
 - Il bind `if:<ifname>` risolve l'IPv4 corrente dell'interfaccia (utile su WAN DHCP).
+- Smoke test multipath sperimentale: `sudo /usr/local/sbin/mpquic-multipath-smoke.sh` (template `deploy/config/client/multipath.yaml`).
