@@ -21,6 +21,7 @@ LAN_SUBNETS=(
 WAN_DEVS=("enp7s3" "enp7s4" "enp7s5" "enp7s6" "enp7s7" "enp7s8")
 TUN_DEVS=("mpq1" "mpq2" "mpq3" "mpq4" "mpq5" "mpq6")
 TABLES=("100" "101" "102" "103" "104" "105")
+TABLE_LOOKUPS=("wan1" "wan2" "wan3" "wan4" "wan5" "wan6")
 PRIOS=("1001" "1002" "1003" "1004" "1005" "1006")
 
 degraded=0
@@ -51,8 +52,13 @@ tun_up() {
 rule_present() {
   local subnet="$1"
   local table="$2"
-  local prio="$3"
-  ip rule show | grep -q "${prio}:.*from ${subnet}.*lookup .*${table}"
+  local lookup_name="$3"
+  local prio="$4"
+  local rules
+  rules="$(ip rule show)"
+  echo "$rules" | grep -q "${prio}:.*from ${subnet}.*lookup ${lookup_name}" && return 0
+  echo "$rules" | grep -q "${prio}:.*from ${subnet}.*lookup ${table}" && return 0
+  return 1
 }
 
 default_route_kind() {
@@ -99,6 +105,7 @@ for idx in $IDX_LIST; do
   wan="${WAN_DEVS[$idx]}"
   tun="${TUN_DEVS[$idx]}"
   table="${TABLES[$idx]}"
+  lookup_name="${TABLE_LOOKUPS[$idx]}"
   prio="${PRIOS[$idx]}"
 
   expected="blackhole"
@@ -110,7 +117,7 @@ for idx in $IDX_LIST; do
   ok_rule=0
   ok_default=0
 
-  if rule_present "$subnet" "$table" "$prio"; then
+  if rule_present "$subnet" "$table" "$lookup_name" "$prio"; then
     ok_rule=1
   fi
   if [[ "$got" == "$expected" ]]; then
