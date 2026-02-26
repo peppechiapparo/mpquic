@@ -22,6 +22,16 @@ ssh vps-it-mpquic 'comando'
 
 ## 1) Uso operativo quotidiano
 
+## 1.0 Aggiornamento repository (regola operativa)
+
+Per aggiornare il software usare solo:
+
+```bash
+sudo /usr/local/sbin/mpquic-update.sh
+```
+
+Non usare `scp` per aggiornamenti standard: per evitare disallineamenti, la fonte di verità resta il repository Git.
+
 ## 1.1 Stato rapido client
 ```bash
 for i in 1 2 3 4 5 6; do
