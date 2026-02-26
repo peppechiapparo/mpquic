@@ -11,6 +11,7 @@ fi
 
 install -d /usr/local/bin
 install -d /usr/local/lib/mpquic
+install -d /usr/local/sbin
 install -d /etc/mpquic/instances
 install -d /etc/mpquic/tls
 
@@ -21,11 +22,14 @@ install -m 0755 "$ROOT_DIR/scripts/generate_tls_certs.sh" /usr/local/lib/mpquic/
 install -m 0755 "$ROOT_DIR/scripts/mpquic-tunnel-watchdog.sh" /usr/local/lib/mpquic/mpquic-tunnel-watchdog.sh
 install -m 0755 "$ROOT_DIR/scripts/mpquic-server-watchdog.sh" /usr/local/lib/mpquic/mpquic-server-watchdog.sh
 install -m 0755 "$ROOT_DIR/scripts/mpquic-if-event.sh" /usr/local/lib/mpquic/mpquic-if-event.sh
+install -m 0755 "$ROOT_DIR/scripts/mpquic-healthcheck.sh" /usr/local/sbin/mpquic-healthcheck.sh
+install -m 0755 "$ROOT_DIR/scripts/mpquic-vps-routes.sh" /usr/local/sbin/mpquic-vps-routes.sh
 install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic@.service" /etc/systemd/system/mpquic@.service
 install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-watchdog.service" /etc/systemd/system/mpquic-watchdog.service
 install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-watchdog.timer" /etc/systemd/system/mpquic-watchdog.timer
 install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-server-watchdog.service" /etc/systemd/system/mpquic-server-watchdog.service
 install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-server-watchdog.timer" /etc/systemd/system/mpquic-server-watchdog.timer
+install -m 0644 "$ROOT_DIR/deploy/systemd/mpquic-vps-routes.service" /etc/systemd/system/mpquic-vps-routes.service
 
 if [[ "$ROLE" == "client" ]]; then
   install -m 0755 "$ROOT_DIR/scripts/mpquic-policy-routing.sh" /usr/local/sbin/mpquic-policy-routing.sh
@@ -73,6 +77,7 @@ if [[ "$ROLE" == "client" ]]; then
   systemctl disable --now mpquic-server-watchdog.timer >/dev/null 2>&1 || true
 else
   systemctl enable --now mpquic-server-watchdog.timer
+  systemctl enable --now mpquic-vps-routes.service
   systemctl disable --now mpquic-watchdog.timer >/dev/null 2>&1 || true
 fi
 

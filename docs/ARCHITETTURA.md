@@ -41,6 +41,7 @@ Il POC si inserisce sopra il piano L3: ogni processo `mpquic@i` usa la WAN assoc
 - `deploy/config/client/{1..6}.yaml`
 - `deploy/config/server/{1..6}.yaml`
 - `scripts/ensure_tun.sh`: creazione/config TUN persistente e idempotente
+- `scripts/mpquic-healthcheck.sh`: check strutturato per ruolo (`client|server`) con auto-recovery opzionale
 - `scripts/install_client.sh`: installazione lato client
 - `scripts/install_server.sh`: installazione lato server
 

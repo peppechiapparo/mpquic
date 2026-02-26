@@ -98,13 +98,14 @@ Log istanza:
 ```bash
 journalctl -u mpquic@1.service -n 100 --no-pager
 ```
-Riavvio istanze:
+Check + auto-fix lato client:
 ```bash
-sudo ./scripts/start_all.sh
+sudo /usr/local/sbin/mpquic-healthcheck.sh client fix
 ```
-Check rapido tutte le istanze:
+
+Check + auto-fix lato server:
 ```bash
-sudo ./scripts/verify_all.sh
+sudo /usr/local/sbin/mpquic-healthcheck.sh server fix
 ```
 
 ## 9) Persistenza al reboot

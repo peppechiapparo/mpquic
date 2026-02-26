@@ -60,6 +60,20 @@ systemctl restart mpquic-vps-routes.service
 systemctl restart nftables
 ```
 
+## 1.4 Check rapido strutturato (con auto-fix)
+
+Client:
+```bash
+sudo /usr/local/sbin/mpquic-healthcheck.sh client check
+sudo /usr/local/sbin/mpquic-healthcheck.sh client fix
+```
+
+Server:
+```bash
+sudo /usr/local/sbin/mpquic-healthcheck.sh server check
+sudo /usr/local/sbin/mpquic-healthcheck.sh server fix
+```
+
 Regola firewall obbligatoria su VPS (nftables input policy drop):
 ```bash
 nft list chain inet filter input
