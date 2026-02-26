@@ -360,32 +360,41 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 		baseCtx: ctx,
 	}
 
+	aliveCount := 0
+
 	for _, p := range cfg.MultipathPaths {
+		state := &multipathPathState{cfg: p}
+		mp.paths = append(mp.paths, state)
+
 		bindIP, err := resolveBindIP(p.BindIP)
 		if err != nil {
-			mp.closeAll(0, "dial-error")
-			return nil, fmt.Errorf("%s bind resolve: %w", p.Name, err)
+			logger.Errorf("path init failed name=%s step=bind-resolve err=%v", p.Name, err)
+			state.reconnecting = true
+			continue
 		}
 
 		localUDP := &net.UDPAddr{IP: net.ParseIP(bindIP), Port: 0}
 		udpConn, err := net.ListenUDP("udp", localUDP)
 		if err != nil {
-			mp.closeAll(0, "dial-error")
-			return nil, fmt.Errorf("%s listen udp: %w", p.Name, err)
+			logger.Errorf("path init failed name=%s step=listen err=%v", p.Name, err)
+			state.reconnecting = true
+			continue
 		}
 
 		remoteUDP, err := net.ResolveUDPAddr("udp", net.JoinHostPort(p.RemoteAddr, fmt.Sprintf("%d", p.RemotePort)))
 		if err != nil {
 			_ = udpConn.Close()
-			mp.closeAll(0, "dial-error")
-			return nil, fmt.Errorf("%s resolve remote: %w", p.Name, err)
+			logger.Errorf("path init failed name=%s step=remote-resolve err=%v", p.Name, err)
+			state.reconnecting = true
+			continue
 		}
 
 		tlsConf, err := loadClientTLSConfig(cfg)
 		if err != nil {
 			_ = udpConn.Close()
-			mp.closeAll(0, "dial-error")
-			return nil, fmt.Errorf("%s tls: %w", p.Name, err)
+			logger.Errorf("path init failed name=%s step=tls err=%v", p.Name, err)
+			state.reconnecting = true
+			continue
 		}
 
 		transport := quic.Transport{Conn: udpConn}
@@ -396,23 +405,30 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 		})
 		if err != nil {
 			_ = udpConn.Close()
-			mp.closeAll(0, "dial-error")
-			return nil, fmt.Errorf("%s dial: %w", p.Name, err)
+			logger.Errorf("path init failed name=%s step=dial err=%v", p.Name, err)
+			state.reconnecting = true
+			continue
 		}
 
-		state := &multipathPathState{
-			cfg:       p,
-			udpConn:   udpConn,
-			transport: &transport,
-			conn:      conn,
-			alive:     true,
-		}
-		mp.paths = append(mp.paths, state)
+		state.udpConn = udpConn
+		state.transport = &transport
+		state.conn = conn
+		state.alive = true
+		state.reconnecting = false
+		aliveCount++
 		logger.Infof("path up name=%s local=%s remote=%s", p.Name, udpConn.LocalAddr(), remoteUDP.String())
+	}
+
+	if aliveCount == 0 {
+		mp.closeAll(0, "dial-error")
+		return nil, fmt.Errorf("multipath: no initial path available")
 	}
 
 	for idx := range mp.paths {
 		go mp.recvLoop(ctx, idx)
+		if !mp.paths[idx].alive && mp.paths[idx].reconnecting {
+			go mp.reconnectLoop(ctx, idx)
+		}
 	}
 
 	return mp, nil
