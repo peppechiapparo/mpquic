@@ -106,6 +106,22 @@ Atteso:
 - output `smoke test PASS`
 - nel log compaiono `connected multipath paths=` e almeno un `path up name=`
 
+Verifica telemetria path-level (client):
+```bash
+journalctl -u mpquic@4.service -n 200 --no-pager | grep 'path telemetry' || true
+```
+
+Chiavi da leggere nel log telemetrico:
+- `state=up|down`
+- `tx_pkts`, `rx_pkts`
+- `tx_err`, `rx_err`
+- `fails`, `cooldown_until`, `last_up`, `last_down`
+
+Tuning QoS path-aware (attuale):
+- regola `priority` e `weight` in `multipath_paths`
+- riavvia il processo che usa quella config
+- verifica nei log che i path desiderati risultino preferiti/stabili
+
 Controllo VPS (sequenza SSH obbligatoria):
 ```bash
 ssh vps-it-mpquic
@@ -128,6 +144,15 @@ exit
 Nessun failover cross-tunnel: se WANx non è disponibile, il tunnel x deve fermarsi (o restare non connesso).
 
 ## 3) Debug per sintomo
+
+## 3.0 Multipath: rumore "superseded" durante test
+
+Se esegui smoke multipath su porte già usate da istanze `mpquic@X` attive, il server può chiudere sessioni precedenti con evento `superseded`.
+
+Per test pulito:
+1. stop temporaneo delle istanze client in conflitto con le porte usate dal multipath
+2. esecuzione smoke test
+3. riavvio istanze baseline
 
 ## 3.1 Tunnel `active` ma non passa traffico
 

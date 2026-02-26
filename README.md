@@ -99,6 +99,36 @@ tls_server_name: mpquic-server
 tls_insecure_skip_verify: false
 ```
 
+## D1) Gestione path multipath (operativa)
+
+Nel multipath, ogni voce di `multipath_paths` crea un path logico indipendente con socket UDP e connessione QUIC dedicata.
+
+Semantica campi:
+- `priority`: priorità di selezione (più basso = più preferito)
+- `weight`: peso relativo (più alto = più preferito a parità di contesto)
+
+Limiti:
+- minimo configurabile: 1 path
+- la sessione parte se almeno 1 path è up
+- nessun limite hard-coded nel runtime (vincoli pratici: rete/porte/risorse)
+
+Degradazione e recovery:
+- se un path non è disponibile (es. no IPv4 su WAN), il multipath resta up sui path sani
+- il runtime tenta recovery automatico del path down in background
+
+## D2) QoS attuale e tuning
+
+QoS applicativa completa (policy engine per classi traffico, duplication mission-critical) non è ancora implementata.
+
+Oggi il tuning disponibile è path-aware:
+- **failover**: `priority` distanti (es. 10,100,200), `weight: 1`
+- **bilanciamento leggero**: `priority` uguali, `weight` diversi (es. 3,2,1)
+- **backup costoso**: `priority` alta per path di riserva
+
+Verifica runtime:
+- cerca in log `path telemetry ...` per stato/counter per path
+- cerca `path up`, `path down`, `path recovered` per il lifecycle
+
 ## E) systemd unit template
 
 File: `deploy/systemd/mpquic@.service`

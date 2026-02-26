@@ -74,8 +74,11 @@ Passi:
 Obiettivo: superare limite single-flow e implementare aggregazione/strategie dinamiche.
 
 Stato avanzamento (26/02):
-- Step 1 avviato in modalità sperimentale nel runtime (`multipath_enabled` + `multipath_paths` con scheduler path-aware e recovery path-level).
+- Step 1 completato in modalità sperimentale nel runtime (`multipath_enabled` + `multipath_paths` con scheduler path-aware, fail-cooldown e recovery path-level).
 - Backward compatibility mantenuta: configurazioni single-path esistenti invariate.
+- Aggiunta degradazione controllata: il multipath parte con subset path attivi se almeno un path è disponibile.
+- Aggiunta telemetria path-level base su log runtime (`path telemetry ...`).
+- TLS allineato a Go moderno: certificato server con SAN e trust CA esplicito lato client.
 
 Capacità target (da documenti fornitore):
 - bonding (aggregazione)
@@ -85,10 +88,15 @@ Capacità target (da documenti fornitore):
 - monitoraggio link in tempo reale
 
 Passi:
-1. introdurre sessione logica multipath con scheduler path-aware
-2. aggiungere orchestrazione cross-sessione (policy engine)
-3. implementare telemetria path-level (RTT/loss/capacità)
+1. introdurre sessione logica multipath con scheduler path-aware (completato, sperimentale)
+2. aggiungere orchestrazione cross-sessione (policy engine) (in corso)
+3. implementare telemetria path-level (RTT/loss/capacità) (in corso: baseline log counters disponibile)
 4. validare su scenari LEO variabili (handover/jitter)
+
+Gap tecnici residui Fase 4:
+- QoS applicativa per classi traffico non ancora implementata (oggi tuning via `priority/weight`).
+- Duplication mission-critical non ancora implementata.
+- Metriche RTT/loss/capacità non ancora persistite/esposte via endpoint strutturato.
 
 ## Fase 5 — Sicurezza TLS hardening
 Obiettivo: canale cifrato con gestione certificati persistente.
@@ -104,17 +112,14 @@ Evoluzione richiesta:
 
 ## Prossimo step operativo (immediato)
 
-1. (Venerdì mattina) Portare IPv4 su `enp7s3` (WAN1) e `enp7s4` (WAN2) con modem collegati
-2. Avviare e validare `mpquic@1` e `mpquic@2`
-3. Implementare/validare routing persistente `LAN1 -> mpq1`
-4. Eseguire test con doppia evidenza:
-   - forwarding LAN1 dentro `mpq1`
-   - incapsulamento QUIC su `enp7s3:45001`
-
-5. Eseguire test resilienza “modem unplug”:
-  - scollegare una WAN attiva
-  - verificare stop automatico sola istanza associata
-  - verificare continuità delle altre istanze
+1. Stabilizzare test multipath senza contesa con `mpquic@4/@5/@6` (sessione dedicata di test o finestre controllate)
+2. Implementare prima versione policy engine cross-sessione (regole statiche per classi traffico)
+3. Aggiungere metriche RTT/loss per path e reporting strutturato
+4. Validare scenario modem unplug su path multipath:
+  - down di una WAN attiva
+  - continuità traffico sui path residui
+  - rientro automatico del path ripristinato
+5. Parallelamente continuare Fase 1/2 su WAN1/WAN2 per completare baseline 6/6
 
 ## Comandi base di verifica
 

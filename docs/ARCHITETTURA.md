@@ -56,6 +56,73 @@ Ogni YAML include:
 - `tun_cidr`: CIDR locale TUN
 - `log_level`: `debug|info|error`
 
+## Architettura multipath (single logical connection, client)
+
+Quando `multipath_enabled: true`, il client non usa più il singolo blocco `bind_ip/remote_addr/remote_port`, ma crea una sessione logica con N path definiti in `multipath_paths`.
+
+Per ogni elemento `multipath_paths[i]`:
+1. risoluzione bind su `bind_ip` (`if:<ifname>` supportato)
+2. apertura socket UDP locale dedicata
+3. dial QUIC verso `remote_addr:remote_port`
+4. registrazione stato path (`up/down`, cooldown, errori, reconnect)
+
+La sessione multipath parte se almeno un path è up. Se uno o più path sono non disponibili (es. WAN senza IPv4), il runtime entra in modalità degradata controllata e avvia recovery path-level in background.
+
+### Campi `multipath_paths`
+- `name`: etichetta operativa del path
+- `bind_ip`: IP o `if:<ifname>` della WAN locale
+- `remote_addr`: endpoint server
+- `remote_port`: porta UDP del listener server
+- `priority`: priorità relativa (valore più basso = path più preferito)
+- `weight`: peso di preferenza (valore più alto = lieve favore in selezione)
+
+### Limiti min/max path
+- minimo configurabile: 1 path
+- minimo operativo: almeno 1 path inizialmente attivo
+- massimo: non hard-coded nel runtime; dipende da porte/listener disponibili e risorse host
+
+## Scheduler path-aware
+
+Lo scheduler seleziona il path TX in base a score composto da:
+- `priority`
+- penalità per `consecutiveFails`
+- bonus leggero per `weight`
+
+In caso di errore TX/RX:
+- il path viene marcato down
+- aumenta la penalità
+- applica cooldown progressivo
+- parte reconnect in loop con backoff
+
+Se il reconnect riesce, il path rientra nel pool attivo (`path recovered`).
+
+## Telemetria path-level (base)
+
+Il runtime multipath emette periodicamente log telemetrici per ciascun path:
+- stato (`up/down`)
+- contatori `tx_pkts/rx_pkts`
+- errori `tx_err/rx_err`
+- `consecutiveFails`
+- timestamp `last_up/last_down`
+
+Formato log: `path telemetry name=... state=... tx_pkts=...`.
+
+## QoS: stato reale e direzione roadmap
+
+QoS applicativa completa (policy engine per classi traffico, duplication per classi mission-critical) non è ancora implementata.
+
+Attualmente è disponibile QoS "di selezione path" attraverso:
+- `priority` (primario)
+- `weight` (fine tuning)
+
+Per QoS L3/L2 avanzata si possono applicare policy Linux esterne (`tc`, queueing) sulle WAN fisiche.
+
+## Tuning operativo consigliato
+
+- **Failover primario/backup**: `priority` molto diversa (es. 10, 100, 200), `weight=1`
+- **Bilanciamento leggero**: stessa `priority`, `weight` differenziati (es. 3,2,1)
+- **Path costoso ma resiliente**: `priority` più alta (meno preferito) ma sempre disponibile come backup
+
 ## Persistenza al boot
 - `install_*` abilita `mpquic@1..6.service`
 - Ad ogni start, `ExecStartPre` assicura presenza/configurazione TUN
@@ -63,5 +130,5 @@ Ogni YAML include:
 
 ## Limiti deliberati (fase corrente)
 - Multipath in singola connessione QUIC disponibile in modalità sperimentale (scheduler path-aware con priorità/peso e fail-cooldown)
-- Nessuna logica di orchestrazione cross-sessione
+- Nessuna logica di orchestrazione cross-sessione (policy engine QoS applicativa)
 - TLS server self-signed runtime (POC)

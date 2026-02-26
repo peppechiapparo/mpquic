@@ -56,6 +56,12 @@ type multipathPathState struct {
 	reconnecting     bool
 	consecutiveFails int
 	cooldownUntil    time.Time
+	txPackets        uint64
+	rxPackets        uint64
+	txErrors         uint64
+	rxErrors         uint64
+	lastUp           time.Time
+	lastDown         time.Time
 }
 
 type multipathConn struct {
@@ -415,6 +421,7 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 		state.conn = conn
 		state.alive = true
 		state.reconnecting = false
+		state.lastUp = time.Now()
 		aliveCount++
 		logger.Infof("path up name=%s local=%s remote=%s", p.Name, udpConn.LocalAddr(), remoteUDP.String())
 	}
@@ -430,6 +437,8 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 			go mp.reconnectLoop(ctx, idx)
 		}
 	}
+
+	go mp.telemetryLoop(ctx)
 
 	return mp, nil
 }
@@ -500,6 +509,7 @@ func (m *multipathConn) markTxSuccess(idx int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.paths[idx]
+	p.txPackets++
 	if p.consecutiveFails > 0 {
 		p.consecutiveFails--
 	}
@@ -508,6 +518,7 @@ func (m *multipathConn) markTxSuccess(idx int) {
 func (m *multipathConn) markTxError(idx int, err error) {
 	m.mu.Lock()
 	p := m.paths[idx]
+	p.txErrors++
 	p.consecutiveFails++
 	if p.consecutiveFails > 6 {
 		p.consecutiveFails = 6
@@ -587,6 +598,7 @@ func (m *multipathConn) onPathSuccess(idx int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.paths[idx]
+	p.rxPackets++
 	if p.consecutiveFails > 0 {
 		p.consecutiveFails--
 	}
@@ -596,6 +608,8 @@ func (m *multipathConn) onPathError(ctx context.Context, idx int, err error) {
 	m.mu.Lock()
 	p := m.paths[idx]
 	p.alive = false
+	p.rxErrors++
+	p.lastDown = time.Now()
 	p.consecutiveFails++
 	if p.consecutiveFails > 6 {
 		p.consecutiveFails = 6
@@ -697,6 +711,7 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 			p.transport = &transport
 			p.alive = true
 			p.reconnecting = false
+			p.lastUp = time.Now()
 			if p.consecutiveFails > 0 {
 				p.consecutiveFails--
 			}
@@ -706,6 +721,51 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 		m.logger.Infof("path recovered name=%s local=%s remote=%s", pcfg.Name, udpConn.LocalAddr(), remoteUDP.String())
 		return
 	}
+}
+
+func (m *multipathConn) telemetryLoop(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.logTelemetrySnapshot()
+		}
+	}
+}
+
+func (m *multipathConn) logTelemetrySnapshot() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, p := range m.paths {
+		state := "down"
+		if p.alive && p.conn != nil {
+			state = "up"
+		}
+		m.logger.Infof(
+			"path telemetry name=%s state=%s tx_pkts=%d rx_pkts=%d tx_err=%d rx_err=%d fails=%d cooldown_until=%s last_up=%s last_down=%s",
+			p.cfg.Name,
+			state,
+			p.txPackets,
+			p.rxPackets,
+			p.txErrors,
+			p.rxErrors,
+			p.consecutiveFails,
+			formatTime(p.cooldownUntil),
+			formatTime(p.lastUp),
+			formatTime(p.lastDown),
+		)
+	}
+}
+
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.Format(time.RFC3339)
 }
 
 func (m *multipathConn) closeAll(code quic.ApplicationErrorCode, reason string) {
