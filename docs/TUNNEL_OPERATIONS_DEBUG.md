@@ -70,6 +70,32 @@ systemctl restart mpquic-vps-routes.service
 systemctl restart nftables
 ```
 
+## 1.3-bis Problema ricorrente VM/OpenWRT (procedura iniziale)
+
+Sintomo osservato più volte: tunnel formalmente attivi ma traffico non instradato correttamente tra VM MPQUIC e router OpenWRT finché non viene ripristinata la rete della VM.
+
+Ordine operativo obbligatorio:
+1. restart network lato VM MPQUIC (prima azione)
+2. restart servizi MPQUIC/routing
+3. verifiche healthcheck + route table
+4. reboot VM solo se i passi 1..3 non risolvono
+
+Client (first response):
+```bash
+systemctl restart networking || true
+ifreload -a || true
+for i in 1 2 3 4 5 6; do systemctl restart mpquic@$i.service; done
+systemctl restart mpquic-routing.service
+systemctl restart mpquic-watchdog.timer
+/usr/local/sbin/mpquic-healthcheck.sh client fix
+/usr/local/sbin/mpquic-lan-routing-check.sh fix all
+```
+
+Se ancora KO:
+```bash
+reboot
+```
+
 ## 1.4 Check rapido strutturato (con auto-fix)
 
 Client:

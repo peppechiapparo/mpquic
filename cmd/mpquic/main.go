@@ -5,12 +5,15 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/netip"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -44,6 +47,8 @@ type Config struct {
 	TLSCAFile             string                `yaml:"tls_ca_file"`
 	TLSServerName         string                `yaml:"tls_server_name"`
 	TLSInsecureSkipVerify bool                  `yaml:"tls_insecure_skip_verify"`
+	ControlAPIListen      string                `yaml:"control_api_listen"`
+	ControlAPIAuthToken   string                `yaml:"control_api_auth_token"`
 }
 
 type MultipathPathConfig struct {
@@ -230,6 +235,8 @@ func loadConfig(path string) (*Config, error) {
 	}
 	cfg.Role = strings.ToLower(strings.TrimSpace(cfg.Role))
 	cfg.LogLevel = strings.ToLower(strings.TrimSpace(cfg.LogLevel))
+	cfg.ControlAPIListen = strings.TrimSpace(cfg.ControlAPIListen)
+	cfg.ControlAPIAuthToken = strings.TrimSpace(cfg.ControlAPIAuthToken)
 	if cfg.Role != "client" && cfg.Role != "server" {
 		return nil, fmt.Errorf("role must be client or server")
 	}
@@ -310,6 +317,7 @@ func loadAndValidateDataplaneConfig(configPath string, cfg *Config) error {
 		if !filepath.IsAbs(dpPath) {
 			dpPath = filepath.Join(filepath.Dir(configPath), dpPath)
 		}
+		cfg.DataplaneConfigFile = dpPath
 		b, err := os.ReadFile(dpPath)
 		if err != nil {
 			return fmt.Errorf("dataplane_config_file read failed: %w", err)
@@ -586,6 +594,14 @@ func runClientOnceMultipath(ctx context.Context, cfg *Config, logger *Logger) er
 		return err
 	}
 	defer mpConn.closeAll(0, "shutdown")
+
+	if cfg.ControlAPIListen != "" {
+		stopAPI, err := startControlAPI(ctx, cfg, mpConn, logger)
+		if err != nil {
+			return err
+		}
+		defer stopAPI()
+	}
 
 	logger.Infof("connected multipath paths=%d policy=%s tun=%s", len(cfg.MultipathPaths), cfg.MultipathPolicy, cfg.TunName)
 	return runTunnel(ctx, cfg, mpConn, logger)
@@ -1209,6 +1225,249 @@ func (m *multipathConn) closeAll(code quic.ApplicationErrorCode, reason string) 
 			_ = p.udpConn.Close()
 		}
 	}
+}
+
+func (m *multipathConn) snapshotDataplaneConfig() DataplaneConfig {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return cloneDataplaneConfig(m.cfg.Dataplane)
+}
+
+func (m *multipathConn) applyDataplaneConfig(dp DataplaneConfig) error {
+	normalizeDataplaneConfig(&dp, m.cfg.MultipathPolicy)
+	if err := validateDataplaneConfig(dp, m.cfg.MultipathPaths); err != nil {
+		return err
+	}
+	compiled, err := compileDataplaneConfig(dp)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	m.cfg.Dataplane = cloneDataplaneConfig(dp)
+	m.dataplane = compiled
+	for className := range compiled.classes {
+		if _, ok := m.classTx[className]; !ok {
+			m.classTx[className] = &trafficClassCounters{}
+		}
+	}
+	m.mu.Unlock()
+
+	m.logger.Infof("dataplane policy applied classes=%d classifiers=%d", len(dp.Classes), len(dp.Classifiers))
+	return nil
+}
+
+func (m *multipathConn) reloadDataplaneFromFile() error {
+	path := strings.TrimSpace(m.cfg.DataplaneConfigFile)
+	if path == "" {
+		return fmt.Errorf("dataplane_config_file not configured")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	dp := DataplaneConfig{}
+	if err := yaml.Unmarshal(b, &dp); err != nil {
+		return err
+	}
+	return m.applyDataplaneConfig(dp)
+}
+
+func cloneDataplaneConfig(in DataplaneConfig) DataplaneConfig {
+	out := DataplaneConfig{
+		DefaultClass: in.DefaultClass,
+	}
+	if in.Classes != nil {
+		out.Classes = make(map[string]DataplaneClassPolicy, len(in.Classes))
+		for name, policy := range in.Classes {
+			copyPolicy := policy
+			copyPolicy.PreferredPaths = append([]string(nil), policy.PreferredPaths...)
+			copyPolicy.ExcludedPaths = append([]string(nil), policy.ExcludedPaths...)
+			out.Classes[name] = copyPolicy
+		}
+	}
+	if len(in.Classifiers) > 0 {
+		out.Classifiers = make([]DataplaneClassifierRule, 0, len(in.Classifiers))
+		for _, rule := range in.Classifiers {
+			copyRule := rule
+			copyRule.SrcCIDRs = append([]string(nil), rule.SrcCIDRs...)
+			copyRule.DstCIDRs = append([]string(nil), rule.DstCIDRs...)
+			copyRule.SrcPorts = append([]string(nil), rule.SrcPorts...)
+			copyRule.DstPorts = append([]string(nil), rule.DstPorts...)
+			copyRule.DSCP = append([]int(nil), rule.DSCP...)
+			out.Classifiers = append(out.Classifiers, copyRule)
+		}
+	}
+	return out
+}
+
+func startControlAPI(ctx context.Context, cfg *Config, mp *multipathConn, logger *Logger) (func(), error) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		if !authorizeControlAPI(w, r, cfg) {
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":               true,
+			"role":             cfg.Role,
+			"multipath_enabled": cfg.MultipathEnabled,
+			"tun_name":         cfg.TunName,
+		})
+	})
+
+	mux.HandleFunc("/dataplane", func(w http.ResponseWriter, r *http.Request) {
+		if !authorizeControlAPI(w, r, cfg) {
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, map[string]any{
+				"dataplane": mp.snapshotDataplaneConfig(),
+			})
+		default:
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		}
+	})
+
+	mux.HandleFunc("/dataplane/validate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		if !authorizeControlAPI(w, r, cfg) {
+			return
+		}
+
+		dp, err := decodeDataplaneFromRequest(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		normalizeDataplaneConfig(&dp, cfg.MultipathPolicy)
+		if err := validateDataplaneConfig(dp, cfg.MultipathPaths); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	mux.HandleFunc("/dataplane/apply", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		if !authorizeControlAPI(w, r, cfg) {
+			return
+		}
+
+		dp, err := decodeDataplaneFromRequest(r)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if err := mp.applyDataplaneConfig(dp); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	mux.HandleFunc("/dataplane/reload", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+			return
+		}
+		if !authorizeControlAPI(w, r, cfg) {
+			return
+		}
+		if err := mp.reloadDataplaneFromFile(); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	server := &http.Server{
+		Addr:    cfg.ControlAPIListen,
+		Handler: mux,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	go func() {
+		logger.Infof("control api listening addr=%s", cfg.ControlAPIListen)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Errorf("control api stopped err=%v", err)
+		}
+	}()
+
+	return func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}, nil
+}
+
+func authorizeControlAPI(w http.ResponseWriter, r *http.Request, cfg *Config) bool {
+	if cfg.ControlAPIAuthToken == "" {
+		return true
+	}
+	expected := "Bearer " + cfg.ControlAPIAuthToken
+	if r.Header.Get("Authorization") != expected {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return false
+	}
+	return true
+}
+
+func decodeDataplaneFromRequest(r *http.Request) (DataplaneConfig, error) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1024*1024))
+	if err != nil {
+		return DataplaneConfig{}, err
+	}
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return DataplaneConfig{}, fmt.Errorf("empty request body")
+	}
+
+	dp := DataplaneConfig{}
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if strings.Contains(ct, "json") {
+		if err := json.Unmarshal(body, &dp); err != nil {
+			return DataplaneConfig{}, err
+		}
+		return dp, nil
+	}
+	if strings.Contains(ct, "yaml") || strings.Contains(ct, "yml") {
+		if err := yaml.Unmarshal(body, &dp); err != nil {
+			return DataplaneConfig{}, err
+		}
+		return dp, nil
+	}
+
+	if err := json.Unmarshal(body, &dp); err == nil {
+		return dp, nil
+	}
+	if err := yaml.Unmarshal(body, &dp); err != nil {
+		return DataplaneConfig{}, fmt.Errorf("payload must be JSON or YAML")
+	}
+	return dp, nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 func runTunnel(ctx context.Context, cfg *Config, conn datagramConn, logger *Logger) error {

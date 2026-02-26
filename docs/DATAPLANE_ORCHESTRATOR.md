@@ -1,6 +1,6 @@
 # Dataplane QoS e integrazione orchestrator
 
-Questo documento definisce come configurare il dataplane multipath per QoS applicativa e come preparare il formato per una futura API/orchestrator esterno.
+Questo documento definisce come configurare il dataplane multipath per QoS applicativa e come interfacciarlo con orchestrator esterno via file policy e Control API locale.
 
 ## Obiettivo
 
@@ -130,8 +130,61 @@ Le regole sono valutate in ordine; il primo match vince.
 1. orchestrator genera nuovo `dataplane.yaml`
 2. valida schema e riferimenti path lato control-plane
 3. distribuisce file sul nodo MPQUIC
-4. applica restart controllato della sola istanza target
+4. applica policy via Control API (`/dataplane/reload`) oppure restart controllato istanza
 5. verifica log runtime `class telemetry` e `path telemetry`
+
+## Control API locale (implementata)
+
+La Control API è disponibile nel client multipath quando è configurato:
+
+```yaml
+control_api_listen: 127.0.0.1:19090
+control_api_auth_token: "change-me"
+```
+
+Campi consigliati:
+- `control_api_listen`: bind locale (`127.0.0.1:<port>`)
+- `control_api_auth_token`: token Bearer opzionale ma fortemente consigliato
+
+Endpoint:
+- `GET /healthz`: stato processo/API
+- `GET /dataplane`: snapshot policy dataplane attiva
+- `POST /dataplane/validate`: valida payload dataplane (JSON o YAML) senza applicare
+- `POST /dataplane/apply`: valida e applica payload dataplane in runtime
+- `POST /dataplane/reload`: ricarica e applica `dataplane_config_file` da disco
+
+Esempio validate:
+
+```bash
+curl -sS -X POST \
+  -H 'Authorization: Bearer change-me' \
+  -H 'Content-Type: application/yaml' \
+  --data-binary @/etc/mpquic/instances/dataplane.yaml \
+  http://127.0.0.1:19090/dataplane/validate
+```
+
+Esempio apply:
+
+```bash
+curl -sS -X POST \
+  -H 'Authorization: Bearer change-me' \
+  -H 'Content-Type: application/yaml' \
+  --data-binary @/etc/mpquic/instances/dataplane.yaml \
+  http://127.0.0.1:19090/dataplane/apply
+```
+
+Esempio reload da file:
+
+```bash
+curl -sS -X POST \
+  -H 'Authorization: Bearer change-me' \
+  http://127.0.0.1:19090/dataplane/reload
+```
+
+Sicurezza operativa:
+- non esporre la Control API su IP pubblici
+- usare sempre token Bearer quando possibile
+- limitare accesso con firewall locale/host policy
 
 ### Convenzioni operative
 - tenere i nomi path stabili (`wan4`, `wan5`, `wan6`)

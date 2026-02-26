@@ -102,6 +102,19 @@ Se presenti entrambe:
 
 il file dedicato (`dataplane_config_file`) ha precedenza.
 
+### Control API orchestrator (opzionale)
+Nel file client multipath puoi abilitare API locale per validare/applicare policy dataplane:
+```yaml
+control_api_listen: 127.0.0.1:19090
+control_api_auth_token: change-me
+```
+
+Esempio verifica:
+```bash
+curl -sS -H 'Authorization: Bearer change-me' http://127.0.0.1:19090/healthz
+curl -sS -H 'Authorization: Bearer change-me' http://127.0.0.1:19090/dataplane
+```
+
 ### Verifica operativa
 Dopo riavvio istanza multipath, controlla:
 ```bash
@@ -152,6 +165,31 @@ Log istanza:
 ```bash
 journalctl -u mpquic@1.service -n 100 --no-pager
 ```
+
+Procedura iniziale consigliata (issue ricorrente interfaccia VM/OpenWRT):
+1. **non riavviare subito la VM**
+2. restart network stack lato client VM MPQUIC
+3. restart istanze `mpquic@*` + routing/watchdog
+4. rieseguire check/fix
+5. solo se ancora KO: reboot VM client (e in ultima istanza anche VPS)
+
+Esempio rapido lato client:
+```bash
+sudo systemctl restart networking || true
+sudo ifreload -a || true
+sudo systemctl restart mpquic@1.service mpquic@2.service mpquic@3.service mpquic@4.service mpquic@5.service mpquic@6.service
+sudo systemctl restart mpquic-routing.service
+sudo systemctl restart mpquic-watchdog.timer
+sudo /usr/local/sbin/mpquic-healthcheck.sh client fix
+sudo /usr/local/sbin/mpquic-lan-routing-check.sh fix all
+```
+
+Esempio rapido lato server:
+```bash
+sudo systemctl restart mpquic@1.service mpquic@2.service mpquic@3.service mpquic@4.service mpquic@5.service mpquic@6.service
+sudo /usr/local/sbin/mpquic-healthcheck.sh server fix
+```
+
 Check + auto-fix lato client:
 ```bash
 sudo /usr/local/sbin/mpquic-healthcheck.sh client fix
@@ -226,7 +264,7 @@ ssh mpquic
 sudo /usr/local/sbin/mpquic-update.sh
 ip -4 -br a show dev enp7s3
 ip -4 -br a show dev enp7s4
-sudo systemctl restart mpquic@1.service mpquic@2.service
+sudo systemctl restart mpquic@1.service mpquic@2.service mpquic@3.service mpquic@4.service mpquic@5.service mpquic@6.service
 sudo /usr/local/sbin/mpquic-healthcheck.sh client fix
 sudo /usr/local/sbin/mpquic-lan-routing-check.sh fix 1
 for i in 1 2 3 4 5 6; do systemctl is-active mpquic@$i.service; done

@@ -27,6 +27,10 @@
 - WAN1 e WAN2 sono temporaneamente senza modem collegato: il test DHCP/bring-up è pianificato a venerdì mattina.
 - Questo è considerato scenario reale di esercizio (modem unplug/offline): il sistema deve degradare in modo controllato (istanza WAN assente stop, istanze sane up).
 
+### Nota operativa (26/02)
+- Riscontrata ricorrenza di instabilità sul tratto interno VM MPQUIC <-> OpenWRT (sintomo: tunnel up ma forwarding incoerente).
+- Procedura iniziale standardizzata: **restart network VM client prima del reboot VM**; reboot come fallback finale.
+
 ## Roadmap aggiornata
 
 ## Fase 1 — Baseline 6 sessioni QUIC 1:1 (NO multipath) [in corso]
@@ -100,7 +104,8 @@ Passi:
 4. validare su scenari LEO variabili (handover/jitter)
 
 Gap tecnici residui Fase 4:
-- API di controllo orchestrator non ancora implementata (oggi provisioning via YAML).
+- API di controllo orchestrator locale implementata (`/healthz`, `/dataplane`, `/dataplane/validate`, `/dataplane/apply`, `/dataplane/reload`).
+- Hardening API residuo: persistenza policy/versioning e controllo accessi avanzato.
 - Metriche RTT/loss/capacità non ancora persistite/esposte via endpoint strutturato.
 
 Track diagnostica stabilità (in parallelo):
@@ -130,6 +135,7 @@ Evoluzione richiesta:
 
 1. Stabilizzare test multipath senza contesa con `mpquic@4/@5/@6` (sessione dedicata di test o finestre controllate)
 2. Aggiungere API di gestione policy per integrazione orchestrator esterno (load/validate/apply)
+  - stato: implementazione base completata (Control API locale)
   - riferimento configurazione: `docs/DATAPLANE_ORCHESTRATOR.md`
 3. Aggiungere metriche RTT/loss per path e reporting strutturato
 4. Validare scenario modem unplug su path multipath:

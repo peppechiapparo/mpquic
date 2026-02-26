@@ -52,6 +52,8 @@ Ogni YAML contiene:
 - `multipath_paths` (client, opzionale)
 - `dataplane_config_file` (client multipath, opzionale: file YAML policy engine dedicato)
 - `dataplane` (client multipath, opzionale: sezione inline alternativa a file dedicato)
+- `control_api_listen` (client multipath, opzionale: bind API locale orchestrator, es. `127.0.0.1:19090`)
+- `control_api_auth_token` (client multipath, opzionale: token Bearer per API)
 - `tun_name`
 - `tun_cidr`
 - `log_level`
@@ -147,6 +149,15 @@ Regola merge:
 - se sono presenti sia `dataplane` inline che `dataplane_config_file`, il file dedicato ha precedenza.
 
 Guida orchestrator/QoS completa: `docs/DATAPLANE_ORCHESTRATOR.md`.
+
+Control API orchestrator (runtime, opzionale):
+- `GET /healthz`
+- `GET /dataplane`
+- `POST /dataplane/validate`
+- `POST /dataplane/apply`
+- `POST /dataplane/reload`
+
+Nota sicurezza: usare bind locale (`127.0.0.1`) e token (`control_api_auth_token`) quando l'API è attiva.
 
 Verifica runtime:
 - cerca in log `path telemetry ...` per stato/counter per path
