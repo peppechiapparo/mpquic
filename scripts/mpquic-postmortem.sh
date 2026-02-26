@@ -71,24 +71,32 @@ extract_window() {
 path_last_state() {
   local role="$1"
   local file="$2"
-  grep 'path telemetry name=' "$file" \
-    | awk -v role="$role" '
+  awk -v role="$role" '
       {
+        if ($0 !~ /path telemetry name=/) {
+          next
+        }
         name=""; state="";
         for (i=1; i<=NF; i++) {
           if ($i ~ /^name=/) { split($i,a,"="); name=a[2] }
           if ($i ~ /^state=/) { split($i,b,"="); state=b[2] }
         }
-        if (name != "") last[name]=state
+        if (name != "") {
+          if (!(name in seen)) {
+            seen[name]=1
+            count++
+          }
+          last[name]=state
+        }
       }
       END {
-        if (length(last)==0) {
+        if (count==0) {
           print "[" role "] path_telemetry=none"
         } else {
           for (k in last) print "[" role "] path_last_state " k "=" last[k]
         }
       }
-    '
+    ' "$file"
 }
 
 first_ts() {
