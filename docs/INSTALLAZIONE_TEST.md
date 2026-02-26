@@ -138,6 +138,12 @@ Uso rapido (ultime cartelle disponibili):
 sudo /usr/local/sbin/mpquic-postmortem.sh > /tmp/mpquic-postmortem-latest.txt
 ```
 
+Post-mortem cross-host (client + server remoti, consigliato):
+```bash
+/usr/local/sbin/mpquic-postmortem-remote.sh \
+	mpquic vps-it-mpquic /tmp/mpquic-postmortem-remote.txt
+```
+
 ## 9) Persistenza al reboot
 ```bash
 sudo reboot
