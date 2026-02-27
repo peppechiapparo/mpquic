@@ -31,6 +31,7 @@ TUN_DEVS=(
 WAN_TABLES=("101" "102" "103" "104" "105" "106")
 RULE_PRIOS=("1001" "1002" "1003" "1004" "1005" "1006")
 SRC_RULE_PRIOS=("1101" "1102" "1103" "1104" "1105" "1106")
+REMOTE_RULE_PRIOS=("1201" "1202" "1203" "1204" "1205" "1206")
 
 MGMT_NETS=("10.10.10.0/24" "10.10.11.0/24")
 MGMT_DEVS=("enp6s19" "enp6s18")
@@ -119,6 +120,7 @@ sleep "$WAIT_SECS"
 for idx in $(seq 0 5); do
   safe_ip ip rule del from "${LAN_SUBNETS[$idx]}" priority "${RULE_PRIOS[$idx]}"
   safe_ip ip rule del priority "${SRC_RULE_PRIOS[$idx]}"
+  safe_ip ip rule del priority "${REMOTE_RULE_PRIOS[$idx]}"
 done
 
 for idx in $(seq 0 5); do
@@ -128,8 +130,12 @@ for idx in $(seq 0 5); do
   subnet="${LAN_SUBNETS[$idx]}"
   prio="${RULE_PRIOS[$idx]}"
   src_prio="${SRC_RULE_PRIOS[$idx]}"
+  remote_prio="${REMOTE_RULE_PRIOS[$idx]}"
 
   safe_ip ip route flush table "$table"
+
+  rip="$(remote_ip_for_idx "$idx")"
+  src_ip="$(ipv4_for_dev "$dev")"
 
   safe_ip ip route add "${MGMT_NETS[0]}" dev "${MGMT_DEVS[0]}" table "$table"
   safe_ip ip route add "${MGMT_NETS[1]}" dev "${MGMT_DEVS[1]}" table "$table"
@@ -137,7 +143,6 @@ for idx in $(seq 0 5); do
 
   if wan_usable "$dev" && have_tun_up "$tun"; then
     gw="$(gw_for_dev "$dev")"
-    rip="$(remote_ip_for_idx "$idx")"
 
     if [ -n "$gw" ] && is_ipv4_lit "$rip"; then
       safe_ip ip route add "${rip}/32" via "$gw" dev "$dev" table "$table"
@@ -151,10 +156,13 @@ for idx in $(seq 0 5); do
   safe_ip ip rule add from "$subnet" lookup "$table" priority "$prio"
 
   if [ "$ENFORCE_WAN_SOURCE" = "1" ]; then
-    src_ip="$(ipv4_for_dev "$dev")"
     if [ -n "$src_ip" ]; then
       safe_ip ip rule add from "${src_ip}/32" lookup "$table" priority "$src_prio"
     fi
+  fi
+
+  if [ -n "$src_ip" ] && is_ipv4_lit "$rip"; then
+    safe_ip ip rule add from "${src_ip}/32" to "${rip}/32" lookup "$table" priority "$remote_prio"
   fi
 done
 
