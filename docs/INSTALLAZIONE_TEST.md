@@ -41,6 +41,40 @@ Verifica file:
 ls -l /etc/mpquic/instances/{1..6}.yaml.tpl
 ```
 
+## 4.1) Stabilità hotplug WAN (raccomandato prima dei test)
+
+Per il tuo caso (plug/unplug modem WAN con ripartenza automatica DHCP + `mpquic@X`), la configurazione più robusta è:
+- backend rete `systemd-networkd`
+- configurazione tramite `netplan` (renderer `networkd`)
+- hook eventi `networkd-dispatcher` + hook `ifupdown` (entrambi supportati dal progetto)
+
+Perché: con questa combinazione gli eventi carrier/DHCP vengono propagati in modo affidabile anche dopo unplug/replug ripetuti.
+
+Pacchetti consigliati lato client:
+```bash
+sudo apt-get install -y netplan.io systemd-networkd networkd-dispatcher ifupdown isc-dhcp-client
+```
+
+Verifica hook installati:
+```bash
+ls -l /etc/network/if-up.d/mpquic-auto /etc/network/if-post-down.d/mpquic-auto
+ls -l /etc/networkd-dispatcher/routable.d/50-mpquic-auto
+ls -l /etc/networkd-dispatcher/configured.d/50-mpquic-auto
+ls -l /etc/networkd-dispatcher/degraded.d/50-mpquic-auto
+ls -l /etc/networkd-dispatcher/off.d/50-mpquic-auto
+ls -l /etc/networkd-dispatcher/no-carrier.d/50-mpquic-auto
+```
+
+Verifica runtime eventi/hotplug:
+```bash
+sudo systemctl status systemd-networkd --no-pager
+sudo systemctl status networkd-dispatcher --no-pager
+journalctl -u systemd-networkd -u networkd-dispatcher -n 200 --no-pager
+journalctl -u mpquic@4.service -n 100 --no-pager
+```
+
+Nota operativa: se usi `netplan`, imposta renderer `networkd` ed evita che `NetworkManager` gestisca le stesse WAN.
+
 ## 5) Parametrizzazione endpoint
 ### Client
 Imposta IP pubblico VPS una sola volta (vale per tutte le istanze):

@@ -45,6 +45,19 @@ if [[ "$ROLE" == "client" ]]; then
   install -d /etc/network/if-up.d /etc/network/if-post-down.d
   install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-ifupdown-hook" /etc/network/if-up.d/mpquic-auto
   install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-ifupdown-hook" /etc/network/if-post-down.d/mpquic-auto
+
+  if command -v networkctl >/dev/null 2>&1 || [[ -d /etc/networkd-dispatcher ]]; then
+    install -d /etc/networkd-dispatcher/routable.d
+    install -d /etc/networkd-dispatcher/configured.d
+    install -d /etc/networkd-dispatcher/degraded.d
+    install -d /etc/networkd-dispatcher/off.d
+    install -d /etc/networkd-dispatcher/no-carrier.d
+    install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-networkd-dispatcher-hook" /etc/networkd-dispatcher/routable.d/50-mpquic-auto
+    install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-networkd-dispatcher-hook" /etc/networkd-dispatcher/configured.d/50-mpquic-auto
+    install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-networkd-dispatcher-hook" /etc/networkd-dispatcher/degraded.d/50-mpquic-auto
+    install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-networkd-dispatcher-hook" /etc/networkd-dispatcher/off.d/50-mpquic-auto
+    install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-networkd-dispatcher-hook" /etc/networkd-dispatcher/no-carrier.d/50-mpquic-auto
+  fi
 fi
 
 for i in 1 2 3 4 5 6; do

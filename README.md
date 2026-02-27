@@ -369,4 +369,5 @@ Guide operative aggiuntive:
 - `tls_insecure_skip_verify` deve restare `false` in ambienti operativi.
 - MTU default TUN impostata a `1300` per ridurre frammentazione su QUIC DATAGRAM.
 - Il bind `if:<ifname>` risolve l'IPv4 corrente dell'interfaccia (utile su WAN DHCP).
+- Auto-heal eventi WAN supporta sia hook `ifupdown` sia `networkd-dispatcher` (hotplug carrier/DHCP).
 - Smoke test multipath sperimentale: `sudo /usr/local/sbin/mpquic-multipath-smoke.sh` (template `deploy/config/client/multipath.yaml`).

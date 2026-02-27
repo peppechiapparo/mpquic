@@ -21,9 +21,51 @@ esac
 
 svc="mpquic@${instance}.service"
 
-if [[ "$state" == "up" || "$state" == "routable" || "$state" == "dhcp4-change" ]]; then
-  systemctl restart "$svc" || true
-elif [[ "$state" == "down" || "$state" == "degraded" || "$state" == "off" ]]; then
+has_global_ipv4() {
+  ip -4 -o addr show dev "$iface" scope global 2>/dev/null | grep -q 'inet '
+}
+
+wait_global_ipv4() {
+  local timeout_s="${1:-15}"
+  local waited=0
+  while (( waited < timeout_s )); do
+    if has_global_ipv4; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
+recover_dhcp_ipv4() {
+  if has_global_ipv4; then
+    return 0
+  fi
+
+  if command -v networkctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-networkd.service; then
+    networkctl reconfigure "$iface" >/dev/null 2>&1 || true
+    networkctl renew "$iface" >/dev/null 2>&1 || true
+  fi
+
+  if ! has_global_ipv4 && command -v ifup >/dev/null 2>&1; then
+    ifup "$iface" >/dev/null 2>&1 || true
+  fi
+
+  if ! has_global_ipv4 && command -v dhclient >/dev/null 2>&1; then
+    timeout 20 dhclient -4 -1 "$iface" >/dev/null 2>&1 || true
+  fi
+
+  wait_global_ipv4 15
+}
+
+if [[ "$state" == "up" || "$state" == "routable" || "$state" == "configured" || "$state" == "dhcp4-change" ]]; then
+  if recover_dhcp_ipv4; then
+    systemctl restart "$svc" || true
+  else
+    systemctl stop "$svc" || true
+  fi
+elif [[ "$state" == "down" || "$state" == "degraded" || "$state" == "off" || "$state" == "no-carrier" ]]; then
   systemctl stop "$svc" || true
 fi
 

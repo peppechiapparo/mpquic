@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IFACE_NAME="${IFACE:-${1:-}}"
+STATE_DIR="$(basename "$(dirname "$0")")"
+STATE="${STATE_DIR%.d}"
+
+if [ -z "$IFACE_NAME" ] || [ -z "$STATE" ]; then
+  exit 0
+fi
+
+/usr/local/lib/mpquic/mpquic-if-event.sh "$IFACE_NAME" "$STATE"
