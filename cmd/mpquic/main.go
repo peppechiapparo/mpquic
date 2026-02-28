@@ -472,6 +472,30 @@ func runServer(ctx context.Context, cfg *Config, logger *Logger) error {
 	}
 	defer tun.Close()
 
+	// Single TUN reader goroutine prevents goroutine leak on client reconnect.
+	// Previously each runTunnelWithTUN call spawned its own tun.Read goroutine
+	// that persisted after context cancellation (tun.Read is not ctx-aware),
+	// causing stale goroutines to steal return-path packets from the active
+	// connection. With N stale goroutines the active reader has 1/(N+1)
+	// probability per packet, effectively killing VPS→client dataplane.
+	tunReadCh := make(chan []byte, 64)
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			n, err := tun.Read(buf)
+			if err != nil {
+				logger.Errorf("tun read error: %v", err)
+				return
+			}
+			pkt := append([]byte(nil), buf[:n]...)
+			select {
+			case tunReadCh <- pkt:
+			default:
+				// drop if channel full (no active conn or back-pressure)
+			}
+		}
+	}()
+
 	tlsConf, err := loadServerTLSConfig(cfg)
 	if err != nil {
 		return err
@@ -526,10 +550,59 @@ func runServer(ctx context.Context, cfg *Config, logger *Logger) error {
 		activeMu.Unlock()
 
 		go func(c quic.Connection, cctx context.Context) {
-			if err := runTunnelWithTUN(cctx, c, tun, logger); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runServerTunnel(cctx, c, tun, tunReadCh, logger); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Errorf("tunnel closed: %v", err)
 			}
 		}(conn, connCtx)
+	}
+}
+
+// runServerTunnel bridges a single QUIC connection to the shared TUN device.
+// TX direction reads from the tunReadCh channel (fed by the single TUN reader)
+// instead of calling tun.Read directly, so the goroutine exits cleanly when
+// the context is cancelled — no leak, no packet theft.
+func runServerTunnel(ctx context.Context, conn datagramConn, tun *water.Interface, tunReadCh <-chan []byte, logger *Logger) error {
+	errCh := make(chan error, 1)
+
+	// TX: tunReadCh → QUIC (context-aware, exits on cancel)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case pkt, ok := <-tunReadCh:
+				if !ok {
+					return
+				}
+				if err := conn.SendDatagram(pkt); err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+					return
+				}
+				logger.Debugf("TX %d bytes", len(pkt))
+			}
+		}
+	}()
+
+	// RX: QUIC → TUN
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-errCh:
+			return err
+		default:
+		}
+		pkt, err := conn.ReceiveDatagram(ctx)
+		if err != nil {
+			return err
+		}
+		if _, err := tun.Write(pkt); err != nil {
+			return err
+		}
+		logger.Debugf("RX %d bytes", len(pkt))
 	}
 }
 
