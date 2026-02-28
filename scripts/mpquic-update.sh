@@ -57,11 +57,11 @@ git pull --ff-only
 
 NEW_HEAD="$(git rev-parse --short HEAD)"
 if [[ "$OLD_HEAD" == "$NEW_HEAD" ]]; then
-  log "already up-to-date ($NEW_HEAD), nothing to do."
-  exit 0
+  log "already up-to-date ($NEW_HEAD), proceeding with rebuild+restart."
+else
+  log "updated: $OLD_HEAD → $NEW_HEAD"
+  git --no-pager log --oneline "${OLD_HEAD}..${NEW_HEAD}" | sed 's/^/  /'
 fi
-log "updated: $OLD_HEAD → $NEW_HEAD"
-git --no-pager log --oneline "${OLD_HEAD}..${NEW_HEAD}" | sed 's/^/  /'
 
 # ── Step 2: Build ─────────────────────────────────────────────────────────
 log "--- building ---"
