@@ -1,166 +1,313 @@
-# Roadmap implementazione MPQUIC (allineata a documenti fornitore)
+# Roadmap implementazione MPQUIC
 
-## Stato attuale consolidato
+*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-02-28*
 
-### Server VPS
-- `mpquic@1..6` attivi
-- interfacce `mpq1..mpq6` create
-- listener UDP su `45001..45006` attivi
+---
 
-### Client MPQUIC
-- `mpquic@4`, `mpquic@5` e `mpquic@6` attivi e testati end-to-end
-- ping tunnel riusciti:
-  - `mpq4 (10.200.4.1 -> 10.200.4.2)`
-  - `mpq5 (10.200.5.1 -> 10.200.5.2)`
-  - `mpq6 (10.200.6.1 -> 10.200.6.2)`
-- bind sorgente QUIC verificato:
-  - WAN4 `enp7s6` (`10.150.19.99`)
-  - WAN5 `enp7s7` (`192.168.1.102`)
-  - WAN6 `enp7s8` (`100.110.241.142`)
+## Concetti chiave: Multi-link vs Multi-tunnel vs Multi-path
 
-### Gap bloccanti attuali
-- `enp7s3..enp7s5` senza IPv4 DHCP (solo link-local)
-- di conseguenza `mpquic@1..@3` non possono bindare su WAN1..WAN3
-- stato fase baseline: `3/6` tunnel realmente operativi
-
-### Nota operativa (25/02)
-- WAN1 e WAN2 sono temporaneamente senza modem collegato: il test DHCP/bring-up è pianificato a venerdì mattina.
-- Questo è considerato scenario reale di esercizio (modem unplug/offline): il sistema deve degradare in modo controllato (istanza WAN assente stop, istanze sane up).
-
-### Nota operativa (26/02)
-- Riscontrata ricorrenza di instabilità sul tratto interno VM MPQUIC <-> OpenWRT (sintomo: tunnel up ma forwarding incoerente).
-- Procedura iniziale standardizzata: **restart network VM client prima del reboot VM**; reboot come fallback finale.
-
-## Roadmap aggiornata
-
-## Fase 1 — Baseline 6 sessioni QUIC 1:1 (NO multipath) [in corso]
-Obiettivo: 6 sessioni indipendenti, una per WAN, senza cambiare la logica L3 esistente.
-
-Passi:
-1. Tenere VPS con `mpquic@1..6` attivi (completato)
-2. Ripristinare IPv4 su WAN1..WAN4 (`enp7s3..enp7s6`) lato client (bloccante)
-3. Attivare `mpquic@1..@4` e verificare E2E su tutte le coppie `/30`
-4. Verificare bind sorgente su interfacce corrette (`ss -unap | grep mpquic`)
-
-Done criteria:
-- `6/6` sessioni QUIC attive e stabili
-- `6/6` ping tunnel ok
-
-## Fase 2 — Traffico LAN instradato nel tunnel corretto (priorità immediata)
-Obiettivo: dimostrare che il traffico reale LAN entra nel tunnel dedicato e viaggia come QUIC su WAN.
-
-Primo use-case obbligatorio:
-1. traffico da `LAN1` (`enp6s20`, subnet `172.16.1.0/30`) instradato su `mpq1`
-2. conferma che il traffico sul tratto WAN è UDP QUIC (porta 45001), non TCP raw
-
-Passi operativi:
-1. attivare pienamente `mpquic@1` (richiede IPv4 su `enp7s3`)
-2. aggiungere routing/forwarding persistente `LAN1 -> mpq1` (senza alterare policy WAN esistente)
-3. sul client fare capture su WAN1 (`tcpdump -ni enp7s3 udp port 45001`)
-4. generare traffico test da LAN1 (ICMP/TCP/UDP)
-5. verificare contemporaneamente:
-   - pacchetti nel tunnel `mpq1`
-   - pacchetti QUIC UDP su `enp7s3:45001`
-
-Done criteria:
-- traffico LAN1 passa nel tunnel `mpq1`
-- evidenza packet-level dell'incapsulamento QUIC
-
-## Fase 3 — Generalizzazione LAN2..LAN6 -> mpq2..mpq6
-Obiettivo: estendere la logica validata su LAN1 a tutte le 6 LAN.
-
-Passi:
-1. replicare policy persistenti per ogni coppia `LANx -> mpqx`
-2. validare per ogni WAN con test e capture
-3. baseline prestazionale per canale (throughput, RTT, loss, jitter)
-
-## Fase 4 — Multipath QUIC (single logical connection)
-Obiettivo: superare limite single-flow e implementare aggregazione/strategie dinamiche.
-
-Stato avanzamento (26/02):
-- Step 1 completato in modalità sperimentale nel runtime (`multipath_enabled` + `multipath_paths` con scheduler path-aware, fail-cooldown e recovery path-level).
-- Backward compatibility mantenuta: configurazioni single-path esistenti invariate.
-- Aggiunta degradazione controllata: il multipath parte con subset path attivi se almeno un path è disponibile.
-- Aggiunta telemetria path-level base su log runtime (`path telemetry ...`).
-- Avviata prima versione policy engine statico (`multipath_policy`: `priority|failover|balanced`).
-- Implementato policy engine dataplane class-based:
-  - classifier L3/L4 (`protocol`, `src/dst_cidrs`, `src/dst_ports`, `dscp`)
-  - mapping classi (`critical|default|bulk`) -> policy scheduler
-  - supporto duplication per classi critiche
-  - configurazione sia inline (`dataplane`) sia via file separato (`dataplane_config_file`, consigliato)
-- TLS allineato a Go moderno: certificato server con SAN e trust CA esplicito lato client.
-
-Capacità target (da documenti fornitore):
-- bonding (aggregazione)
-- backup/failover
-- duplication per traffico mission critical
-- policy/QoS applicative
-- monitoraggio link in tempo reale
-
-Passi:
-1. introdurre sessione logica multipath con scheduler path-aware (completato, sperimentale)
-2. aggiungere orchestrazione cross-sessione (policy engine) (completato: policy engine dataplane class-based da config)
-3. implementare telemetria path-level (RTT/loss/capacità) (in corso: baseline log counters disponibile)
-4. validare su scenari LEO variabili (handover/jitter)
-
-Gap tecnici residui Fase 4:
-- API di controllo orchestrator locale implementata (`/healthz`, `/dataplane`, `/dataplane/validate`, `/dataplane/apply`, `/dataplane/reload`).
-- Hardening API residuo: persistenza policy/versioning e controllo accessi avanzato.
-- Metriche RTT/loss/capacità non ancora persistite/esposte via endpoint strutturato.
-
-Track diagnostica stabilità (in parallelo):
-- raccolta long-running (`mpquic-long-diagnostics.sh`) su client/server per correlare eventi crash/flap con stato path, routing e journal.
-- parser post-mortem (`mpquic-postmortem.sh`) per timeline e contatori aggregati client/server.
-
-Stato sintetico roadmap (26/02):
-- Fase 1: parziale (operatività reale su subset WAN attive)
-- Fase 2: in progresso (routing/checking LAN->tunnel automatizzato)
-- Fase 3: non completata end-to-end su tutte le WAN
-- Fase 4: Step 1 completato sperimentale, Step 2 completato (policy engine class-based)
-- Fase 5: hardening TLS in progresso (SAN + trust allineati)
-
-## Fase 5 — Sicurezza TLS hardening
-Obiettivo: canale cifrato con gestione certificati persistente.
-
-Stato:
-- oggi TLS è già presente (self-signed runtime)
-
-Evoluzione richiesta:
-1. certificato server persistente su file (`cert.pem`/`key.pem`)
-2. trust esplicito lato client (no `InsecureSkipVerify`)
-3. chiave minima >= 1024 bit (raccomandato 2048)
-4. rotazione certificati e procedure operative documentate
-
-## Prossimo step operativo (immediato)
-
-1. Stabilizzare test multipath senza contesa con `mpquic@4/@5/@6` (sessione dedicata di test o finestre controllate)
-2. Aggiungere API di gestione policy per integrazione orchestrator esterno (load/validate/apply)
-  - stato: implementazione base completata (Control API locale)
-  - riferimento configurazione: `docs/DATAPLANE_ORCHESTRATOR.md`
-3. Aggiungere metriche RTT/loss per path e reporting strutturato
-4. Validare scenario modem unplug su path multipath:
-  - down di una WAN attiva
-  - continuità traffico sui path residui
-  - rientro automatico del path ripristinato
-5. Parallelamente continuare Fase 1/2 su WAN1/WAN2 per completare baseline 6/6
-
-## Comandi base di verifica
-
-Server:
-```bash
-for i in 1 2 3 4 5 6; do systemctl is-active mpquic@$i.service; done
-ip -br a | egrep '^mpq[1-6]'
-ss -lunp | egrep '4500[1-6]'
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ Multi-link (Step 1 ✅)                                               │
+│   1 tunnel QUIC per ogni link WAN fisico                             │
+│   mpq4 ↔ WAN4, mpq5 ↔ WAN5, mpq6 ↔ WAN6                          │
+│   Ogni tunnel trasporta TUTTO il traffico della LAN associata        │
+├──────────────────────────────────────────────────────────────────────┤
+│ Multi-tunnel per link (Step 1+2 ← PROSSIMO STEP)                    │
+│   N tunnel QUIC sullo STESSO link fisico                             │
+│   Ogni tunnel trasporta UNA classe di traffico (applicazione)        │
+│   "Many small pipes are faster than a single large tube"             │
+│   Client: nftables classifica traffico → TUN dedicata per classe     │
+│   Server: porta condivisa, accetta N connessioni, UNA TUN condivisa  │
+├──────────────────────────────────────────────────────────────────────┤
+│ Multi-path per tunnel (Step 4 — futuro)                              │
+│   1 tunnel che usa N link per redundanza                             │
+│   Bonding: aggrega bandwidth di più WAN                              │
+│   Backup: failover automatico su link alternativo                    │
+│   Duplication: pacchetti critici inviati su più link                 │
+│   Richiede QUIC Multipath (RFC 9443) o implementazione applicativa   │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-Client:
+## Visione d'insieme (5 Step dal PDF competitor)
+
+| Step | Descrizione | Nostro concetto | Stato |
+|------|-------------|-----------------|-------|
+| **1** | QUIC tunnels multi-link 1:1 | Multi-link | **✅ DONE** |
+| **2** | Traffico distribuito per applicazione, non per pacchetto | Multi-tunnel per link | **🔄 IN PROGRESS** |
+| **3** | BBRv3 / Wave congestion control | CC per tunnel | **⬜ NOT STARTED** |
+| **4** | Bonding, Backup, Duplicazione | Multi-path per tunnel | **⬜ NOT STARTED** |
+| **5** | AI/ML-Ready (Quality on Demand) | Decision layer | **⬜ NOT STARTED** |
+
+---
+
+## Fase 1 — Multi-link: Baseline 6 sessioni QUIC 1:1 ✅ COMPLETATA
+
+**Obiettivo**: 6 sessioni indipendenti, una per WAN, tunnel bidirezionali.
+
+### Risultati
+- 6 istanze server VPS (`mpquic@1..6`) attive su porte 45001-45006
+- 3 tunnel client attivi e bidirezionali: mpq4, mpq5, mpq6
+- WAN1-3 senza modem (degradazione controllata, istanze inattive)
+- Policy routing source-based per 6 tabelle (`wan1..wan6`)
+- LAN transit `172.16.x.1/30` instradato nel tunnel dedicato
+- TLS hardened: certificati con SAN, trust CA esplicito, no InsecureSkipVerify
+- Watchdog tunnel con peer-liveness check e restart automatico
+- Interface hotplug via networkd-dispatcher
+- Network: pure systemd-networkd (ifupdown rimosso)
+
+### Bug risolti
+- Server goroutine leak su riconnessione client (commit `73474a9`)
+- Gateway detection avvelenato da lease dhclient stantii (commit `3ac4036`)
+- Routing table incompleta per wan5 (fix combinato dei due sopra)
+
+---
+
+## Fase 2 — Multi-tunnel per link: QoS per applicazione 🔄 IN CORSO
+
+**Obiettivo (Step 2 PDF)**: più tunnel QUIC sullo STESSO link, ciascuno dedicato a una classe
+di traffico. Il packet loss su un link impatta solo le applicazioni di quella classe.
+
+> "Each pipe (ie application) is independent and does not suffer the packet loss of the others"
+> "Each tunnel is associated to a homogeneous type of traffic and application"
+
+### Architettura Multi-tunnel
+
+```
+CLIENT (VM MPQUIC)                                            SERVER (VPS)
+                                                             
+ LAN traffic ──▶ nftables classifier                         ┌─────────────────────┐
+                  │                                          │ porta 45010         │
+                  ├─ VoIP (UDP 5060) ──▶ tun-critical ─┐     │                     │
+                  │                     10.200.10.1/24  │     │  conn_1 ◄──────────┤
+                  ├─ HTTPS (TCP 443) ──▶ tun-default  ─┼QUIC─┤  conn_2 (same port)│──▶ tun-mt1
+                  │                     10.200.10.5/24  │WAN5 │  conn_3            │   10.200.10.0/24
+                  └─ Bulk (TCP 5001) ──▶ tun-bulk     ─┘     │                     │
+                                        10.200.10.9/24       │  routing table:     │──▶ NAT ──▶ Internet
+                                                             │  .1 → conn_1       │
+                                                             │  .5 → conn_2       │
+                                                             │  .9 → conn_3       │
+                                                             └─────────────────────┘
+```
+
+**Porta condivisa**: N connessioni QUIC client (diverse porte sorgente) → stessa porta server →
+stessa TUN server. Il server mantiene un mapping `peer_TUN_IP → QUIC_connection` per il routing
+di ritorno. Ogni connessione è identificata dal suo Connection ID QUIC, non dalla porta.
+
+### Modifiche Go necessarie
+
+1. **Server: rimuovere logica `superseded`** → accettare N connessioni concorrenti sulla stessa porta
+2. **Server: peer-IP routing table** → mapping `dst_IP → connection` per pacchetti TUN→QUIC
+3. **Server: TUN subnet** → `/24` invece di `/30`, condivisa da tutte le connessioni
+4. **Config: `connection_id`** → ogni connessione client dichiara il suo TUN IP peer al server
+
+### Classi di traffico
+
+| Classe | Tipo applicazioni | Policy | Esempio regole nftables |
+|--------|-------------------|--------|--------------------------|
+| **critical** | VoIP, telemetria, controllo | Low latency | UDP 5060, 10000-20000, DSCP 46 |
+| **default** | Web, HTTPS, API, business apps | Balanced | TCP 80, 443, 8443 |
+| **bulk** | Backup, sync, download | Best effort | TCP 5001-6000, tutto il resto |
+
+### Step 2.1 — Server multi-connessione (modifica Go) ⬜
+1. Refactor `runServer()`: rimuovere active/supersede, accettare N conn concorrenti
+2. Implementare `connectionTable`: mappa `netip.Addr → quic.Connection`
+3. La goroutine TUN-reader legge pacchetto, estrae dst IP, lookup nella tabella
+4. Handshake: il client invia il proprio TUN IP come primo datagram (registration)
+5. Cleanup automatico: rimuovere connessione dalla tabella quando il contesto termina
+6. TUN usa subnet `/24` (es. `10.200.10.0/24`)
+7. Test unitario: 3 connessioni parallele, verifica routing bidirezionale
+
+### Step 2.2 — Client: istanze per-classe con nftables classifier ⬜
+1. Definire 3 classi: `critical`, `default`, `bulk`
+2. Per ogni classe: una istanza `mpquic` client (diversa TUN, stesso `bind_ip` WAN)
+3. Script `mpquic-nft-classifier.sh`:
+   - Clasifica traffico LAN con nftables marks (fwmark)
+   - Policy routing: `fwmark X → table class-X → default dev tun-class-X`
+   - NAT MASQUERADE per ciascuna TUN in uscita verso il tunnel
+4. Config YAML per-classe (TUN IP diverso, stessa WAN, stessa porta server)
+5. Systemd units per-classe
+
+### Step 2.3 — Deploy e test su infra reale ⬜
+1. Deploy server multi-connessione sul VPS (porta 45010, TUN `mt1`, `10.200.10.0/24`)
+2. Deploy 3 istanze client su VM (WAN5):
+   - `mpquic-critical@5`: TUN `cr5` → 10.200.10.1, bind WAN5, server :45010
+   - `mpquic-default@5`: TUN `df5` → 10.200.10.5, bind WAN5, server :45010
+   - `mpquic-bulk@5`:    TUN `bk5` → 10.200.10.9, bind WAN5, server :45010
+3. Installare nftables classifier
+4. Verificare:
+   - 3 connessioni concorrenti sulla stessa porta server
+   - Ping peer bidirezionale per ogni classe TUN
+   - Traffico VoIP → tun-critical, HTTPS → tun-default, bulk → tun-bulk
+   - tcpdump: tutto il traffico QUIC esce sulla stessa WAN5
+
+### Step 2.4 — Test isolamento e QoS ⬜
+1. **Test isolamento loss**: iniettare loss con `netem` su WAN5
+   - Verificare che ogni classe QUIC gestisce la loss indipendentemente
+   - Comparare con tunneling TCP: loss causa HOL blocking per TUTTO il traffico
+2. **Test traffico misto**: iperf3 bulk + VoIP simulato contemporaneamente
+   - Misurare che VoIP mantiene bassa latenza anche sotto carico bulk
+3. **Benchmark**: throughput, RTT, jitter per ogni classe
+4. Documentare risultati per presentazione (ROI §23 PDF)
+
+### Step 2.5 — Generalizzazione multi-link + multi-tunnel ⬜
+1. Replicare su WAN4 e WAN6: stesse 3 classi per ogni link
+2. Layout finale: 3 WAN × 3 classi = 9 tunnel
+   - 3 porte server: 45010 (WAN4), 45011 (WAN5), 45012 (WAN6)
+   - Ogni porta accetta 3 connessioni (una per classe)
+3. Possibilità: classi diverse su link diversi (critical su link migliore, bulk su link cheap)
+4. nftables: aggiungere scelta link per classe (es. critical → WAN5 per RTT minimo)
+
+### Done criteria Fase 2
+- [ ] Server accetta N connessioni concorrenti sulla stessa porta
+- [ ] 3 classi traffico (critical/default/bulk) su TUN separate
+- [ ] nftables classifier funzionante con routing per-classe
+- [ ] Traffico applicativo smistato correttamente (verificato con tcpdump)
+- [ ] Isolamento dimostrato: loss su un tunnel non impatta gli altri
+- [ ] Risultati documentati con metriche
+
+---
+
+## Fase 3 — BBRv3 Congestion Control ⬜ NON INIZIATA
+
+**Obiettivo (Step 3 PDF)**: sostituire Cubic (default quic-go) con BBRv3 per ottimizzare
+throughput su canali LEO con alta variabilità RTT e loss non da congestione.
+
+> "Cubic: slow and decreasing. BBRv3 is relatively fast."
+> "Congestion control of Wave was created for high packet loss environments"
+
+### Motivazione (dal PDF §10-12)
+- **Cubic**: lento a crescere, interpreta OGNI loss come congestione → rallenta drasticamente
+- **BBRv3**: model-based CC, stima bandwidth e RTT, non rallenta su loss isolati
+- **Wave** (futuro): CC ottimizzato specificamente per canali LEO altamente variabili
+
+### Stato tecnico
+- quic-go v0.48.2 usa Cubic come default, NESSUNA API CC pubblica
+- quic-go v0.59+ (richiede Go 1.24+) potrebbe avere API CC estensibili
+- Nota: QUIC DATAGRAM sfrutta CC solo per flow control, non per packet-level reliability
+
+### Opzioni di implementazione
+1. **Upgrade quic-go + Go** a versioni più recenti
+2. **Fork quic-go** con BBR sender abilitato
+3. **CC applicativo** sopra QUIC datagram: pacing + bandwidth estimation a livello tunnel
+4. **Diverso CC per classe**: critical usa pacing conservativo, bulk usa BBR aggressivo
+
+### Steps
+1. Upgrade Go 1.22 → 1.24, quic-go v0.48 → v0.59+
+2. Valutare API CC in quic-go recente
+3. PoC: BBR vs Cubic su canale Starlink reale, singolo tunnel
+4. A/B test con metriche comparative (throughput, recovery time)
+5. Parametrizzare in config YAML (`congestion_control: cubic|bbr`)
+6. Benchmark su profili loss/jitter simulati (netem) e reali
+7. Stretch: prototipo "Wave-like" (pacing su bandwidth estimation, ignora loss isolati)
+
+---
+
+## Fase 4 — Multi-path per tunnel: Bonding, Backup, Duplicazione ⬜ NON INIZIATA
+
+**Obiettivo (Step 4 PDF)**: un singolo tunnel "applicativo" può usare N link fisici per
+resilienza e aggregazione bandwidth.
+
+> "New services: Bonding, Backup, Duplications"
+
+### Prerequisiti
+- Fase 2 completata (multi-tunnel funzionante)
+- quic-go con supporto Multipath QUIC (RFC 9443) — oppure implementazione applicativa
+
+### Servizi target
+
+| Servizio | Meccanismo | Caso d'uso |
+|----------|-----------|------------|
+| **Bonding** | Un tunnel usa 2+ WAN, pacchetti distribuiti round-robin/weighted | Max throughput |
+| **Active Backup** | Tunnel su WAN primaria, failover su WAN secondaria | Low latency + resilienza |
+| **Duplicazione** | Pacchetti critico inviati su 2+ WAN simultaneamente | Zero-loss per VoIP/controllo |
+
+### Opzioni implementative
+1. **QUIC Multipath nativo** (RFC 9443): una connessione QUIC, N path di rete
+   - Pro: standard IETF, gestione path integrata nel protocollo
+   - Contro: richiede quic-go recente + Go 1.24+
+2. **Applicativo**: N connessioni QUIC (una per WAN), aggregazione nella nostra `multipathConn`
+   - Pro: funziona con quic-go attuale, più controllo
+   - Contro: overhead applicativo, duplicazione gestita manualmente (già implementata nel codice)
+3. **Ibrido**: multipath nativo dove possibile, fallback applicativo
+
+### Il codice "multipath" esistente
+Il codice `multipathConn` già presente implementa Opzione 2 a livello applicativo:
+- N connessioni QUIC su N WAN diverse → singola TUN
+- Scheduler path-aware con priority/weight/failover
+- Duplicazione per classi critiche
+- Reconnect con backoff e recovery automatica
+
+**Gap**: non è mai stato testato sulla infra reale e ha un problema di routing server-side
+(ogni path punta a una porta server diversa con TUN diversa). Va riadattato per usare
+server multi-connessione (Fase 2) come base.
+
+---
+
+## Fase 5 — Metriche strutturate e Osservabilità ⬜ NON INIZIATA
+
+**Obiettivo (§20 PDF)**: metriche machine-readable per O&M e portale cliente.
+
+> "O&M with more visibility and control: More KPIs"
+
+### Steps
+1. Endpoint `/metrics` Prometheus-compatible:
+   - Per tunnel: RTT, loss rate, throughput, stato, errori, uptime
+   - Per classe: packets/bytes tx/rx, duplicazioni
+   - Globale: uptime, connessioni, riconnessioni
+2. Persistenza locale metriche (ring buffer o TSV rotato)
+3. Dashboard Grafana template
+4. Allarmi configurabili (loss > soglia, tunnel down prolungato)
+5. API REST per KPI portale cliente
+
+---
+
+## Fase 6 — AI/ML-Ready (Quality on Demand) ⬜ NON INIZIATA
+
+**Obiettivo (Step 5 PDF)**: layer AI/ML che adatta le policy QoS in base a telemetria real-time.
+
+> "The characteristics of the tunnel can be adapted based on decisions coming from an AI/ML layer"
+
+### Steps
+1. API bidirezionale: AI legge telemetria → produce policy → applica via Control API
+2. "Quality on Demand" come contratto API formalizzato
+3. Feature store: storico metriche per training modelli
+4. PoC: rule-based decision engine (soglie RTT/loss → switch policy)
+5. Evoluzione: modello ML per predizione qualità canale LEO
+
+---
+
+## Infrastruttura (2026-02-28)
+
+### Client VM (VMID 200, Debian 12)
+| Interfaccia | Ruolo | IP | Stato |
+|-------------|-------|----|-------|
+| enp6s18 | MGMT1 | 10.10.11.100/24 | ✅ |
+| enp6s19 | MGMT2 | 10.10.10.100/24 | ✅ |
+| enp6s20-23 | LAN1-4 | 172.16.{1-4}.1/30 | ✅ |
+| enp7s1-2 | LAN5-6 | 172.16.{5-6}.1/30 | ✅ |
+| enp7s3-5 | WAN1-3 | — | No modem |
+| enp7s6 | WAN4 | 192.168.1.100 | ✅ mpq4 ~108ms |
+| enp7s7 | WAN5 | 10.150.19.95 | ✅ mpq5 ~13ms |
+| enp7s8 | WAN6 | 100.64.86.226 | ✅ mpq6 ~34ms |
+
+### Server VPS (Ubuntu 24.04, 172.238.232.223)
+- 6 listener QUIC (45001-45006)
+- NFT: UDP 45001-45006 accept
+- Route di ritorno su mpq1-mpq6
+
+---
+
+## Comandi verifica rapida
+
 ```bash
-for i in 1 2 3 4 5 6; do sudo systemctl is-active mpquic@$i.service; done
-ip -br a show dev enp7s3
-ip -br a show dev enp7s4
-ip -br a show dev enp7s5
-ip -br a show dev enp7s6
-ip -br a show dev enp7s7
-ip -br a show dev enp7s8
-sudo ss -unap | grep mpquic
+# Server VPS
+for i in 1 2 3 4 5 6; do systemctl is-active mpquic@$i.service; done
+ss -lunp | egrep '4500[1-6]'
+
+# Client
+for i in 4 5 6; do
+  printf "mpq%d: " "$i"
+  ping -I "10.200.${i}.1" -c 2 -W 2 "10.200.${i}.2" 2>&1 | tail -1
+done
 ```

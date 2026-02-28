@@ -56,9 +56,59 @@ Ogni YAML include:
 - `tun_cidr`: CIDR locale TUN
 - `log_level`: `debug|info|error`
 
-## Architettura multipath (single logical connection, client)
+## Architettura a 3 livelli
+
+### Livello 1: Multi-link (IMPLEMENTATO)
+Un tunnel QUIC per WAN link fisico. 1:1 mapping. Ogni tunnel trasporta tutto il traffico della LAN associata.
+
+```
+WAN4 (enp7s6) ──── mpq4 ──── 10.200.4.1/30 ↔ 10.200.4.2/30 (:45004)
+WAN5 (enp7s7) ──── mpq5 ──── 10.200.5.1/30 ↔ 10.200.5.2/30 (:45005)
+WAN6 (enp7s8) ──── mpq6 ──── 10.200.6.1/30 ↔ 10.200.6.2/30 (:45006)
+```
+
+### Livello 2: Multi-tunnel per link (IN SVILUPPO)
+N tunnel QUIC sullo STESSO link, ciascuno dedicato a una classe di traffico.
+Il classificatore è esterno (nftables + fwmark + policy routing).
+Tutti i tunnel convergono sulla STESSA porta server e sulla STESSA TUN server.
+
+```
+CLIENT (WAN5)                                         SERVER (:45010)
+  tun-cr5 (10.200.10.1) ─┐                            ┌─ conn_1 ──┐
+  tun-df5 (10.200.10.5) ─┼─── QUIC (diverse src port)─┼─ conn_2 ──┼─ mt1 (10.200.10.0/24)
+  tun-bk5 (10.200.10.9) ─┘    same WAN, same dst port ┼─ conn_3 ──┘
+                                                        │
+                                                  routing table:
+                                                  .1 → conn_1
+                                                  .5 → conn_2
+                                                  .9 → conn_3
+```
+
+**Server multi-connessione**: accetta N connessioni sulla stessa porta.
+Il server mantiene `connectionTable` che mappa `peer_TUN_IP → QUIC_connection`.
+Alla connessione iniziale, il client invia un pacchetto di registrazione con il proprio TUN IP.
+
+**Classificazione esterna (nftables)**:
+1. Traffico LAN entra su interfacce enp6s20-23, enp7s1-2
+2. nftables ispeziona L3/L4 (protocollo, porte, DSCP) e applica fwmark
+3. Policy routing: `fwmark X → table class-X → default dev tun-class-X`
+4. Ogni TUN ha la propria istanza `mpquic` client
+5. NAT MASQUERADE su ogni TUN per gestire traffico di ritorno
+
+### Livello 3: Multi-path per tunnel (FUTURO)
+Un singolo tunnel può usare N link per resilienza:
+- Bonding: aggregazione bandwidth su più WAN
+- Backup: failover automatico
+- Duplicazione: pacchetti critici su più link simultaneamente
+
+Richiede QUIC Multipath (RFC 9443) o implementazione applicativa.
+Il codice `multipathConn` esistente implementa una versione applicativa di questo livello.
+
+## Architettura multipath applicativa (codice esistente, client)
 
 Quando `multipath_enabled: true`, il client non usa più il singolo blocco `bind_ip/remote_addr/remote_port`, ma crea una sessione logica con N path definiti in `multipath_paths`.
+
+**Nota**: questo codice è stato scritto per il Livello 3 (bonding) e verrà riadattato quando il server multi-connessione (Livello 2) sarà pronto. Non è stato ancora testato su infra reale.
 
 Per ogni elemento `multipath_paths[i]`:
 1. risoluzione bind su `bind_ip` (`if:<ifname>` supportato)

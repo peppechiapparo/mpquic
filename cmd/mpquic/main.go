@@ -34,6 +34,7 @@ type Config struct {
 	BindIP                string                `yaml:"bind_ip"`
 	RemoteAddr            string                `yaml:"remote_addr"`
 	RemotePort            int                   `yaml:"remote_port"`
+	MultiConnEnabled      bool                  `yaml:"multi_conn_enabled"`
 	MultipathEnabled      bool                  `yaml:"multipath_enabled"`
 	MultipathPolicy       string                `yaml:"multipath_policy"`
 	DataplaneConfigFile   string                `yaml:"dataplane_config_file"`
@@ -157,6 +158,67 @@ type multipathConn struct {
 type datagramConn interface {
 	SendDatagram([]byte) error
 	ReceiveDatagram(context.Context) ([]byte, error)
+}
+
+// connectionTable maps TUN peer IPs to their QUIC connection for multi-conn server.
+// When a packet is read from the shared TUN, the dst IP is looked up to find the
+// right QUIC connection for the return path.
+type connectionTable struct {
+	mu    sync.RWMutex
+	byIP  map[netip.Addr]*connEntry
+}
+
+type connEntry struct {
+	conn   quic.Connection
+	cancel context.CancelFunc
+	peerIP netip.Addr
+}
+
+func newConnectionTable() *connectionTable {
+	return &connectionTable{byIP: make(map[netip.Addr]*connEntry)}
+}
+
+func (ct *connectionTable) register(peerIP netip.Addr, conn quic.Connection, cancel context.CancelFunc) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	// If there's an old connection for this IP, supersede it
+	if old, ok := ct.byIP[peerIP]; ok {
+		old.cancel()
+		_ = old.conn.CloseWithError(0, "superseded")
+	}
+	ct.byIP[peerIP] = &connEntry{conn: conn, cancel: cancel, peerIP: peerIP}
+}
+
+func (ct *connectionTable) unregister(peerIP netip.Addr) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	delete(ct.byIP, peerIP)
+}
+
+func (ct *connectionTable) lookup(dstIP netip.Addr) (quic.Connection, bool) {
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
+	entry, ok := ct.byIP[dstIP]
+	if !ok {
+		return nil, false
+	}
+	return entry.conn, true
+}
+
+func (ct *connectionTable) count() int {
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
+	return len(ct.byIP)
+}
+
+func (ct *connectionTable) closeAll() {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	for ip, entry := range ct.byIP {
+		entry.cancel()
+		_ = entry.conn.CloseWithError(0, "shutdown")
+		delete(ct.byIP, ip)
+	}
 }
 
 type Logger struct {
@@ -462,6 +524,161 @@ func validateDataplaneConfig(dp DataplaneConfig, paths []MultipathPathConfig) er
 }
 
 func runServer(ctx context.Context, cfg *Config, logger *Logger) error {
+	if cfg.MultiConnEnabled {
+		return runServerMultiConn(ctx, cfg, logger)
+	}
+	return runServerSingleConn(ctx, cfg, logger)
+}
+
+// runServerMultiConn accepts N concurrent QUIC connections on the same port,
+// all sharing a single TUN device. Each client registers its TUN peer IP by
+// sending it as the first datagram. The TUN reader dispatches return packets
+// to the correct connection by inspecting the destination IP.
+func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error {
+	bindIP, err := resolveBindIP(cfg.BindIP)
+	if err != nil {
+		return err
+	}
+
+	tun, err := water.New(water.Config{DeviceType: water.TUN, PlatformSpecificParams: water.PlatformSpecificParams{Name: cfg.TunName}})
+	if err != nil {
+		return err
+	}
+	defer tun.Close()
+
+	ct := newConnectionTable()
+	defer ct.closeAll()
+
+	// Single TUN reader dispatches packets to the right connection via dst IP.
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			n, readErr := tun.Read(buf)
+			if readErr != nil {
+				logger.Errorf("tun read error: %v", readErr)
+				return
+			}
+			pkt := buf[:n]
+			if len(pkt) < 20 {
+				continue
+			}
+
+			// Extract dst IP from IPv4 header (bytes 16-19)
+			version := pkt[0] >> 4
+			var dstIP netip.Addr
+			if version == 4 && len(pkt) >= 20 {
+				dstIP = netip.AddrFrom4([4]byte{pkt[16], pkt[17], pkt[18], pkt[19]})
+			} else if version == 6 && len(pkt) >= 40 {
+				var b [16]byte
+				copy(b[:], pkt[24:40])
+				dstIP = netip.AddrFrom16(b)
+			} else {
+				continue
+			}
+
+			conn, ok := ct.lookup(dstIP)
+			if !ok {
+				logger.Debugf("no connection for dst=%s, dropping", dstIP)
+				continue
+			}
+
+			pktCopy := append([]byte(nil), pkt...)
+			if sendErr := conn.SendDatagram(pktCopy); sendErr != nil {
+				logger.Debugf("TX to %s failed: %v", dstIP, sendErr)
+			}
+		}
+	}()
+
+	tlsConf, err := loadServerTLSConfig(cfg)
+	if err != nil {
+		return err
+	}
+	listenAddr := net.JoinHostPort(bindIP, fmt.Sprintf("%d", cfg.RemotePort))
+	logger.Infof("server multi-conn listen=%s tun=%s", listenAddr, cfg.TunName)
+	listener, err := quic.ListenAddr(listenAddr, tlsConf, &quic.Config{
+		EnableDatagrams: true,
+		KeepAlivePeriod: 15 * time.Second,
+		MaxIdleTimeout:  60 * time.Second,
+	})
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	for {
+		conn, err := listener.Accept(ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		}
+		logger.Infof("multi-conn accepted remote=%s", conn.RemoteAddr())
+
+		go func(c quic.Connection) {
+			if err := runServerMultiConnTunnel(ctx, c, tun, ct, logger); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Errorf("multi-conn tunnel closed: %v", err)
+			}
+		}(conn)
+	}
+}
+
+// runServerMultiConnTunnel handles a single QUIC connection in multi-conn mode.
+// First datagram received is expected to be a 4-byte registration containing the
+// client's TUN IP. After registration, all received datagrams are written to TUN.
+// Return path is handled by the shared TUN reader via connectionTable.
+func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, tun *water.Interface, ct *connectionTable, logger *Logger) error {
+	connCtx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	// Wait for registration datagram: first datagram = 4-byte IPv4 peer IP
+	var peerIP netip.Addr
+	registered := false
+
+	for {
+		pkt, err := conn.ReceiveDatagram(connCtx)
+		if err != nil {
+			return err
+		}
+
+		if !registered {
+			// Registration: first datagram is a 4-byte IPv4 address
+			if len(pkt) == 4 {
+				peerIP = netip.AddrFrom4([4]byte{pkt[0], pkt[1], pkt[2], pkt[3]})
+				ct.register(peerIP, conn, cancel)
+				registered = true
+				logger.Infof("multi-conn registered peer=%s remote=%s", peerIP, conn.RemoteAddr())
+				continue
+			}
+			// Not a registration packet, try to auto-detect from IP header
+			if len(pkt) >= 20 {
+				version := pkt[0] >> 4
+				if version == 4 {
+					peerIP = netip.AddrFrom4([4]byte{pkt[12], pkt[13], pkt[14], pkt[15]})
+					ct.register(peerIP, conn, cancel)
+					registered = true
+					logger.Infof("multi-conn auto-registered peer=%s remote=%s (from packet src)", peerIP, conn.RemoteAddr())
+					// Fall through to write this packet to TUN
+				}
+			}
+		}
+
+		if !registered {
+			logger.Debugf("dropping pre-registration packet len=%d", len(pkt))
+			continue
+		}
+
+		if _, err := tun.Write(pkt); err != nil {
+			ct.unregister(peerIP)
+			return err
+		}
+		logger.Debugf("RX %d bytes from peer=%s", len(pkt), peerIP)
+	}
+}
+
+// runServerSingleConn is the original single-connection server mode.
+// Only one active client at a time; new connections supersede old ones.
+func runServerSingleConn(ctx context.Context, cfg *Config, logger *Logger) error {
 	bindIP, err := resolveBindIP(cfg.BindIP)
 	if err != nil {
 		return err

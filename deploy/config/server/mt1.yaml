@@ -1,0 +1,9 @@
+role: server
+bind_ip: 0.0.0.0
+remote_port: 45010
+multi_conn_enabled: true
+tun_name: mt1
+tun_cidr: 10.200.10.254/24
+log_level: info
+tls_cert_file: /etc/mpquic/tls/server.crt
+tls_key_file: /etc/mpquic/tls/server.key
