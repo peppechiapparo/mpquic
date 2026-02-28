@@ -140,7 +140,26 @@ do_apply() {
     safe_ip rule del from "${src}/32" priority "$prio"
     ip rule add from "${src}/32" lookup "$table" priority "$prio"
     echo "    rule: from ${src} lookup ${table} prio ${prio} ✓"
+
+    # Masquerade: NAT traffic leaving via class tunnel so VPS sees
+    # src=TUN_IP (e.g. 10.200.10.1) instead of LAN IP (172.16.x.x).
+    # This is essential for the server connectionTable return-path lookup.
+    if command -v nft >/dev/null 2>&1; then
+      if ! nft list chain ip nat postrouting 2>/dev/null | grep -q "oifname \"${tun}\" masquerade"; then
+        nft add rule ip nat postrouting oifname "${tun}" masquerade
+        echo "    nft: masquerade oifname ${tun} ✓"
+      else
+        echo "    nft: masquerade oifname ${tun} (already present)"
+      fi
+    fi
   done
+
+  # Persist nftables rules
+  if command -v nft >/dev/null 2>&1 && [[ -f /etc/nftables.conf ]]; then
+    nft list ruleset > /etc/nftables.conf
+    echo ""
+    echo "  nftables rules saved to /etc/nftables.conf"
+  fi
 
   echo ""
   echo "=== Classifier applied ==="
@@ -152,13 +171,31 @@ do_remove() {
 
   for cls in "${CLASSES[@]}"; do
     local src="${CLASS_SRC[$cls]}"
+    local tun="${CLASS_TUN[$cls]}"
     local table="${CLASS_TABLE_NAME[$cls]}"
     local prio="${CLASS_PRIO[$cls]}"
 
     safe_ip rule del from "${src}/32" priority "$prio"
     safe_ip route flush table "$table"
-    echo "  [$cls] removed rule prio=${prio}, flushed table=${table}"
+
+    # Remove masquerade rule for this tunnel
+    if command -v nft >/dev/null 2>&1; then
+      local handle
+      handle="$(nft -a list chain ip nat postrouting 2>/dev/null \
+        | grep "oifname \"${tun}\" masquerade" \
+        | awk '{print $NF}')"
+      if [[ -n "$handle" ]]; then
+        nft delete rule ip nat postrouting handle "$handle"
+      fi
+    fi
+
+    echo "  [$cls] removed rule prio=${prio}, flushed table=${table}, removed nft masq"
   done
+
+  # Persist nftables rules
+  if command -v nft >/dev/null 2>&1 && [[ -f /etc/nftables.conf ]]; then
+    nft list ruleset > /etc/nftables.conf
+  fi
 
   echo "=== Classifier removed ==="
 }
