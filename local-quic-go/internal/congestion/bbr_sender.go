@@ -91,8 +91,9 @@ type bbrSender struct {
 	fullBandwidthCount int
 
 	// Congestion window
-	congestionWindow protocol.ByteCount
-	maxDatagramSize  protocol.ByteCount
+	congestionWindow    protocol.ByteCount
+	initialCwnd         protocol.ByteCount
+	maxDatagramSize     protocol.ByteCount
 
 	// Track largest sent/acked for recovery detection
 	largestSentPacketNumber  protocol.PacketNumber
@@ -130,6 +131,7 @@ func NewBBRSender(
 		cwndGain:                 bbrStartupCwndGain,
 		maxDatagramSize:          initialMaxDatagramSize,
 		congestionWindow:         initialCongestionWindow * initialMaxDatagramSize,
+		initialCwnd:              initialCongestionWindow * initialMaxDatagramSize,
 		largestSentPacketNumber:  protocol.InvalidPacketNumber,
 		largestAckedPacketNumber: protocol.InvalidPacketNumber,
 		minRTT:                   0,
@@ -236,11 +238,11 @@ func (b *bbrSender) OnRetransmissionTimeout(packetsRetransmitted bool) {
 	if !packetsRetransmitted {
 		return
 	}
-	// On RTO, reset to startup-like state with reduced bandwidth estimate
+	// On RTO, reset to startup but keep a reasonable cwnd (not minCwnd)
 	b.mode = bbrStartup
 	b.pacingGain = bbrStartupPacingGain
 	b.cwndGain = bbrStartupCwndGain
-	b.congestionWindow = b.minCwnd()
+	b.congestionWindow = b.initialCwnd
 	b.fullBandwidth = 0
 	b.fullBandwidthCount = 0
 	b.maybeTraceStateChange(logging.CongestionStateSlowStart)
@@ -281,11 +283,11 @@ func (b *bbrSender) GetCongestionWindow() protocol.ByteCount {
 func (b *bbrSender) getBDP() protocol.ByteCount {
 	bw := b.maxBandwidth.getBest()
 	if bw == 0 || b.minRTT == 0 {
-		return b.congestionWindow
+		return b.initialCwnd
 	}
 	bdp := protocol.ByteCount(uint64(bw) * uint64(b.minRTT) / uint64(time.Second) / uint64(BytesPerSecond))
-	if bdp < b.minCwnd() {
-		return b.minCwnd()
+	if bdp < b.initialCwnd {
+		return b.initialCwnd
 	}
 	return bdp
 }
@@ -302,7 +304,16 @@ func (b *bbrSender) bandwidthEstimate() Bandwidth {
 		return BandwidthFromDelta(b.congestionWindow, srtt)
 	}
 	// Apply pacing gain
-	return Bandwidth(float64(bw) * b.pacingGain)
+	paced := Bandwidth(float64(bw) * b.pacingGain)
+	// Never pace below the floor (initialCwnd / smoothed RTT)
+	srtt := b.rttStats.SmoothedRTT()
+	if srtt > 0 {
+		floor := BandwidthFromDelta(b.initialCwnd, srtt)
+		if paced < floor {
+			return floor
+		}
+	}
+	return paced
 }
 
 // updateBandwidth samples the delivery rate and updates the max filter.
@@ -425,11 +436,9 @@ func (b *bbrSender) updateProbeRTT(now time.Time, bytesInFlight protocol.ByteCou
 func (b *bbrSender) updateCongestionWindow(ackedBytes protocol.ByteCount) {
 	targetCwnd := b.targetCwnd()
 	if b.mode == bbrStartup {
-		// In startup, grow cwnd with each ACK
+		// In startup, only grow cwnd — never reduce.
+		// cwnd grows by ackedBytes each ACK (roughly doubles each RTT).
 		b.congestionWindow += ackedBytes
-		if b.congestionWindow > targetCwnd {
-			b.congestionWindow = targetCwnd
-		}
 	} else {
 		// In other modes, converge toward target
 		if targetCwnd > b.congestionWindow {
