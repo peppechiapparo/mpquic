@@ -34,7 +34,7 @@
 | Step | Descrizione | Nostro concetto | Stato |
 |------|-------------|-----------------|-------|
 | **1** | QUIC tunnels multi-link 1:1 | Multi-link | **✅ DONE** |
-| **2** | Traffico distribuito per applicazione, non per pacchetto | Multi-tunnel per link | **🔄 IN PROGRESS** |
+| **2** | Traffico distribuito per applicazione, non per pacchetto | Multi-tunnel per link | **🔄 IN PROGRESS** (2.1-2.3 ✅) |
 | **3** | BBRv3 / Wave congestion control | CC per tunnel | **⬜ NOT STARTED** |
 | **4** | Bonding, Backup, Duplicazione | Multi-path per tunnel | **⬜ NOT STARTED** |
 | **5** | AI/ML-Ready (Quality on Demand) | Decision layer | **⬜ NOT STARTED** |
@@ -63,7 +63,7 @@
 
 ---
 
-## Fase 2 — Multi-tunnel per link: QoS per applicazione 🔄 IN CORSO
+## Fase 2 — Multi-tunnel per link: QoS per applicazione 🔄 IN CORSO (2.1-2.3 ✅)
 
 **Obiettivo (Step 2 PDF)**: più tunnel QUIC sullo STESSO link, ciascuno dedicato a una classe
 di traffico. Il packet loss su un link impatta solo le applicazioni di quella classe.
@@ -109,7 +109,7 @@ di ritorno. Ogni connessione è identificata dal suo Connection ID QUIC, non dal
 | **default** | Web, HTTPS, API, business apps | Balanced | TCP 80, 443, 8443 |
 | **bulk** | Backup, sync, download | Best effort | TCP 5001-6000, tutto il resto |
 
-### Step 2.1 — Server multi-connessione (modifica Go) ⬜
+### Step 2.1 — Server multi-connessione (modifica Go) ✅ COMPLETATO (b0bbddf)
 1. Refactor `runServer()`: rimuovere active/supersede, accettare N conn concorrenti
 2. Implementare `connectionTable`: mappa `netip.Addr → quic.Connection`
 3. La goroutine TUN-reader legge pacchetto, estrae dst IP, lookup nella tabella
@@ -118,7 +118,7 @@ di ritorno. Ogni connessione è identificata dal suo Connection ID QUIC, non dal
 6. TUN usa subnet `/24` (es. `10.200.10.0/24`)
 7. Test unitario: 3 connessioni parallele, verifica routing bidirezionale
 
-### Step 2.2 — Client: istanze per-classe con nftables classifier ⬜
+### Step 2.2 — Client: istanze per-classe con nftables classifier ✅ COMPLETATO (058ddca, 477d08d)
 1. Definire 3 classi: `critical`, `default`, `bulk`
 2. Per ogni classe: una istanza `mpquic` client (diversa TUN, stesso `bind_ip` WAN)
 3. Script `mpquic-nft-classifier.sh`:
@@ -128,7 +128,7 @@ di ritorno. Ogni connessione è identificata dal suo Connection ID QUIC, non dal
 4. Config YAML per-classe (TUN IP diverso, stessa WAN, stessa porta server)
 5. Systemd units per-classe
 
-### Step 2.3 — Deploy e test su infra reale ⬜
+### Step 2.3 — Deploy e test su infra reale ✅ COMPLETATO (2026-02-28)
 1. Deploy server multi-connessione sul VPS (porta 45010, TUN `mt1`, `10.200.10.0/24`)
 2. Deploy 3 istanze client su VM (WAN5):
    - `mpquic-critical@5`: TUN `cr5` → 10.200.10.1, bind WAN5, server :45010
@@ -150,19 +150,64 @@ di ritorno. Ogni connessione è identificata dal suo Connection ID QUIC, non dal
 3. **Benchmark**: throughput, RTT, jitter per ogni classe
 4. Documentare risultati per presentazione (ROI §23 PDF)
 
-### Step 2.5 — Generalizzazione multi-link + multi-tunnel ⬜
-1. Replicare su WAN4 e WAN6: stesse 3 classi per ogni link
-2. Layout finale: 3 WAN × 3 classi = 9 tunnel
-   - 3 porte server: 45010 (WAN4), 45011 (WAN5), 45012 (WAN6)
-   - Ogni porta accetta 3 connessioni (una per classe)
-3. Possibilità: classi diverse su link diversi (critical su link migliore, bulk su link cheap)
-4. nftables: aggiungere scelta link per classe (es. critical → WAN5 per RTT minimo)
+### Step 2.5 — Generalizzazione: 3 WAN × 3 classi = 9 tunnel con VLAN ⬜
+
+**Architettura**: ogni WAN attiva (SL4/SL5/SL6) ottiene 3 tunnel di classe
+(critical/bulk/default). La classificazione avviene lato OpenWrt tramite VLAN tagging.
+Ogni VLAN arriva su un sub-interface dedicato del client VM; il classifier
+instrada nel tunnel corretto in base alla VLAN di origine.
+
+**Schema VLAN → Tunnel**:
+
+| LAN (transit) | VLAN | Classe | Tunnel | WAN uscita |
+|---------------|------|--------|--------|------------|
+| LAN1 (enp6s20) | 11 | critical | cr1 | WAN4 (SL4) |
+| LAN1 (enp6s20) | 12 | bulk | br1 | WAN4 (SL4) |
+| LAN1 (enp6s20) | 13 | default | df1 | WAN4 (SL4) |
+| LAN2 (enp6s21) | 21 | critical | cr2 | WAN5 (SL5) |
+| LAN2 (enp6s21) | 22 | bulk | br2 | WAN5 (SL5) |
+| LAN2 (enp6s21) | 23 | default | df2 | WAN5 (SL5) |
+| LAN3 (enp6s22) | 31 | critical | cr3 | WAN6 (SL6) |
+| LAN3 (enp6s22) | 32 | bulk | br3 | WAN6 (SL6) |
+| LAN3 (enp6s22) | 33 | default | df3 | WAN6 (SL6) |
+
+**Flusso traffico**:
+```
+OpenWrt → VLAN 21 (critical LAN2) → enp6s21.21 → ip rule → cr2 TUN → WAN5 → VPS:45011
+OpenWrt → VLAN 22 (bulk LAN2)     → enp6s21.22 → ip rule → br2 TUN → WAN5 → VPS:45011
+OpenWrt → VLAN 23 (default LAN2)  → enp6s21.23 → ip rule → df2 TUN → WAN5 → VPS:45011
+```
+
+**Server layout**: 3 porte, ciascuna multi-conn (3 classi):
+- 45010: WAN4 → cr1 + br1 + df1 (TUN mt4, subnet 10.200.10.0/24)
+- 45011: WAN5 → cr2 + br2 + df2 (TUN mt5, subnet 10.200.11.0/24)
+- 45012: WAN6 → cr3 + br3 + df3 (TUN mt6, subnet 10.200.12.0/24)
+
+**Client VM**: VLAN sub-interfaces su ogni LAN trunk + classifier per-VLAN:
+- `enp6s20.11` → routing table → default via cr1
+- `enp6s20.12` → routing table → default via br1
+- `enp6s20.13` → routing table → default via df1
+- (idem per LAN2 → .21/.22/.23, LAN3 → .31/.32/.33)
+
+**Lato OpenWrt**: piena libertà di routing — basta taggare il traffico sulla VLAN
+giusta (mwan3, firewall zone, DSCP→VLAN map, ecc.)
+
+**Passi implementativi**:
+1. Creare VLAN sub-interfaces su client VM (systemd-networkd .netdev + .network)
+2. Creare 9 configurazioni client YAML (cr1/br1/df1, cr2/br2/df2, cr3/br3/df3)
+3. Creare 3 configurazioni server YAML (mt4, mt5, mt6 multi-conn)
+4. Creare classifier per-VLAN (evoluzione di mpquic-mt-classifier.sh)
+5. Deploy server: 3 istanze multi-conn su porte 45010-45012
+6. Deploy client: 9 istanze + VLAN interfaces + classifier
+7. Configurare OpenWrt: VLAN trunking + mwan3 policy
+8. Test end-to-end: 9 flussi indipendenti verso internet
 
 ### Done criteria Fase 2
-- [ ] Server accetta N connessioni concorrenti sulla stessa porta
-- [ ] 3 classi traffico (critical/default/bulk) su TUN separate
-- [ ] nftables classifier funzionante con routing per-classe
-- [ ] Traffico applicativo smistato correttamente (verificato con tcpdump)
+- [x] Server accetta N connessioni concorrenti sulla stessa porta
+- [x] 3 classi traffico (critical/default/bulk) su TUN separate
+- [x] nftables classifier funzionante con routing per-classe
+- [x] Traffico applicativo smistato correttamente (verificato con tcpdump)
+- [ ] Generalizzazione 3 WAN × 3 classi = 9 tunnel con VLAN
 - [ ] Isolamento dimostrato: loss su un tunnel non impatta gli altri
 - [ ] Risultati documentati con metriche
 

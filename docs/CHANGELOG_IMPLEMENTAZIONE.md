@@ -1,5 +1,40 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-02-28 — Fase 2: Multi-tunnel per link ✅
+
+### Step 2.1 — Server multi-connessione (`b0bbddf`)
+- `connectionTable` con mapping `peer_TUN_IP → quic.Connection`
+- `runServerMultiConn()`: accetta N connessioni concorrenti sulla stessa porta
+- Auto-registrazione peer dal primo pacchetto (src IP bytes 12-15)
+- `learnRoute()` per return-path su traffico non-NATtato (`b93155c`)
+- Config flag `multi_conn_enabled: true`
+
+### Step 2.2 — Client istanze per-classe + classifier (`058ddca`, `477d08d`)
+- 3 istanze client: cr5 (critical), df5 (default), bk5 (bulk) sulla stessa WAN5
+- Deploy configs: `deploy/config/client/{cr5,df5,bk5}.yaml` + `.env`
+- Server config: `deploy/config/server/mt1.yaml` (porta 45010, TUN mt1, /24)
+- `scripts/mpquic-mt-classifier.sh`: classificazione source-IP con ip rule + routing tables
+- Masquerade per-tunnel (NAT src → TUN IP) per return-path server
+- Persistenza nftables in `/etc/nftables.conf`
+
+### Step 2.3 — Deploy e test end-to-end
+- VPS: `mpquic@mt1` su porta 45010, NFT aperta, TUN mt1 10.200.10.254/24
+- Client: 3 servizi `mpquic@{cr5,df5,bk5}` attivi, TUN UP con IP corretti
+- Test OpenWrt: `mwan3 use SLx ping` → traffico classificato → VPS → internet → reply ✓
+- tcpdump verificato su entrambi i lati: flusso completo bidirezionale su tutti e 3 i tunnel
+- RTT ~14ms su WAN5
+
+### Strumenti
+- `scripts/mpquic-update.sh` (`f1ddffb`): update automatico VPS/client (pull → build → stop → install → restart)
+- `scripts/mpquic-mt-classifier.sh`: apply/remove/status per regole classifier
+
+### Prossimo step
+- **Step 2.5**: Generalizzazione 3 WAN × 3 classi = 9 tunnel
+- Classificazione per VLAN (non più per source-IP): OpenWrt tagga traffico → VLAN sub-interfaces → tunnel dedicato
+- Schema: VLAN XY (X=LAN, Y=classe) → tunnel crX/brX/dfX
+
+---
+
 ## 2026-02-28
 
 ### Bug fix critici
