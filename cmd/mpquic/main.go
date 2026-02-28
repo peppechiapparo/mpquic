@@ -51,6 +51,7 @@ type Config struct {
 	ControlAPIListen      string                `yaml:"control_api_listen"`
 	ControlAPIAuthToken   string                `yaml:"control_api_auth_token"`
 	CongestionAlgorithm   string                `yaml:"congestion_algorithm"`
+	TransportMode         string                `yaml:"transport_mode"`
 }
 
 type MultipathPathConfig struct {
@@ -130,6 +131,7 @@ type multipathPathState struct {
 	udpConn          *net.UDPConn
 	transport        *quic.Transport
 	conn             quic.Connection
+	dc               datagramConn
 	alive            bool
 	reconnecting     bool
 	consecutiveFails int
@@ -161,6 +163,56 @@ type datagramConn interface {
 	ReceiveDatagram(context.Context) ([]byte, error)
 }
 
+// streamConn wraps a single bidirectional QUIC stream to provide reliable,
+// ordered delivery with 2-byte length-prefixed framing.
+// This allows the congestion control algorithm (BBR vs Cubic) to drive
+// retransmissions, unlike QUIC DATAGRAM frames which are unreliable.
+type streamConn struct {
+	stream  quic.Stream
+	writeMu sync.Mutex
+}
+
+func (s *streamConn) SendDatagram(pkt []byte) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var hdr [2]byte
+	binary.BigEndian.PutUint16(hdr[:], uint16(len(pkt)))
+	if _, err := s.stream.Write(hdr[:]); err != nil {
+		return err
+	}
+	_, err := s.stream.Write(pkt)
+	return err
+}
+
+func (s *streamConn) ReceiveDatagram(_ context.Context) ([]byte, error) {
+	var hdr [2]byte
+	if _, err := io.ReadFull(s.stream, hdr[:]); err != nil {
+		return nil, err
+	}
+	length := binary.BigEndian.Uint16(hdr[:])
+	pkt := make([]byte, length)
+	if _, err := io.ReadFull(s.stream, pkt); err != nil {
+		return nil, err
+	}
+	return pkt, nil
+}
+
+func openStreamConn(ctx context.Context, conn quic.Connection) (*streamConn, error) {
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("open stream: %w", err)
+	}
+	return &streamConn{stream: stream}, nil
+}
+
+func acceptStreamConn(ctx context.Context, conn quic.Connection) (*streamConn, error) {
+	stream, err := conn.AcceptStream(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("accept stream: %w", err)
+	}
+	return &streamConn{stream: stream}, nil
+}
+
 // connectionTable maps TUN peer IPs to their QUIC connection for multi-conn server.
 // When a packet is read from the shared TUN, the dst IP is looked up to find the
 // right QUIC connection for the return path.
@@ -177,9 +229,10 @@ type connectionTable struct {
 }
 
 type connEntry struct {
-	conn   quic.Connection
-	cancel context.CancelFunc
-	peerIP netip.Addr
+	quicConn quic.Connection
+	dc       datagramConn
+	cancel   context.CancelFunc
+	peerIP   netip.Addr
 }
 
 func newConnectionTable() *connectionTable {
@@ -189,15 +242,15 @@ func newConnectionTable() *connectionTable {
 	}
 }
 
-func (ct *connectionTable) register(peerIP netip.Addr, conn quic.Connection, cancel context.CancelFunc) {
+func (ct *connectionTable) register(peerIP netip.Addr, quicConn quic.Connection, dc datagramConn, cancel context.CancelFunc) {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 	// If there's an old connection for this IP, supersede it
 	if old, ok := ct.byIP[peerIP]; ok {
 		old.cancel()
-		_ = old.conn.CloseWithError(0, "superseded")
+		_ = old.quicConn.CloseWithError(0, "superseded")
 	}
-	ct.byIP[peerIP] = &connEntry{conn: conn, cancel: cancel, peerIP: peerIP}
+	ct.byIP[peerIP] = &connEntry{quicConn: quicConn, dc: dc, cancel: cancel, peerIP: peerIP}
 }
 
 func (ct *connectionTable) unregister(peerIP netip.Addr) {
@@ -228,17 +281,17 @@ func (ct *connectionTable) learnRoute(srcIP netip.Addr, peerIP netip.Addr) {
 	ct.mu.Unlock()
 }
 
-func (ct *connectionTable) lookup(dstIP netip.Addr) (quic.Connection, bool) {
+func (ct *connectionTable) lookup(dstIP netip.Addr) (datagramConn, bool) {
 	ct.mu.RLock()
 	defer ct.mu.RUnlock()
 	// First: direct peer IP lookup
 	if entry, ok := ct.byIP[dstIP]; ok {
-		return entry.conn, true
+		return entry.dc, true
 	}
 	// Second: learned route lookup (LAN hosts behind a peer)
 	if peerIP, ok := ct.routed[dstIP]; ok {
 		if entry, ok := ct.byIP[peerIP]; ok {
-			return entry.conn, true
+			return entry.dc, true
 		}
 	}
 	return nil, false
@@ -261,7 +314,7 @@ func (ct *connectionTable) closeAll() {
 	defer ct.mu.Unlock()
 	for ip, entry := range ct.byIP {
 		entry.cancel()
-		_ = entry.conn.CloseWithError(0, "shutdown")
+		_ = entry.quicConn.CloseWithError(0, "shutdown")
 		delete(ct.byIP, ip)
 	}
 	for src := range ct.routed {
@@ -327,7 +380,11 @@ func main() {
 	if cfg.CongestionAlgorithm == "" {
 		cfg.CongestionAlgorithm = "cubic"
 	}
-	logger.Infof("congestion_algorithm=%s", cfg.CongestionAlgorithm)
+	cfg.TransportMode = strings.ToLower(strings.TrimSpace(cfg.TransportMode))
+	if cfg.TransportMode == "" {
+		cfg.TransportMode = "datagram"
+	}
+	logger.Infof("congestion_algorithm=%s transport_mode=%s", cfg.CongestionAlgorithm, cfg.TransportMode)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -632,14 +689,14 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 				continue
 			}
 
-			conn, ok := ct.lookup(dstIP)
+			dc, ok := ct.lookup(dstIP)
 			if !ok {
 				logger.Debugf("no connection for dst=%s, dropping", dstIP)
 				continue
 			}
 
 			pktCopy := append([]byte(nil), pkt...)
-			if sendErr := conn.SendDatagram(pktCopy); sendErr != nil {
+			if sendErr := dc.SendDatagram(pktCopy); sendErr != nil {
 				logger.Debugf("TX to %s failed: %v", dstIP, sendErr)
 			}
 		}
@@ -673,7 +730,7 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 		logger.Infof("multi-conn accepted remote=%s", conn.RemoteAddr())
 
 		go func(c quic.Connection) {
-			if err := runServerMultiConnTunnel(ctx, c, tun, ct, logger); err != nil && !errors.Is(err, context.Canceled) {
+			if err := runServerMultiConnTunnel(ctx, c, tun, ct, cfg, logger); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Errorf("multi-conn tunnel closed: %v", err)
 			}
 		}(conn)
@@ -684,16 +741,28 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 // First datagram received is expected to be a 4-byte registration containing the
 // client's TUN IP. After registration, all received datagrams are written to TUN.
 // Return path is handled by the shared TUN reader via connectionTable.
-func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, tun *water.Interface, ct *connectionTable, logger *Logger) error {
+func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, tun *water.Interface, ct *connectionTable, cfg *Config, logger *Logger) error {
 	connCtx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 
-	// Wait for registration datagram: first datagram = 4-byte IPv4 peer IP
+	// Wrap connection based on transport mode
+	var dc datagramConn
+	if cfg.TransportMode == "reliable" {
+		sc, err := acceptStreamConn(connCtx, conn)
+		if err != nil {
+			return fmt.Errorf("accept stream: %w", err)
+		}
+		dc = sc
+	} else {
+		dc = conn
+	}
+
+	// Wait for registration: first message = 4-byte IPv4 peer IP
 	var peerIP netip.Addr
 	registered := false
 
 	for {
-		pkt, err := conn.ReceiveDatagram(connCtx)
+		pkt, err := dc.ReceiveDatagram(connCtx)
 		if err != nil {
 			return err
 		}
@@ -702,7 +771,7 @@ func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, t
 			// Registration: first datagram is a 4-byte IPv4 address
 			if len(pkt) == 4 {
 				peerIP = netip.AddrFrom4([4]byte{pkt[0], pkt[1], pkt[2], pkt[3]})
-				ct.register(peerIP, conn, cancel)
+				ct.register(peerIP, conn, dc, cancel)
 				registered = true
 				logger.Infof("multi-conn registered peer=%s remote=%s", peerIP, conn.RemoteAddr())
 				continue
@@ -712,7 +781,7 @@ func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, t
 				version := pkt[0] >> 4
 				if version == 4 {
 					peerIP = netip.AddrFrom4([4]byte{pkt[12], pkt[13], pkt[14], pkt[15]})
-					ct.register(peerIP, conn, cancel)
+					ct.register(peerIP, conn, dc, cancel)
 					registered = true
 					logger.Infof("multi-conn auto-registered peer=%s remote=%s (from packet src)", peerIP, conn.RemoteAddr())
 					// Fall through to write this packet to TUN
@@ -838,7 +907,18 @@ func runServerSingleConn(ctx context.Context, cfg *Config, logger *Logger) error
 		activeMu.Unlock()
 
 		go func(c quic.Connection, cctx context.Context) {
-			if err := runServerTunnel(cctx, c, tun, tunReadCh, logger); err != nil && !errors.Is(err, context.Canceled) {
+			var dc datagramConn
+			if cfg.TransportMode == "reliable" {
+				sc, err := acceptStreamConn(cctx, c)
+				if err != nil {
+					logger.Errorf("accept stream: %v", err)
+					return
+				}
+				dc = sc
+			} else {
+				dc = c
+			}
+			if err := runServerTunnel(cctx, dc, tun, tunReadCh, logger); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Errorf("tunnel closed: %v", err)
 			}
 		}(conn, connCtx)
@@ -947,7 +1027,18 @@ func runClientOnce(ctx context.Context, cfg *Config, logger *Logger) error {
 	defer conn.CloseWithError(0, "shutdown")
 
 	logger.Infof("connected local=%s remote=%s tun=%s", udpConn.LocalAddr(), remoteUDP.String(), cfg.TunName)
-	return runTunnel(ctx, cfg, conn, logger)
+
+	var dc datagramConn
+	if cfg.TransportMode == "reliable" {
+		sc, err := openStreamConn(ctx, conn)
+		if err != nil {
+			return fmt.Errorf("open stream: %w", err)
+		}
+		dc = sc
+	} else {
+		dc = conn
+	}
+	return runTunnel(ctx, cfg, dc, logger)
 }
 
 func runClientOnceMultipath(ctx context.Context, cfg *Config, logger *Logger) error {
@@ -1042,6 +1133,19 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 		state.udpConn = udpConn
 		state.transport = &transport
 		state.conn = conn
+		if cfg.TransportMode == "reliable" {
+			sc, err := openStreamConn(ctx, conn)
+			if err != nil {
+				_ = conn.CloseWithError(0, "stream-open-failed")
+				_ = udpConn.Close()
+				logger.Errorf("path init failed name=%s step=stream err=%v", p.Name, err)
+				state.reconnecting = true
+				continue
+			}
+			state.dc = sc
+		} else {
+			state.dc = conn
+		}
 		state.alive = true
 		state.reconnecting = false
 		state.lastUp = time.Now()
@@ -1139,7 +1243,7 @@ func (m *multipathConn) sendDuplicate(pkt []byte, className string, classPolicy 
 	return nil
 }
 
-func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip map[int]struct{}) (int, quic.Connection) {
+func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip map[int]struct{}) (int, datagramConn) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1191,7 +1295,7 @@ func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip ma
 					continue
 				}
 			}
-			if !p.alive || p.conn == nil {
+			if !p.alive || p.dc == nil {
 				continue
 			}
 			if now.Before(p.cooldownUntil) {
@@ -1217,7 +1321,7 @@ func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip ma
 	}
 
 	m.rr = (bestIdx + 1) % len(m.paths)
-	return bestIdx, m.paths[bestIdx].conn
+	return bestIdx, m.paths[bestIdx].dc
 }
 
 func pathPolicyScore(policy string, p *multipathPathState) int {
@@ -1376,13 +1480,13 @@ func (m *multipathConn) recvLoop(ctx context.Context, idx int) {
 	}
 }
 
-func (m *multipathConn) currentPathConn(idx int) quic.Connection {
+func (m *multipathConn) currentPathConn(idx int) datagramConn {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if idx < 0 || idx >= len(m.paths) {
 		return nil
 	}
-	return m.paths[idx].conn
+	return m.paths[idx].dc
 }
 
 func (m *multipathConn) onPathSuccess(idx int) {
@@ -1495,10 +1599,26 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 			continue
 		}
 
+		var dc datagramConn
+		if m.cfg.TransportMode == "reliable" {
+			sc, err := openStreamConn(ctx, conn)
+			if err != nil {
+				_ = conn.CloseWithError(0, "stream-open-failed")
+				_ = udpConn.Close()
+				m.logger.Errorf("path redial stream failed name=%s err=%v", pcfg.Name, err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			dc = sc
+		} else {
+			dc = conn
+		}
+
 		m.mu.Lock()
 		if idx >= 0 && idx < len(m.paths) {
 			p := m.paths[idx]
 			p.conn = conn
+			p.dc = dc
 			p.udpConn = udpConn
 			p.transport = &transport
 			p.alive = true
