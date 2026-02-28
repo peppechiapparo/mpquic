@@ -163,9 +163,16 @@ type datagramConn interface {
 // connectionTable maps TUN peer IPs to their QUIC connection for multi-conn server.
 // When a packet is read from the shared TUN, the dst IP is looked up to find the
 // right QUIC connection for the return path.
+//
+// In addition to the primary peerIP (the TUN address), the table also learns
+// "routed" source IPs that clients forward through the tunnel (e.g. LAN hosts
+// behind the client). This allows return traffic to be dispatched to the correct
+// QUIC connection even when the dst IP in the reply packet is not the peer's
+// TUN address but a LAN host behind it.
 type connectionTable struct {
-	mu    sync.RWMutex
-	byIP  map[netip.Addr]*connEntry
+	mu      sync.RWMutex
+	byIP    map[netip.Addr]*connEntry  // primary: peerIP → entry
+	routed  map[netip.Addr]netip.Addr  // learned: srcIP → peerIP (reverse map)
 }
 
 type connEntry struct {
@@ -175,7 +182,10 @@ type connEntry struct {
 }
 
 func newConnectionTable() *connectionTable {
-	return &connectionTable{byIP: make(map[netip.Addr]*connEntry)}
+	return &connectionTable{
+		byIP:   make(map[netip.Addr]*connEntry),
+		routed: make(map[netip.Addr]netip.Addr),
+	}
 }
 
 func (ct *connectionTable) register(peerIP netip.Addr, conn quic.Connection, cancel context.CancelFunc) {
@@ -192,23 +202,57 @@ func (ct *connectionTable) register(peerIP netip.Addr, conn quic.Connection, can
 func (ct *connectionTable) unregister(peerIP netip.Addr) {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
+	// Remove all routed IPs that pointed to this peer
+	for src, peer := range ct.routed {
+		if peer == peerIP {
+			delete(ct.routed, src)
+		}
+	}
 	delete(ct.byIP, peerIP)
+}
+
+// learnRoute records that srcIP was seen coming from the connection identified
+// by peerIP. This is called for every packet received from a client so that
+// return traffic (with dst=srcIP) can be dispatched to the right connection.
+// Only records new mappings to avoid write-lock contention on every packet.
+func (ct *connectionTable) learnRoute(srcIP netip.Addr, peerIP netip.Addr) {
+	ct.mu.RLock()
+	existing, ok := ct.routed[srcIP]
+	ct.mu.RUnlock()
+	if ok && existing == peerIP {
+		return // already known
+	}
+	ct.mu.Lock()
+	ct.routed[srcIP] = peerIP
+	ct.mu.Unlock()
 }
 
 func (ct *connectionTable) lookup(dstIP netip.Addr) (quic.Connection, bool) {
 	ct.mu.RLock()
 	defer ct.mu.RUnlock()
-	entry, ok := ct.byIP[dstIP]
-	if !ok {
-		return nil, false
+	// First: direct peer IP lookup
+	if entry, ok := ct.byIP[dstIP]; ok {
+		return entry.conn, true
 	}
-	return entry.conn, true
+	// Second: learned route lookup (LAN hosts behind a peer)
+	if peerIP, ok := ct.routed[dstIP]; ok {
+		if entry, ok := ct.byIP[peerIP]; ok {
+			return entry.conn, true
+		}
+	}
+	return nil, false
 }
 
 func (ct *connectionTable) count() int {
 	ct.mu.RLock()
 	defer ct.mu.RUnlock()
 	return len(ct.byIP)
+}
+
+func (ct *connectionTable) routedCount() int {
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
+	return len(ct.routed)
 }
 
 func (ct *connectionTable) closeAll() {
@@ -218,6 +262,9 @@ func (ct *connectionTable) closeAll() {
 		entry.cancel()
 		_ = entry.conn.CloseWithError(0, "shutdown")
 		delete(ct.byIP, ip)
+	}
+	for src := range ct.routed {
+		delete(ct.routed, src)
 	}
 }
 
@@ -666,6 +713,19 @@ func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, t
 		if !registered {
 			logger.Debugf("dropping pre-registration packet len=%d", len(pkt))
 			continue
+		}
+
+		// Learn source IP for return-path routing: if the client
+		// forwards traffic from LAN hosts (src != peerIP), we record
+		// src→peerIP so the TUN reader can dispatch replies.
+		if len(pkt) >= 20 {
+			version := pkt[0] >> 4
+			if version == 4 {
+				srcIP := netip.AddrFrom4([4]byte{pkt[12], pkt[13], pkt[14], pkt[15]})
+				if srcIP != peerIP {
+					ct.learnRoute(srcIP, peerIP)
+				}
+			}
 		}
 
 		if _, err := tun.Write(pkt); err != nil {
