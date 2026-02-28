@@ -71,13 +71,15 @@ ipv4_for_dev() {
 
 gw_for_dev() {
   local dev="$1"
-  local lease="/var/lib/dhcp/dhclient.${dev}.leases"
   local gw=""
-  if [ -r "$lease" ]; then
-    gw="$(awk '/option routers /{gsub(";","",$3); print $3}' "$lease" | tail -n 1)"
-  fi
+  # Primary: kernel routing table (works with systemd-networkd and dhclient)
+  gw="$(ip -4 route show dev "$dev" default 2>/dev/null | awk '/default via/{print $3}' | tail -n 1)"
+  # Fallback: dhclient lease file (legacy, may be stale after networkd migration)
   if [ -z "$gw" ]; then
-    gw="$(ip -4 route show dev "$dev" default 2>/dev/null | awk '/default via/{print $3}' | tail -n 1)"
+    local lease="/var/lib/dhcp/dhclient.${dev}.leases"
+    if [ -r "$lease" ]; then
+      gw="$(awk '/option routers /{gsub(";","",$3); print $3}' "$lease" | tail -n 1)"
+    fi
   fi
   echo "$gw"
 }
