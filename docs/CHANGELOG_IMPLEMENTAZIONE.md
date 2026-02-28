@@ -24,6 +24,18 @@
 - tcpdump verificato su entrambi i lati: flusso completo bidirezionale su tutti e 3 i tunnel
 - RTT ~14ms su WAN5
 
+### Step 2.4 — Test isolamento con netem + iperf3 (2026-02-28)
+- **RTT isolation**: netem 10%/30% loss su br2 → cr2 e df2 a 0% loss
+- **Throughput isolation**: iperf3 con device binding (`-B IP%dev`)
+  - Baseline: cr2=50.2, br2=48.1, df2=50.0 Mbps
+  - 10% loss br2: cr2=50.2 (±0%), br2=2.3 (−95%), df2=50.2 (±0%)
+  - 30% loss br2: cr2=50.2 (±0%), br2=0.4 (−99%), df2=49.8 (±0%)
+- **Conclusione**: isolamento perfetto tra tunnel sulla stessa WAN
+- VPS nftables: aggiunta regola `iifname "mt*" accept` + `tcp dport 5201`
+- Nota: subnet /24 condivisa richiede binding esplicito per-device nei test
+
+### Step 2.5 — Architettura 9 tunnel VLAN (8a6923e)
+
 ### Strumenti
 - `scripts/mpquic-update.sh` (`f1ddffb`): update automatico VPS/client (pull → build → stop → install → restart)
 - `scripts/mpquic-mt-classifier.sh`: apply/remove/status per regole classifier
