@@ -1,0 +1,10 @@
+# Multi-conn server for WAN6 (SL6) — accepts cr3 + br3 + df3
+role: server
+bind_ip: 0.0.0.0
+remote_port: 45016
+multi_conn_enabled: true
+tun_name: mt6
+tun_cidr: 10.200.16.254/24
+log_level: info
+tls_cert_file: /etc/mpquic/tls/server.crt
+tls_key_file: /etc/mpquic/tls/server.key

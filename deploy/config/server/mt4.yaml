@@ -1,0 +1,10 @@
+# Multi-conn server for WAN4 (SL4) — accepts cr1 + br1 + df1
+role: server
+bind_ip: 0.0.0.0
+remote_port: 45014
+multi_conn_enabled: true
+tun_name: mt4
+tun_cidr: 10.200.14.254/24
+log_level: info
+tls_cert_file: /etc/mpquic/tls/server.crt
+tls_key_file: /etc/mpquic/tls/server.key

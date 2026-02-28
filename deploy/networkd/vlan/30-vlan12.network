@@ -1,0 +1,8 @@
+[Match]
+Name=enp6s23.12
+
+[Network]
+Description=VLAN 12 - bulk class via WAN4
+
+[Address]
+Address=172.16.12.1/30

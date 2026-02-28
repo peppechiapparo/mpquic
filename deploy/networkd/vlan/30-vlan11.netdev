@@ -1,0 +1,6 @@
+[NetDev]
+Name=enp6s23.11
+Kind=vlan
+
+[VLAN]
+Id=11

@@ -1,0 +1,11 @@
+# Updated 23-lan4: adds VLAN trunk for multi-tunnel (cr1/br1/df1)
+[Match]
+Name=enp6s23
+
+[Network]
+Address=172.16.4.1/30
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+VLAN=enp6s23.11
+VLAN=enp6s23.12
+VLAN=enp6s23.13

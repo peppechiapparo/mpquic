@@ -1,0 +1,21 @@
+###############################################################################
+# VLAN sub-interfaces for multi-tunnel traffic classification (Step 2.5)
+#
+# These files go in /etc/systemd/network/ on the client VM.
+# Each VLAN sub-interface receives tagged traffic from OpenWrt and the
+# classifier routes it into the correct tunnel based on incoming interface.
+#
+# Naming scheme: VLAN XY where X=set(1=WAN4, 2=WAN5, 3=WAN6), Y=class(1=cr, 2=br, 3=df)
+# IP scheme:     172.16.{VLAN_ID}.1/30 (VM) ↔ 172.16.{VLAN_ID}.2/30 (OpenWrt)
+#
+# Parent interfaces (trunk ports):
+#   enp6s23 (LAN4, 172.16.4.x) → VLANs 11/12/13 → WAN4 tunnels (cr1/br1/df1)
+#   enp7s1  (LAN5, 172.16.5.x) → VLANs 21/22/23 → WAN5 tunnels (cr2/br2/df2)
+#   enp7s2  (LAN6, 172.16.6.x) → VLANs 31/32/33 → WAN6 tunnels (cr3/br3/df3)
+#
+# Deployment:
+#   sudo cp deploy/networkd/vlan/*.netdev deploy/networkd/vlan/*.network /etc/systemd/network/
+#   sudo networkctl reload
+#
+# NOTE: OpenWrt must also be configured with matching VLAN trunks.
+###############################################################################

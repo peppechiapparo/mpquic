@@ -1,0 +1,8 @@
+[Match]
+Name=enp7s2.31
+
+[Network]
+Description=VLAN 31 - critical class via WAN6
+
+[Address]
+Address=172.16.31.1/30

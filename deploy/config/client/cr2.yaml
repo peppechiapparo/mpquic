@@ -1,0 +1,12 @@
+# Critical traffic class on WAN5 (SL5) — VoIP, telemetry, control
+# Binds to WAN5, connects to multi-conn server port 45015
+role: client
+bind_ip: if:enp7s7
+remote_addr: VPS_PUBLIC_IP
+remote_port: 45015
+tun_name: cr2
+tun_cidr: 10.200.15.1/24
+log_level: info
+tls_ca_file: /etc/mpquic/tls/ca.crt
+tls_server_name: mpquic-server
+tls_insecure_skip_verify: false

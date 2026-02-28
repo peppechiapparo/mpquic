@@ -1,0 +1,6 @@
+[NetDev]
+Name=enp7s1.21
+Kind=vlan
+
+[VLAN]
+Id=21

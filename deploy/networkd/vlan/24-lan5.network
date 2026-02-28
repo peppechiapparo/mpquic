@@ -1,0 +1,11 @@
+# Updated 24-lan5: adds VLAN trunk for multi-tunnel (cr2/br2/df2)
+[Match]
+Name=enp7s1
+
+[Network]
+Address=172.16.5.1/30
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+VLAN=enp7s1.21
+VLAN=enp7s1.22
+VLAN=enp7s1.23

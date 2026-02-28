@@ -1,0 +1,8 @@
+[Match]
+Name=enp6s23.13
+
+[Network]
+Description=VLAN 13 - default class via WAN4
+
+[Address]
+Address=172.16.13.1/30

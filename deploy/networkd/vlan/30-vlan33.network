@@ -1,0 +1,8 @@
+[Match]
+Name=enp7s2.33
+
+[Network]
+Description=VLAN 33 - default class via WAN6
+
+[Address]
+Address=172.16.33.1/30

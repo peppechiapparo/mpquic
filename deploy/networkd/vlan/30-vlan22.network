@@ -1,0 +1,8 @@
+[Match]
+Name=enp7s1.22
+
+[Network]
+Description=VLAN 22 - bulk class via WAN5
+
+[Address]
+Address=172.16.22.1/30

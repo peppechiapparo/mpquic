@@ -1,0 +1,11 @@
+# Updated 25-lan6: adds VLAN trunk for multi-tunnel (cr3/br3/df3)
+[Match]
+Name=enp7s2
+
+[Network]
+Address=172.16.6.1/30
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+VLAN=enp7s2.31
+VLAN=enp7s2.32
+VLAN=enp7s2.33

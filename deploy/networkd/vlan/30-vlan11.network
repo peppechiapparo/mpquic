@@ -1,0 +1,8 @@
+[Match]
+Name=enp6s23.11
+
+[Network]
+Description=VLAN 11 - critical class via WAN4
+
+[Address]
+Address=172.16.11.1/30

@@ -1,0 +1,10 @@
+# Multi-conn server for WAN5 (SL5) — accepts cr2 + br2 + df2
+role: server
+bind_ip: 0.0.0.0
+remote_port: 45015
+multi_conn_enabled: true
+tun_name: mt5
+tun_cidr: 10.200.15.254/24
+log_level: info
+tls_cert_file: /etc/mpquic/tls/server.crt
+tls_key_file: /etc/mpquic/tls/server.key
