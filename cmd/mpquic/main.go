@@ -50,6 +50,7 @@ type Config struct {
 	TLSInsecureSkipVerify bool                  `yaml:"tls_insecure_skip_verify"`
 	ControlAPIListen      string                `yaml:"control_api_listen"`
 	ControlAPIAuthToken   string                `yaml:"control_api_auth_token"`
+	CongestionAlgorithm   string                `yaml:"congestion_algorithm"`
 }
 
 type MultipathPathConfig struct {
@@ -320,6 +321,14 @@ func main() {
 	}
 
 	logger := newLogger(cfg.LogLevel)
+
+	// Default congestion algorithm to "cubic" and normalize
+	cfg.CongestionAlgorithm = strings.ToLower(strings.TrimSpace(cfg.CongestionAlgorithm))
+	if cfg.CongestionAlgorithm == "" {
+		cfg.CongestionAlgorithm = "cubic"
+	}
+	logger.Infof("congestion_algorithm=%s", cfg.CongestionAlgorithm)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
@@ -643,9 +652,10 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 	listenAddr := net.JoinHostPort(bindIP, fmt.Sprintf("%d", cfg.RemotePort))
 	logger.Infof("server multi-conn listen=%s tun=%s", listenAddr, cfg.TunName)
 	listener, err := quic.ListenAddr(listenAddr, tlsConf, &quic.Config{
-		EnableDatagrams: true,
-		KeepAlivePeriod: 15 * time.Second,
-		MaxIdleTimeout:  60 * time.Second,
+		EnableDatagrams:     true,
+		KeepAlivePeriod:     15 * time.Second,
+		MaxIdleTimeout:      60 * time.Second,
+		CongestionAlgorithm: cfg.CongestionAlgorithm,
 	})
 	if err != nil {
 		return err
@@ -780,9 +790,10 @@ func runServerSingleConn(ctx context.Context, cfg *Config, logger *Logger) error
 	listenAddr := net.JoinHostPort(bindIP, fmt.Sprintf("%d", cfg.RemotePort))
 	logger.Infof("server listen=%s tun=%s", listenAddr, cfg.TunName)
 	listener, err := quic.ListenAddr(listenAddr, tlsConf, &quic.Config{
-		EnableDatagrams: true,
-		KeepAlivePeriod: 15 * time.Second,
-		MaxIdleTimeout:  60 * time.Second,
+		EnableDatagrams:     true,
+		KeepAlivePeriod:     15 * time.Second,
+		MaxIdleTimeout:      60 * time.Second,
+		CongestionAlgorithm: cfg.CongestionAlgorithm,
 	})
 	if err != nil {
 		return err
@@ -925,9 +936,10 @@ func runClientOnce(ctx context.Context, cfg *Config, logger *Logger) error {
 
 	transport := quic.Transport{Conn: udpConn}
 	conn, err := transport.Dial(ctx, remoteUDP, tlsConf, &quic.Config{
-		EnableDatagrams: true,
-		KeepAlivePeriod: 15 * time.Second,
-		MaxIdleTimeout:  60 * time.Second,
+		EnableDatagrams:     true,
+		KeepAlivePeriod:     15 * time.Second,
+		MaxIdleTimeout:      60 * time.Second,
+		CongestionAlgorithm: cfg.CongestionAlgorithm,
 	})
 	if err != nil {
 		return err
@@ -1015,9 +1027,10 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 
 		transport := quic.Transport{Conn: udpConn}
 		conn, err := transport.Dial(ctx, remoteUDP, tlsConf, &quic.Config{
-			EnableDatagrams: true,
-			KeepAlivePeriod: 15 * time.Second,
-			MaxIdleTimeout:  60 * time.Second,
+			EnableDatagrams:     true,
+			KeepAlivePeriod:     15 * time.Second,
+			MaxIdleTimeout:      60 * time.Second,
+			CongestionAlgorithm: cfg.CongestionAlgorithm,
 		})
 		if err != nil {
 			_ = udpConn.Close()
@@ -1469,9 +1482,10 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 		transport := quic.Transport{Conn: udpConn}
 		dialCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 		conn, err := transport.Dial(dialCtx, remoteUDP, tlsConf, &quic.Config{
-			EnableDatagrams: true,
-			KeepAlivePeriod: 15 * time.Second,
-			MaxIdleTimeout:  60 * time.Second,
+			EnableDatagrams:     true,
+			KeepAlivePeriod:     15 * time.Second,
+			MaxIdleTimeout:      60 * time.Second,
+			CongestionAlgorithm: m.cfg.CongestionAlgorithm,
 		})
 		cancel()
 		if err != nil {
