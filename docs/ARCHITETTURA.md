@@ -131,7 +131,10 @@ WAN6 (enp7s8) ─── 4 pipe stripe ───┘
 
 Quando `multipath_enabled: true`, il client non usa più il singolo blocco `bind_ip/remote_addr/remote_port`, ma crea una sessione logica con N path definiti in `multipath_paths`.
 
-**Nota**: questo codice è stato scritto per il Livello 3 (bonding) e verrà riadattato quando il server multi-connessione (Livello 2) sarà pronto. Non è stato ancora testato su infra reale.
+**Nota aggiornata (2026-03-02)**: il runtime multipath è stato validato su
+infra reale in modalità UDP Stripe + FEC (303 Mbps su 3 WAN, 12 pipe).
+Rimangono aperti i lavori di generalizzazione Step 2.5 (9 tunnel VLAN) e
+hardening sicurezza del protocollo stripe.
 
 Per ogni elemento `multipath_paths[i]`:
 1. risoluzione bind su `bind_ip` (`if:<ifname>` supportato)
@@ -295,6 +298,26 @@ stesso flusso percorrono sempre lo stesso link → nessun reordering TCP.
 - Keepalive: ogni 5s client→server, server risponde solo per sessioni note
 - Timeout: 30s senza RX → close + reconnect
 - GC: server rimuove sessioni idle dopo timeout
+
+### Validità delle scelte architetturali con Stripe (stato attuale)
+
+Le considerazioni fatte su congestion control, cifratura TLS, classi traffico e
+multipath **restano valide**, ma con perimetro diverso tra path QUIC e path stripe.
+
+| Tema | Path `transport: quic` | Path `transport: stripe` |
+|------|------------------------|--------------------------|
+| Congestion control (`bbr`/`cubic`) | **Sì**: governato da QUIC stack | **No**: stripe non usa CC QUIC per pipe |
+| Cifratura TLS | **Sì**: TLS 1.3 intrinseco QUIC | **No nativo** nel wire stripe attuale |
+| Classi di traffico dataplane | **Sì** | **Sì** (decisione resta a livello scheduler/classifier) |
+| Multipath applicativo | **Sì** | **Sì** (con FEC + pipe multiple per path) |
+
+**Impatti pratici**:
+- Su path stripe, il guadagno prestazionale deriva da parallelismo pipe + FEC,
+  non dal CC QUIC.
+- Le policy QoS per classe (`preferred_paths`, `excluded_paths`, duplication)
+  continuano a funzionare in modo trasversale al tipo trasporto.
+- La principale area aperta è l'hardening di sicurezza del protocollo stripe
+  (autenticazione, cifratura, anti-replay).
 
 ## Limiti deliberati (fase corrente)
 - Multipath in singola connessione QUIC disponibile in modalità sperimentale (scheduler path-aware con priorità/peso e fail-cooldown)
