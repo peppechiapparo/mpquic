@@ -1590,6 +1590,7 @@ func (m *multipathConn) markTxError(idx int, err error) {
 	}
 	p.cooldownUntil = time.Now().Add(time.Duration(p.consecutiveFails) * time.Second)
 	p.alive = false
+	p.dc = nil
 	if p.conn != nil {
 		_ = p.conn.CloseWithError(0, "tx-error")
 		p.conn = nil
@@ -1680,6 +1681,7 @@ func (m *multipathConn) onPathError(ctx context.Context, idx int, err error) {
 		p.consecutiveFails = 6
 	}
 	p.cooldownUntil = time.Now().Add(time.Duration(p.consecutiveFails) * time.Second)
+	p.dc = nil
 	if p.conn != nil {
 		_ = p.conn.CloseWithError(0, "rx-error")
 		p.conn = nil
