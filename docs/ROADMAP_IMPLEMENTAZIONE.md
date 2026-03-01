@@ -2,6 +2,12 @@
 
 *Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-01*
 
+### Nota manutenzione (2026-03-01)
+- Cleanup diagnostico completato in `cmd/mpquic/main.go` (commit `c15b235`):
+  - rimosse log temporanee `[DIAG]` in `registerStripe()` e `dispatch()`
+  - rimosso `dispatchCounter` usato solo per sampling debug
+- Nessun impatto funzionale previsto; modifica di sola pulizia osservabilità
+
 ---
 
 ## Concetti chiave: Multi-link vs Multi-tunnel vs Multi-path
