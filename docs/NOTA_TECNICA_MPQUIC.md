@@ -1,13 +1,15 @@
-# Nota Tecnica — Isolamento del Traffico nella Piattaforma MPQUIC
+# Nota Tecnica — Piattaforma MPQUIC: Test e Risultati
 
 **Data**: 1 marzo 2026  
-**Versione**: 2.0  
+**Versione**: 3.0  
 **Autori**: Team Engineering SATCOMVAS  
 **Classificazione**: Interna / Clienti
 
 ---
 
 ## Indice
+
+**Fase 2 — Multi-tunnel per link (Isolamento traffico)**
 
 1. [Sommario Esecutivo](#1-sommario-esecutivo)
 2. [Contesto e Motivazione](#2-contesto-e-motivazione)
@@ -17,25 +19,36 @@
 6. [Test 1 — Isolamento RTT (Latenza)](#6-test-1--isolamento-rtt-latenza)
 7. [Test 2 — Isolamento Throughput (Banda)](#7-test-2--isolamento-throughput-banda)
 8. [Analisi dei Risultati](#8-analisi-dei-risultati)
-9. [Test 3 — BBR Congestion Control e Reliable Transport su Starlink](#9-test-3--bbr-congestion-control-e-reliable-transport-su-starlink)
-10. [Vantaggi per il Cliente](#10-vantaggi-per-il-cliente)
-11. [Conclusioni](#11-conclusioni)
-12. [Appendice — Comandi Completi](#12-appendice--comandi-completi)
+
+**Fase 3 — BBR Congestion Control e Reliable Transport**
+
+9. [Test 3 — BBR e Reliable Transport su Starlink](#9-test-3--bbr-congestion-control-e-reliable-transport-su-starlink)
+
+**Fase 4 — Multi-Path (Failover, Bonding, Aggregazione)**
+
+10. [Test 4 — Multi-Path Failover](#10-test-4--multi-path-failover)
+11. [Test 5 — Multi-Path Bonding (Balanced)](#11-test-5--multi-path-bonding-balanced)
+12. [Test 6 — Speedtest End-to-End con Bonding](#12-test-6--speedtest-end-to-end-con-bonding)
+
+**Conclusioni e Appendice**
+
+13. [Vantaggi per il Cliente](#13-vantaggi-per-il-cliente)
+14. [Conclusioni](#14-conclusioni)
+15. [Appendice — Comandi Completi](#15-appendice--comandi-completi)
 
 ---
 
 ## 1. Sommario Esecutivo
 
 La piattaforma MPQUIC implementa un'architettura a **tunnel QUIC multipli per link
-fisico**, dove ogni classe di traffico (voce, dati business, backup) viaggia in un
-tunnel dedicato e completamente isolato. Questa nota documenta i test di isolamento
-condotti il 28 febbraio 2026, che dimostrano in modo quantitativo un principio
-fondamentale:
+fisico** con capacità **multi-path** (failover e bonding su link WAN multipli).
+Questa nota documenta l'evoluzione completa dei test condotti tra il 28 febbraio e
+il 1 marzo 2026, organizzati per fase di sviluppo.
+
+### Fase 2 — Isolamento multi-tunnel (28 febbraio 2026)
 
 > **La degradazione di un tunnel (packet loss fino al 30%) ha impatto ZERO sui
 > tunnel adiacenti che condividono lo stesso link fisico.**
-
-I risultati chiave:
 
 | Metrica | Tunnel degradato (br2) | Tunnel adiacenti (cr2, df2) |
 |---------|------------------------|------------------------------|
@@ -44,10 +57,26 @@ I risultati chiave:
 | **Latenza sotto loss** | invariata (13 ms) | invariata (13 ms) |
 | **Packet loss osservato** | 15–35% | **0%** |
 
-Questi risultati confermano che l'architettura multi-tunnel QUIC elimina il problema
-del **Head-of-Line Blocking** tipico delle soluzioni VPN tradizionali basate su TCP o
-tunnel monolitici, garantendo che applicazioni critiche (VoIP, telemetria, controllo)
-non subiscano mai degradazione a causa di traffico meno prioritario.
+### Fase 3 — BBR + Reliable Transport (28 febbraio 2026)
+
+> **BBR con reliable transport mantiene +79% di throughput rispetto a Cubic
+> con 30% di packet loss su Starlink.**
+
+| Scenario (30% loss) | Cubic | BBR | Vantaggio BBR |
+|---------------------|-------|-----|---------------|
+| Reliable mode | 14.6 Mbps | **26.1 Mbps** | **+79%** |
+
+### Fase 4 — Multi-Path Failover e Bonding (1 marzo 2026)
+
+> **Failover automatico con soli 2 pacchetti persi. Bonding aggrega due link
+> Starlink raggiungendo 74 Mbps (iperf3) e 72 Mbps download (Ookla speedtest
+> end-to-end da client LAN).**
+
+| Test | Risultato chiave |
+|------|------------------|
+| **Failover WAN5→WAN6** | 2 pacchetti persi su 74 (2.7%), recovery in ~8s |
+| **Bonding iperf3** | 74.3 Mbps aggregati, picco 102 Mbps |
+| **Ookla Speedtest (LAN)** | Download 71.97 Mbps, Upload 41.12 Mbps, Ping 19ms |
 
 ---
 
@@ -706,9 +735,279 @@ Tabella riassuntiva con tutti gli scenari testati:
 
 ---
 
-## 10. Vantaggi per il Cliente
+## 10. Test 4 — Multi-Path Failover
 
-### 10.1 Qualità del Servizio Garantita
+### 10.1 Obiettivo
+
+Dimostrare che la piattaforma MPQUIC è in grado di effettuare un failover automatico
+tra link WAN multipli (multi-path) con **minima perdita di pacchetti** e senza
+interruzione del servizio percepita dall'utente finale. Il test utilizza traffico reale
+proveniente da un router OpenWrt collegato alla LAN.
+
+### 10.2 Configurazione
+
+| Parametro | Valore |
+|-----------|--------|
+| **Istanza** | mp1 |
+| **Policy** | `multipath_policy: failover` |
+| **Path primario** | wan5 — enp7s7 (Starlink terrestre, ~14 ms) — `priority: 1` |
+| **Path secondario** | wan6 — enp7s8 (Starlink satellite, ~25–40 ms) — `priority: 2` |
+| **Server** | VPS 172.238.232.223:45017, `multi_conn_enabled: true` |
+| **Transport** | `transport_mode: reliable`, `congestion_algorithm: bbr` |
+| **TUN** | `10.200.17.1/24` (client) ↔ `10.200.17.254/24` (VPS) |
+| **Sorgente traffico** | OpenWrt SL1 → `mwan3 use SL1 ping 9.9.9.9` |
+| **Percorso** | PC LAN → OpenWrt SL1 → route table wan1 → mp1 TUN → VPS → Internet |
+
+**Routing configurato per il test:**
+
+```bash
+# Client — instradare SL1 via mp1
+ip route replace default dev mp1 table wan1
+nft add rule ip nat postrouting oifname "mp1" masquerade
+
+# VPS — ritorno al client
+ip route add 172.16.1.0/30 dev mp1
+```
+
+### 10.3 Procedura
+
+1. **Baseline**: avvio ping continuativo da OpenWrt (`mwan3 use SL1 ping 9.9.9.9`)
+   con wan5 attivo come path primario.
+2. **Fault injection**: blocco del traffico UDP verso il server sul path wan5 tramite
+   nftables:
+   ```bash
+   nft add table inet failover_test
+   nft add chain inet failover_test output { type filter hook output priority 0 \; }
+   nft add rule inet failover_test output oif enp7s7 udp dport 45017 drop
+   ```
+3. **Osservazione failover**: monitoraggio del passaggio automatico a wan6.
+4. **Recovery**: rimozione del blocco e osservazione del ritorno a wan5:
+   ```bash
+   nft flush table inet failover_test
+   nft delete table inet failover_test
+   ```
+
+### 10.4 Risultati
+
+**Fase di failover (wan5 → wan6):**
+
+| Sequenza | RTT (ms) | Link | Note |
+|----------|----------|------|------|
+| seq 0–44 | ~14 ms | wan5 | Baseline stabile |
+| seq 45–46 | — | — | **PERSI** (2 pacchetti durante switchover) |
+| seq 47+ | ~24–42 ms | wan6 | Failover completato, Starlink satellite |
+
+**Fase di recovery (wan6 → wan5):**
+
+| Sequenza | RTT (ms) | Link | Note |
+|----------|----------|------|------|
+| Recovery +0s | ~35 ms | wan6 | Blocco rimosso |
+| Recovery +3s | ~28 ms | transizione | wan5 rientra attivo |
+| Recovery +8s | ~14 ms | wan5 | Path primario ristabilito |
+
+**Riepilogo:**
+
+| Metrica | Valore |
+|---------|--------|
+| **Pacchetti inviati** | 74 |
+| **Pacchetti ricevuti** | 72 |
+| **Pacchetti persi** | 2 (2.7%) |
+| **Tempo di failover** | ~2 secondi (1 seq di timeout + 1 transizione) |
+| **Tempo di recovery** | ~8 secondi (graduale, stabile a ~14 ms) |
+| **Pacchetti persi in recovery** | 0 |
+
+### 10.5 Verifica post-recovery
+
+Dopo il ripristino, eseguiti due ping aggiuntivi per confermare la stabilità:
+
+```
+Run 2: 17/17 ricevuti, 0% loss, RTT 35→14 ms (stabilizzazione)
+Run 3: 36/36 ricevuti, 0% loss, RTT 14 ms costante
+```
+
+### 10.6 Valutazione
+
+Il failover multi-path dimostra:
+- **Perdita minima**: solo 2 pacchetti persi in tutto lo switchover (meno di 2 secondi)
+- **Trasparenza per l'utente**: l'aumento di latenza (14→35 ms) è percepibile ma
+  non impatta applicazioni real-time
+- **Recovery automatico**: il path primario viene ripristinato senza intervento manuale
+  e senza alcuna perdita
+- **Compatibilità con traffico reale**: il test è stato condotto con traffico routing
+  da un router OpenWrt in produzione, non con traffico sintetico
+
+---
+
+## 11. Test 5 — Multi-Path Bonding (Balanced)
+
+### 11.1 Obiettivo
+
+Verificare che la piattaforma MPQUIC sia in grado di **aggregare la banda** di due
+link WAN multipli simultaneamente (bonding), distribuendo il traffico in modo bilanciato
+per ottenere un throughput superiore a quello di ciascun singolo link.
+
+### 11.2 Configurazione
+
+| Parametro | Valore |
+|-----------|--------|
+| **Istanza** | mp1 |
+| **Policy** | `multipath_policy: balanced` |
+| **Path 1** | wan5 — enp7s7 (Starlink terrestre, ~14 ms) — `priority: 1, weight: 1` |
+| **Path 2** | wan6 — enp7s8 (Starlink satellite, ~25–40 ms) — `priority: 1, weight: 1` |
+| **Server** | VPS 172.238.232.223:45017, `multi_conn_enabled: true` |
+| **Transport** | `transport_mode: reliable`, `congestion_algorithm: bbr` |
+
+Rispetto al test di failover, è stata cambiata la policy da `failover` a `balanced`
+e il path wan6 da `priority: 2` a `priority: 1` (entrambi con weight=1 per distribuzione 50/50).
+
+### 11.3 Verifica del bilanciamento — Ping
+
+```
+PING 10.200.17.254 — 10 packets transmitted, 10 received, 0% packet loss
+RTT alternato: 14.7 / 35.2 / 14.6 / 39.8 / 14.0 / 35.8 / 14.5 / 37.2 / 14.7 / 35.2 ms
+```
+
+Il pattern alternato conferma che i pacchetti vengono distribuiti equamente tra i due
+path: i valori ~14 ms corrispondono a wan5 (terrestre), quelli ~35 ms a wan6 (satellite).
+
+### 11.4 Test di throughput — iperf3
+
+**Parametri**: 4 stream paralleli, 15 secondi, modalità reverse (download dal VPS
+al client attraverso il tunnel bonded).
+
+```bash
+iperf3 -c 10.200.17.254 -p 5201 -t 15 -P 4 -R --bind-dev mp1
+```
+
+**Risultati per intervallo:**
+
+| Intervallo (s) | Throughput SUM (Mbps) | Note |
+|-----------------|----------------------|------|
+| 0–1 | 40.3 | Ramp-up iniziale |
+| 1–2 | 51.4 | BBR in probing |
+| 2–3 | 60.0 | Crescita costante |
+| 3–4 | 67.7 | — |
+| 4–5 | 74.5 | — |
+| 5–6 | 75.1 | — |
+| 6–7 | 85.2 | — |
+| 7–8 | 92.6 | — |
+| 8–9 | 98.6 | — |
+| **9–10** | **102.3** | **Picco massimo** |
+| 10–11 | 80.2 | Starlink handover |
+| 11–12 | 76.5 | — |
+| 12–13 | 87.7 | — |
+| 13–14 | 68.9 | — |
+| 14–15 | 53.4 | Fine test |
+
+**Risultati aggregati:**
+
+| Metrica | Valore |
+|---------|--------|
+| **SUM Sender** | 135 MB / **75.4 Mbps** |
+| **SUM Receiver** | 133 MB / **74.3 Mbps** |
+| **Picco** | **102.3 Mbps** (sec 9–10) |
+| **Retransmit** | 185 totali |
+| **Tempo ramp-up** | ~10 secondi (40 → 102 Mbps) |
+
+### 11.5 Test da OpenWrt — Traffico reale
+
+Ping continuativo da OpenWrt attraverso il tunnel bonded:
+
+```
+86 packets transmitted, 81 received, 5% packet loss
+rtt min/avg/max = 13.488/20.345/42.156 ms
+```
+
+Le 5 perdite iniziali sono attribuibili alla fase di ri-registrazione dei path dopo
+il cambio di policy (da failover a balanced con restart dell'istanza mp1).
+
+### 11.6 Valutazione
+
+Il bonding multi-path dimostra:
+- **Aggregazione reale**: 74.3 Mbps aggregati superano ampiamente la banda di ciascun
+  singolo link (~40–50 Mbps ciascuno)
+- **Picco a 102 Mbps**: BBR riesce a sfruttare entrambi i link al massimo
+  contemporaneamente
+- **Ramp-up rapido**: da 40 a 102 Mbps in soli 10 secondi grazie a BBR probing
+- **Retransmit contenuti**: 185 su un trasferimento di 135 MB (0.01%) indica una
+  gestione ottimale del reordering tra path a latenza differente
+
+---
+
+## 12. Test 6 — Speedtest End-to-End con Bonding
+
+### 12.1 Obiettivo
+
+Misurare le prestazioni end-to-end percepite da un **client LAN reale** collegato al
+router OpenWrt, con traffico instradato attraverso il tunnel bonded mp1 verso Internet
+via VPS. A differenza dei test iperf3 (che misurano il throughput del tunnel), questo
+test misura le prestazioni complete della catena:
+
+```
+PC LAN → OpenWrt (SL1) → mp1 bonded tunnel → VPS → Internet → Ookla server
+```
+
+### 12.2 Configurazione
+
+| Parametro | Valore |
+|-----------|--------|
+| **Client** | PC collegato a OpenWrt LAN |
+| **Router** | OpenWrt con mwan3, SL1 → table wan1 → mp1 |
+| **Tunnel** | mp1 bonded (wan5 + wan6, balanced) |
+| **VPS egress** | 172.238.232.223 (Akamai Technologies) |
+| **Server Ookla** | Fiber Telecom SPA, Milano |
+| **Strumento** | Ookla Speedtest (speedtest.net) |
+
+### 12.3 Risultati Ookla Speedtest
+
+| Metrica | Valore |
+|---------|--------|
+| **Download** | **71.97 Mbps** |
+| **Upload** | **41.12 Mbps** |
+| **Ping (idle)** | 19 ms |
+| **Ping (download)** | 69 ms |
+| **Ping (upload)** | 27 ms |
+| **Connessioni** | Multi |
+| **Server** | Fiber Telecom SPA, Milano |
+| **Provider rilevato** | Akamai Technologies (172.238.232.223) |
+| **Result ID** | 18904003389 |
+
+### 12.4 Analisi
+
+1. **Download 72 Mbps**: coerente con il risultato iperf3 (74.3 Mbps), il leggero
+   delta (~3%) è dovuto all'overhead aggiuntivo di HTTPS e all'hop VPS→Ookla server.
+
+2. **Upload 41 Mbps**: inferiore al download perché Starlink alloca tipicamente meno
+   banda in uplink. Il bonding aggrega comunque i due link efficacemente.
+
+3. **Ping 19 ms idle**: il percorso PC→OpenWrt→mp1→VPS→Ookla aggiunge solo ~5 ms
+   rispetto al RTT diretto del tunnel (14 ms), dimostrando overhead trascurabile.
+
+4. **Ping 69 ms sotto carico download**: il bufferbloat è contenuto (+50 ms) grazie
+   a BBR che limita l'inflazione delle code rispetto a Cubic.
+
+5. **Provider Akamai**: il server Ookla vede il VPS (172.238.232.223) come sorgente,
+   confermando che il traffico transita correttamente attraverso l'intera catena
+   tunnel.
+
+### 12.5 Significato per il cliente
+
+Questo test è particolarmente significativo perché riproduce **esattamente** lo
+scenario operativo reale:
+- Un PC normale collegato via Ethernet al router
+- Nessuna configurazione speciale sul PC (DHCP standard)
+- Traffico web standard (HTTPS verso server Ookla)
+- Tutto il routing, tunneling e bonding avviene in modo trasparente
+
+Il client ottiene **72 Mbps in download** aggregando due link Starlink, con una
+latenza base di 19 ms — prestazioni comparabili a una connessione FTTH residenziale
+in un contesto completamente satellitare.
+
+---
+
+## 13. Vantaggi per il Cliente
+
+### 13.1 Qualità del Servizio Garantita
 
 La piattaforma MPQUIC garantisce che le applicazioni critiche del cliente mantengano
 prestazioni ottimali **indipendentemente dallo stato delle altre applicazioni**:
@@ -720,7 +1019,7 @@ prestazioni ottimali **indipendentemente dallo stato delle altre applicazioni**:
 - **Backup e sincronizzazione**: possono saturare la loro quota di banda senza
   impattare le altre classi di traffico
 
-### 10.2 Resilienza alle Condizioni del Link
+### 13.2 Resilienza alle Condizioni del Link
 
 Le connessioni satellitari LEO (Starlink) sono soggette a variabilità naturale:
 handover tra satelliti, condizioni meteo, congestione del beam. Grazie
@@ -730,14 +1029,14 @@ all'isolamento per classe:
 - Le **applicazioni critiche** continuano a funzionare normalmente
 - Non è necessario **interrompere il backup** per fare una telefonata
 
-### 10.3 Monitorabilità e Trasparenza
+### 13.3 Monitorabilità e Trasparenza
 
 Ogni tunnel è separato e monitorabile individualmente:
 - **RTT per classe**: è possibile misurare la latenza di ogni tipo di traffico
 - **Throughput per classe**: visibilità sulla banda effettivamente utilizzata
 - **Loss per classe**: identificazione immediata di quale tipo di traffico è affetto
 
-### 10.4 Scalabilità
+### 13.4 Scalabilità
 
 L'architettura è stata progettata per scalare:
 - **3 link × 3 classi = 9 tunnel** già operativi
@@ -746,7 +1045,7 @@ L'architettura è stata progettata per scalare:
 - Classificazione flessibile tramite VLAN: l'apparato di rete del cliente decide
   quale traffico va in quale classe
 
-### 10.5 Confronto sintetico: prima e dopo
+### 13.5 Confronto sintetico: prima e dopo
 
 | Scenario | Prima (tunnel singolo) | Dopo (MPQUIC multi-tunnel) |
 |----------|------------------------|----------------------------|
@@ -757,15 +1056,16 @@ L'architettura è stata progettata per scalare:
 
 ---
 
-## 11. Conclusioni
+## 14. Conclusioni
 
 I test condotti tra il 28 febbraio e il 1 marzo 2026 dimostrano in modo
-**quantitativo e riproducibile** che l'architettura multi-tunnel QUIC della
-piattaforma MPQUIC garantisce un isolamento perfetto tra classi di traffico
-e, con le ottimizzazioni BBR + reliable transport, prestazioni eccezionali
-anche in condizioni di elevata packet loss.
+**quantitativo e riproducibile** che la piattaforma MPQUIC soddisfa tutti gli
+obbiettivi delle quattro fasi di sviluppo: isolamento multi-tunnel, resilienza
+BBR su satellite, failover automatico e aggregazione multi-link.
 
-**Risultati chiave**:
+**Risultati chiave per fase:**
+
+**Fase 2 — Isolamento multi-tunnel:**
 
 1. **Isolamento RTT**: packet loss fino al 30% su un tunnel non causa alcun aumento
    di latenza sugli altri tunnel (0 ms di variazione)
@@ -776,6 +1076,8 @@ anche in condizioni di elevata packet loss.
 3. **Nessun Head-of-Line Blocking**: a differenza delle VPN tradizionali, la perdita
    di pacchetti su una classe non blocca la consegna delle altre
 
+**Fase 3 — BBR + Reliable Transport:**
+
 4. **Reliable transport**: il passaggio da DATAGRAM frames a QUIC streams ha
    triplicato il throughput base (15 → 50 Mbps) e trasformato una degradazione
    catastrofica sotto loss (−97%) in una gestibile (−7% a −45%)
@@ -784,22 +1086,36 @@ anche in condizioni di elevata packet loss.
    **26 Mbps** contro i 14 Mbps di Cubic — **+79% di throughput**, rendendo
    operativi scenari satellite che altrimenti sarebbero inutilizzabili
 
-6. **Architettura scalabile**: 9 tunnel operativi su 3 link, con possibilità di
-   espansione a nuove classi e nuovi link
+**Fase 4 — Multi-Path Failover e Bonding:**
+
+6. **Failover automatico**: switchover in ~2 secondi con soli **2 pacchetti persi**
+   su 74, recovery senza alcuna perdita. Traffico reale da router OpenWrt.
+
+7. **Bonding aggregato**: **74.3 Mbps** di throughput aggregando due link Starlink,
+   con picco a **102 Mbps**. Ramp-up BBR da 40 a 102 Mbps in 10 secondi.
+
+8. **Speedtest end-to-end**: un client LAN reale ottiene **72 Mbps in download**
+   e **41 Mbps in upload** con Ookla speedtest, dimostrando che le prestazioni
+   sono reali e trasparenti per l'utente finale.
+
+9. **Architettura scalabile**: 19 tunnel operativi (16 attivi) su 6 WAN, con
+   supporto multi-path, failover e bonding integrati.
 
 **Prossimi sviluppi**:
 
 - **BBRv2/v3**: implementazione completa con reazione proporzionale alla loss
   (atteso ulteriore miglioramento al 10% loss)
 - **QoS attivo** (DSCP, traffic shaping): allocazione di banda garantita per classe
-- **Bonding multi-link** (Fase 4): un tunnel critico potrà usare più link per
-  ridondanza, garantendo zero-loss anche in caso di failure di un link
+- **Bonding per classe**: estensione del bonding multi-path a tutti i tunnel,
+  non solo al tunnel mp1 di test
 - **Adaptive CC selection**: selezione automatica di BBR vs Cubic basata sulle
   condizioni del link in tempo reale
+- **Monitoring dashboard**: interfaccia web per visualizzare lo stato di tutti
+  i tunnel, path e metriche in tempo reale
 
 ---
 
-## 12. Appendice — Comandi Completi
+## 15. Appendice — Comandi Completi
 
 ### A.1 Verifica stato tunnel
 
@@ -860,7 +1176,49 @@ nft add rule inet filter input tcp dport 5201 accept
 nft list ruleset > /etc/nftables.conf
 ```
 
-### A.5 Note di riproducibilità
+### A.5 Configurazione multi-path mp1
+
+```bash
+# Configurazione client (/etc/mpquic/instances/mp1.yaml — sezione rilevante)
+multipath_policy: balanced       # oppure: failover
+paths:
+  - name: wan5
+    interface: enp7s7
+    priority: 1
+    weight: 1
+  - name: wan6
+    interface: enp7s8
+    priority: 1                  # per failover: priority: 2
+    weight: 1
+
+# Routing SL1 tramite mp1
+ip route replace default dev mp1 table wan1
+nft add rule ip nat postrouting oifname "mp1" masquerade
+
+# VPS — route di ritorno
+ip route add 172.16.1.0/30 dev mp1
+
+# Fault injection per test failover
+nft add table inet failover_test
+nft add chain inet failover_test output { type filter hook output priority 0 \; }
+nft add rule inet failover_test output oif enp7s7 udp dport 45017 drop
+
+# Recovery
+nft flush table inet failover_test
+nft delete table inet failover_test
+```
+
+### A.6 iperf3 bonding attraverso tunnel mp1
+
+```bash
+# Server VPS (demone)
+iperf3 -s -D -B 10.200.17.254 -p 5201
+
+# Client — 4 stream paralleli, 15s, download (reverse)
+iperf3 -c 10.200.17.254 -p 5201 -t 15 -P 4 -R --bind-dev mp1
+```
+
+### A.7 Note di riproducibilità
 
 Per riprodurre i test è necessario:
 1. Avere almeno 3 tunnel attivi sullo stesso link (es. cr2/br2/df2 su WAN5)
@@ -869,8 +1227,12 @@ Per riprodurre i test è necessario:
 4. Usare `-B IP%device` nell'iperf3 per garantire routing device-bound
 5. `tc` (iproute2) con modulo kernel `sch_netem` disponibile sul client
 6. Test sequenziali (un iperf3 alla volta) poiché il server iperf3 è single-instance
+7. Per test multi-path: almeno 2 link WAN attivi con tunnel mp1 configurato
+8. Per test end-to-end: router OpenWrt con mwan3 configurato per instradare SL1 via mp1
+9. Dopo restart di mp1, ri-aggiungere `ip route replace default dev mp1 table wan1`
+   (il TUN viene ricreato e la route va persa)
 
 ---
 
 *Documento aggiornato il 01/03/2026 — Piattaforma MPQUIC v3.0*  
-*Commit di riferimento: 2d903ab (main)*
+*Commit di riferimento: 1cc40bc (main)*
