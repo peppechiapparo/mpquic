@@ -373,7 +373,6 @@ func (ct *connectionTable) registerStripe(peerIP netip.Addr, remoteID string, dc
 	grp, exists := ct.byIP[peerIP]
 	if !exists {
 		ct.byIP[peerIP] = &connGroup{peerIP: peerIP, paths: []*pathConn{pc}}
-		log.Printf("[DIAG] registerStripe: CREATED group peer=%s remoteID=%s paths=1", peerIP, remoteID)
 		return
 	}
 
@@ -385,12 +384,10 @@ func (ct *connectionTable) registerStripe(peerIP netip.Addr, remoteID string, dc
 				_ = old.quicConn.CloseWithError(0, "superseded")
 			}
 			grp.paths[i] = pc
-			log.Printf("[DIAG] registerStripe: REPLACED path peer=%s remoteID=%s idx=%d paths=%d", peerIP, remoteID, i, len(grp.paths))
 			return
 		}
 	}
 	grp.paths = append(grp.paths, pc)
-	log.Printf("[DIAG] registerStripe: APPENDED path peer=%s remoteID=%s paths=%d", peerIP, remoteID, len(grp.paths))
 }
 
 // drainSendCh is the per-path goroutine that reads from sendCh and writes
@@ -565,9 +562,6 @@ func (ct *connectionTable) lookup(dstIP netip.Addr) (datagramConn, bool) {
 // For multi-path groups, uses flow-based hashing on the IP 5-tuple so that
 // packets from the same TCP/UDP connection always traverse the same path,
 // preventing reordering that would cripple TCP throughput.
-// dispatchCounter tracks total dispatch calls for sampling diagnostics.
-var dispatchCounter uint64
-
 func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
@@ -579,11 +573,6 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 
 	// Single path — fast path
 	if len(grp.paths) == 1 {
-		// Diagnostic: log every 10000th to detect single-path anomalies
-		if n := atomic.AddUint64(&dispatchCounter, 1); n%10000 == 1 {
-			log.Printf("[DIAG] dispatch: SINGLE path dst=%s remoteAddr=%s count=%d",
-				dstIP, grp.paths[0].remoteAddr, n)
-		}
 		select {
 		case grp.paths[0].sendCh <- pkt:
 			return true
@@ -630,18 +619,6 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 		dispatched = true
 	default:
 		atomic.AddUint64(&grp.paths[idx].dispatchDrop, 1)
-	}
-
-	// Diagnostic: log every 10000th multi-path dispatch with per-path stats
-	if n := atomic.AddUint64(&dispatchCounter, 1); n%10000 == 1 {
-		var parts []string
-		for i, pc := range grp.paths {
-			hit := atomic.LoadUint64(&pc.dispatchHit)
-			drop := atomic.LoadUint64(&pc.dispatchDrop)
-			parts = append(parts, fmt.Sprintf("[%d]hit=%d,drop=%d,remote=%s", i, hit, drop, pc.remoteAddr))
-		}
-		log.Printf("[DIAG] dispatch: MULTI paths=%d active=%d/%v dst=%s count=%d %s",
-			len(grp.paths), len(active), active, dstIP, n, strings.Join(parts, " "))
 	}
 
 	return dispatched
