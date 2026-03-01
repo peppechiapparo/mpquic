@@ -348,16 +348,16 @@ server multi-connessione (Fase 2) come base.
 ## Infrastruttura (2026-02-28)
 
 ### Client VM (VMID 200, Debian 12)
-| Interfaccia | Ruolo | IP | Stato |
-|-------------|-------|----|-------|
-| enp6s18 | MGMT1 | 10.10.11.100/24 | ✅ |
-| enp6s19 | MGMT2 | 10.10.10.100/24 | ✅ |
-| enp6s20-23 | LAN1-4 | 172.16.{1-4}.1/30 | ✅ |
-| enp7s1-2 | LAN5-6 | 172.16.{5-6}.1/30 | ✅ |
-| enp7s3-5 | WAN1-3 | — | No modem |
-| enp7s6 | WAN4 | 192.168.1.100 | ✅ mpq4 ~108ms |
-| enp7s7 | WAN5 | 10.150.19.95 | ✅ mpq5 ~13ms |
-| enp7s8 | WAN6 | 100.64.86.226 | ✅ mpq6 ~34ms |
+| Interfaccia | Ruolo  | IP               | Stato |
+|-------------|------- |----------------  |-------|
+| enp6s18     | MGMT1  | 10.10.11.100/24  | ✅ |
+| enp6s19     | MGMT2  | 10.10.10.100/24  | ✅ |
+| enp6s20-23  | LAN1-4 | 172.16.{1-4}.1/30| ✅ |
+| enp7s1-2    | LAN5-6 | 172.16.{5-6}.1/30| ✅ |
+| enp7s3-5    | WAN1-3 | — | No modem     |
+| enp7s6      | WAN4   | 192.168.1.100    | ✅ mpq4 ~108ms |
+| enp7s7      | WAN5   | 10.150.19.95     | ✅ mpq5 ~13ms |
+| enp7s8      | WAN6   | 100.64.86.226    | ✅ mpq6 ~34ms |
 
 ### Server VPS (Ubuntu 24.04, 172.238.232.223)
 - 6 listener QUIC (45001-45006)

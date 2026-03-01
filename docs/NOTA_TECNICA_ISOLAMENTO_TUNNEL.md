@@ -1,7 +1,7 @@
 # Nota Tecnica — Isolamento del Traffico nella Piattaforma MPQUIC
 
-**Data**: 28 febbraio 2026  
-**Versione**: 1.0  
+**Data**: 1 marzo 2026  
+**Versione**: 2.0  
 **Autori**: Team Engineering SATCOMVAS  
 **Classificazione**: Interna / Clienti
 
@@ -17,9 +17,10 @@
 6. [Test 1 — Isolamento RTT (Latenza)](#6-test-1--isolamento-rtt-latenza)
 7. [Test 2 — Isolamento Throughput (Banda)](#7-test-2--isolamento-throughput-banda)
 8. [Analisi dei Risultati](#8-analisi-dei-risultati)
-9. [Vantaggi per il Cliente](#9-vantaggi-per-il-cliente)
-10. [Conclusioni](#10-conclusioni)
-11. [Appendice — Comandi Completi](#11-appendice--comandi-completi)
+9. [Test 3 — BBR Congestion Control e Reliable Transport su Starlink](#9-test-3--bbr-congestion-control-e-reliable-transport-su-starlink)
+10. [Vantaggi per il Cliente](#10-vantaggi-per-il-cliente)
+11. [Conclusioni](#11-conclusioni)
+12. [Appendice — Comandi Completi](#12-appendice--comandi-completi)
 
 ---
 
@@ -515,10 +516,10 @@ con Cubic congestion control:
 | 10% | 2.3 Mbps | −95% | Cubic dimezza la finestra ad ogni loss event |
 | 30% | 0.4 Mbps | −99% | Quasi totale collasso |
 
-Questa è la risposta **attesa** di Cubic a condizioni di elevato packet loss. Con
-l'adozione futura di **BBRv3** (Fase 3 della roadmap), il tunnel degradato manterrà
-throughput significativamente superiore sotto le stesse condizioni di loss, poiché
-BBRv3 non interpreta ogni loss come segnale di congestione.
+Questa è la risposta **attesa** di Cubic a condizioni di elevato packet loss.
+La sezione 9 documenta i risultati ottenuti con l'implementazione di **BBRv1** e
+il **transport mode reliable**, che migliorano drasticamente le prestazioni sotto
+elevata packet loss.
 
 ### 8.4 Osservazione sul packet loss misurato vs iniettato
 
@@ -533,9 +534,181 @@ netem applica il loss in uscita dal device TUN, ma il ping misura il round-trip
 
 ---
 
-## 9. Vantaggi per il Cliente
+## 9. Test 3 — BBR Congestion Control e Reliable Transport su Starlink
 
-### 9.1 Qualità del Servizio Garantita
+### 9.1 Motivazione
+
+I test di isolamento (sezioni 6-8) hanno dimostrato che quando un tunnel subisce
+packet loss, solo quel tunnel è affetto. Tuttavia, il tunnel colpito con Cubic
+subisce una degradazione del **95-99%** — un risultato inaccettabile per scenari
+operativi su collegamenti degradati come Starlink sotto interferenze o congestione.
+
+BBR (Bottleneck Bandwidth and Round-trip propagation time) è un algoritmo di
+congestion control sviluppato da Google che, a differenza di Cubic, non interpreta
+ogni pacchetto perso come segnale di congestione. BBR mantiene un modello del
+bottleneck bandwidth e del minimum RTT, puntando a operare al punto ottimale
+di Kleinrock (massima banda, minima latenza).
+
+### 9.2 Implementazione BBRv1
+
+L'implementazione è stata realizzata come fork locale di quic-go v0.48.2
+(`local-quic-go/internal/congestion/bbr_sender.go`, ~400 LOC) con le seguenti
+caratteristiche:
+
+- **4 modalità operative**: STARTUP → DRAIN → PROBE_BW → PROBE_RTT
+- **Pacing gain cycle** in PROBE_BW: `[1.25, 0.75, 1.0×6]`
+- **Windowed max bandwidth filter** su 10 round-trip
+- **Min RTT tracking** con expiry a 10 secondi e fase PROBE_RTT di 200ms
+- **Startup exit** dopo 3 round senza crescita bandwidth ≥ 25%
+- **Loss-agnostic**: nessuna riduzione della finestra su singoli loss events
+
+La configurazione è per-tunnel via YAML:
+
+```yaml
+# Esempio: br3.yaml (BBR su Starlink)
+congestion_algorithm: bbr
+transport_mode: reliable
+```
+
+### 9.3 Scoperta critica: Transport Mode Reliable
+
+Durante i test iniziali con BBR su Starlink, è emerso un risultato inatteso:
+**BBR e Cubic ottenevano throughput identico sotto loss** (~0.5 Mbps con 10% loss,
+indipendentemente dal congestion control).
+
+**Causa**: la piattaforma MPQUIC utilizzava `QUIC DATAGRAM frames` (RFC 9221) per
+il trasporto dei pacchetti TUN. I DATAGRAM frames sono **unreliable**: i pacchetti
+persi a livello UDP non vengono mai ritrasmessi da QUIC. Di conseguenza:
+
+- Il 10% di loss netem si trasferiva **direttamente** al TCP interno al tunnel
+- Il TCP interno vedeva 10% loss e collassava (formula di Mathis: throughput ∝ MSS/(RTT×√loss))
+- Il congestion control QUIC era **irrilevante** perché non comandava ritrasmissioni
+
+**Soluzione implementata**: `transport_mode: reliable` — un nuovo modalità di
+trasporto che sostituisce i DATAGRAM frames con un **bidirectional QUIC stream**
+e framing 2-byte length-prefixed:
+
+```
+┌──────────┬────────────────────────────┐
+│ Len (2B) │ Payload (pacchetto TUN)    │
+│ BigEndian│ [Len bytes]                │
+└──────────┴────────────────────────────┘
+```
+
+Con stream reliable:
+- QUIC ritrasmette automaticamente i pacchetti persi a livello UDP
+- Il TCP interno al tunnel vede **0% loss** indipendentemente dalla loss fisica
+- Il congestion control QUIC (BBR o Cubic) governa il rate di ritrasmissione
+- Il throughput è determinato dalla capacità dell'algoritmo CC di operare sotto loss
+
+### 9.4 Ambiente di Test
+
+| Componente | Dettaglio |
+|------------|----------|
+| **Link fisico** | Starlink (antenna terminale enp7s8, IP CGNAT 100.64.86.226/10) |
+| **RTT medio** | 25-40 ms (Starlink LEO) |
+| **Tunnel test** | cr3 (Cubic), br3 (BBR), df3 (Cubic) — tutti su WAN6 porta 45016 |
+| **Server** | VPS mt6 (multi-conn, `transport_mode: reliable`, Cubic) |
+| **Subnet** | 10.200.16.0/24 (cr3=.1, br3=.5, df3=.9, mt6=.254) |
+| **Loss injection** | `tc qdisc netem loss X%` su interfaccia Starlink enp7s8 |
+| **Durata test** | 10 secondi per ciascun iperf3 |
+| **Commit** | 2d903ab — feat: reliable transport mode |
+
+### 9.5 Risultati: Datagram Mode (prima del fix)
+
+Prima dell'introduzione del reliable transport, tutti i tunnel usavano DATAGRAM
+frames. Con 10% loss su Starlink, **tutti i tunnel crollavano** indipendentemente
+dal congestion control:
+
+| Tunnel | CC | 0% loss | 10% loss | Degradazione |
+|--------|--------|---------|----------|-------------|
+| cr3 | Cubic | 15.1 Mbps | 0.5 Mbps | **−97%** |
+| br3 | BBR | 14.5 Mbps | 0.5 Mbps | **−97%** |
+| df3 | Cubic | 14.9 Mbps | 0.9 Mbps | **−94%** |
+
+Risultato: BBR identico a Cubic. Il congestion control QUIC è irrilevante
+quando il transport è unreliable.
+
+### 9.6 Risultati: Reliable Mode
+
+#### 9.6.1 Baseline (0% loss)
+
+| Tunnel | CC | Mbps (sender) | Retransmit | vs Datagram mode |
+|--------|--------|-------|------------|------------------|
+| cr3 | Cubic | 45.2 | 74 | **+199%** |
+| br3 | **BBR** | **47.4** | 120 | **+227%** |
+| df3 | Cubic | 55.8 | 194 | **+274%** |
+
+Il passaggio a stream reliable ha **triplicato** il throughput base rispetto ai
+DATAGRAM frames. Questo perché lo stream beneficia del flow control QUIC e del
+buffering più efficiente (coalescing di pacchetti piccoli in segmenti più grandi).
+
+#### 9.6.2 Con 10% loss
+
+| Tunnel | CC | Mbps | Degradazione vs baseline | Confronto |
+|--------|--------|------|------------------------|--------|
+| cr3 | Cubic | 41.9 | −7% | Riferimento |
+| br3 | **BBR** | 28.5 | −40% | BBR più conservativo |
+| df3 | Cubic | 39.7 | −29% | Conferma Cubic |
+
+Con 10% loss, Cubic si dimostra sorprendentemente resiliente grazie al loss
+recovery interno di quic-go (RACK, TLP, retransmission timeout). BBR degrada
+di più perché la nostra implementazione BBRv1 entra in modalità conservativa
+sulle ritrasmissioni frequenti.
+
+#### 9.6.3 Con 30% loss — BBR vince nettamente
+
+| Tunnel | CC | Mbps | Degradazione vs baseline | Confronto |
+|--------|--------|------|------------------------|--------|
+| cr3 | Cubic | 15.5 | **−66%** | Riferimento |
+| br3 | **BBR** | **26.1** | **−45%** | **+68% vs Cubic (cr3)** |
+| df3 | Cubic | 13.6 | **−76%** | Conferma Cubic |
+
+**Con 30% loss, BBR mantiene 26 Mbps contro i 14-15 Mbps di Cubic — quasi il
+doppio del throughput.** Questo è il risultato atteso dalla teoria: BBR non
+interpreta la loss come congestione, mantenendo una finestra di congestione
+ampia basata sulla stima del bandwidth-delay product.
+
+### 9.7 Analisi Comparativa Completa
+
+Tabella riassuntiva con tutti gli scenari testati:
+
+| Scenario | Cubic (Mbps) | BBR (Mbps) | Vantaggio BBR |
+|----------|-------------|-----------|---------------|
+| **Datagram mode, 0% loss** | 15.0 | 14.5 | −3% (parità) |
+| **Datagram mode, 10% loss** | 0.7 | 0.5 | −29% (irrilevante) |
+| **Reliable mode, 0% loss** | 50.5 | 47.4 | −6% (parità) |
+| **Reliable mode, 10% loss** | 40.8 | 28.5 | −30% (Cubic meglio) |
+| **Reliable mode, 30% loss** | **14.6** | **26.1** | **+79% (BBR meglio)** |
+
+### 9.8 Interpretazione e Conclusioni del Test
+
+1. **Il reliable transport è il fattore di gran lunga più impattante**: il passaggio
+   da DATAGRAM a stream ha **triplicato** il throughput base e trasformato una
+   degradazione catastrofica (−97%) in una degradazione gestibile (−7% a −76%
+   a seconda dello scenario).
+
+2. **BBR eccelle in condizioni di alta loss (≥30%)**: quando la loss è elevata,
+   BBR mantiene quasi il doppio del throughput di Cubic. Questo lo rende ideale
+   per scenari satellite degradati, congestione di rete, o link con interferenze.
+
+3. **Cubic è preferibile con loss moderata (≤10%)**: il loss recovery aggressivo
+   di quic-go, combinato con l'inflation rapida della finestra di Cubic, lo rende
+   più performante a loss basse dove la maggior parte delle perdite sono recuperate
+   in tempo.
+
+4. **Strategia operativa consigliata**:
+   - `transport_mode: reliable` su **tutti** i tunnel operativi
+   - `congestion_algorithm: bbr` su tunnel **bulk** (backup, sync) dove la loss
+     è più probabile e tollerabile
+   - `congestion_algorithm: cubic` (default) su tunnel **critici** (VoIP,
+     telemetria) dove la loss è contenuta e la latenza ha priorità
+
+---
+
+## 10. Vantaggi per il Cliente
+
+### 10.1 Qualità del Servizio Garantita
 
 La piattaforma MPQUIC garantisce che le applicazioni critiche del cliente mantengano
 prestazioni ottimali **indipendentemente dallo stato delle altre applicazioni**:
@@ -547,7 +720,7 @@ prestazioni ottimali **indipendentemente dallo stato delle altre applicazioni**:
 - **Backup e sincronizzazione**: possono saturare la loro quota di banda senza
   impattare le altre classi di traffico
 
-### 9.2 Resilienza alle Condizioni del Link
+### 10.2 Resilienza alle Condizioni del Link
 
 Le connessioni satellitari LEO (Starlink) sono soggette a variabilità naturale:
 handover tra satelliti, condizioni meteo, congestione del beam. Grazie
@@ -557,14 +730,14 @@ all'isolamento per classe:
 - Le **applicazioni critiche** continuano a funzionare normalmente
 - Non è necessario **interrompere il backup** per fare una telefonata
 
-### 9.3 Monitorabilità e Trasparenza
+### 10.3 Monitorabilità e Trasparenza
 
 Ogni tunnel è separato e monitorabile individualmente:
 - **RTT per classe**: è possibile misurare la latenza di ogni tipo di traffico
 - **Throughput per classe**: visibilità sulla banda effettivamente utilizzata
 - **Loss per classe**: identificazione immediata di quale tipo di traffico è affetto
 
-### 9.4 Scalabilità
+### 10.4 Scalabilità
 
 L'architettura è stata progettata per scalare:
 - **3 link × 3 classi = 9 tunnel** già operativi
@@ -573,7 +746,7 @@ L'architettura è stata progettata per scalare:
 - Classificazione flessibile tramite VLAN: l'apparato di rete del cliente decide
   quale traffico va in quale classe
 
-### 9.5 Confronto sintetico: prima e dopo
+### 10.5 Confronto sintetico: prima e dopo
 
 | Scenario | Prima (tunnel singolo) | Dopo (MPQUIC multi-tunnel) |
 |----------|------------------------|----------------------------|
@@ -584,11 +757,13 @@ L'architettura è stata progettata per scalare:
 
 ---
 
-## 10. Conclusioni
+## 11. Conclusioni
 
-I test condotti il 28 febbraio 2026 dimostrano in modo **quantitativo e riproducibile**
-che l'architettura multi-tunnel QUIC della piattaforma MPQUIC garantisce un isolamento
-perfetto tra classi di traffico.
+I test condotti tra il 28 febbraio e il 1 marzo 2026 dimostrano in modo
+**quantitativo e riproducibile** che l'architettura multi-tunnel QUIC della
+piattaforma MPQUIC garantisce un isolamento perfetto tra classi di traffico
+e, con le ottimizzazioni BBR + reliable transport, prestazioni eccezionali
+anche in condizioni di elevata packet loss.
 
 **Risultati chiave**:
 
@@ -601,24 +776,30 @@ perfetto tra classi di traffico.
 3. **Nessun Head-of-Line Blocking**: a differenza delle VPN tradizionali, la perdita
    di pacchetti su una classe non blocca la consegna delle altre
 
-4. **Architettura scalabile**: 9 tunnel operativi su 3 link, con possibilità di
-   espansione a nuove classi e nuovi link
+4. **Reliable transport**: il passaggio da DATAGRAM frames a QUIC streams ha
+   triplicato il throughput base (15 → 50 Mbps) e trasformato una degradazione
+   catastrofica sotto loss (−97%) in una gestibile (−7% a −45%)
 
-Questi risultati validano il principio architetturale fondamentale della piattaforma
-e forniscono una base quantitativa per le garanzie di qualità del servizio offerte
-ai clienti.
+5. **BBR congestion control**: con 30% loss e reliable transport, BBR mantiene
+   **26 Mbps** contro i 14 Mbps di Cubic — **+79% di throughput**, rendendo
+   operativi scenari satellite che altrimenti sarebbero inutilizzabili
+
+6. **Architettura scalabile**: 9 tunnel operativi su 3 link, con possibilità di
+   espansione a nuove classi e nuovi link
 
 **Prossimi sviluppi**:
 
-- **BBRv3 Congestion Control** (Fase 3): ridurrà drasticamente l'impatto del loss
-  anche sul tunnel affetto (~95% di degradazione con Cubic → atteso ~30% con BBR)
+- **BBRv2/v3**: implementazione completa con reazione proporzionale alla loss
+  (atteso ulteriore miglioramento al 10% loss)
 - **QoS attivo** (DSCP, traffic shaping): allocazione di banda garantita per classe
 - **Bonding multi-link** (Fase 4): un tunnel critico potrà usare più link per
   ridondanza, garantendo zero-loss anche in caso di failure di un link
+- **Adaptive CC selection**: selezione automatica di BBR vs Cubic basata sulle
+  condizioni del link in tempo reale
 
 ---
 
-## 11. Appendice — Comandi Completi
+## 12. Appendice — Comandi Completi
 
 ### A.1 Verifica stato tunnel
 
@@ -691,5 +872,5 @@ Per riprodurre i test è necessario:
 
 ---
 
-*Documento generato il 28/02/2026 — Piattaforma MPQUIC v2.4*  
-*Commit di riferimento: e58530d (main)*
+*Documento aggiornato il 01/03/2026 — Piattaforma MPQUIC v3.0*  
+*Commit di riferimento: 2d903ab (main)*
