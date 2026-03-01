@@ -52,6 +52,8 @@ type Config struct {
 	ControlAPIAuthToken   string                `yaml:"control_api_auth_token"`
 	CongestionAlgorithm   string                `yaml:"congestion_algorithm"`
 	TransportMode         string                `yaml:"transport_mode"`
+	DetectStarlink        bool                  `yaml:"detect_starlink"`
+	StarlinkDefaultPipes  int                   `yaml:"starlink_default_pipes"`
 }
 
 type MultipathPathConfig struct {
@@ -61,6 +63,8 @@ type MultipathPathConfig struct {
 	RemotePort int    `yaml:"remote_port"`
 	Priority   int    `yaml:"priority"`
 	Weight     int    `yaml:"weight"`
+	Pipes      int    `yaml:"pipes"`
+	BasePath   string `yaml:"-"` // original path name before pipe expansion
 }
 
 type DataplaneConfig struct {
@@ -777,6 +781,10 @@ func validateDataplaneConfig(dp DataplaneConfig, paths []MultipathPathConfig) er
 	pathSet := make(map[string]struct{}, len(paths))
 	for _, p := range paths {
 		pathSet[p.Name] = struct{}{}
+		// Also accept base path names (before pipe expansion)
+		if p.BasePath != "" {
+			pathSet[p.BasePath] = struct{}{}
+		}
 	}
 
 	for className, policy := range dp.Classes {
@@ -1283,6 +1291,9 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 		return nil, err
 	}
 
+	// Expand pipes: paths with pipes > 1 become N internal path entries
+	expandedPaths := expandMultipathPipes(cfg.MultipathPaths, cfg, logger)
+
 	mp := &multipathConn{
 		recvCh:  make(chan []byte, 512),
 		errCh:   make(chan error, 1),
@@ -1298,7 +1309,7 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 
 	aliveCount := 0
 
-	for _, p := range cfg.MultipathPaths {
+	for _, p := range expandedPaths {
 		state := &multipathPathState{cfg: p}
 		mp.paths = append(mp.paths, state)
 
@@ -1504,11 +1515,19 @@ func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip ma
 			}
 
 			p := m.paths[idx]
+			// Check excluded: match on both pipe name and base path name
 			if _, blocked := excluded[p.cfg.Name]; blocked {
 				continue
 			}
+			if p.cfg.BasePath != "" {
+				if _, blocked := excluded[p.cfg.BasePath]; blocked {
+					continue
+				}
+			}
 			if preferredOnly && pass == 0 {
-				if _, ok := preferred[p.cfg.Name]; !ok {
+				_, nameOk := preferred[p.cfg.Name]
+				_, baseOk := preferred[p.cfg.BasePath]
+				if !nameOk && !baseOk {
 					continue
 				}
 			}
@@ -1871,6 +1890,14 @@ func (m *multipathConn) telemetryLoop(ctx context.Context) {
 func (m *multipathConn) logTelemetrySnapshot() {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	// Per-pipe telemetry
+	type baseAgg struct {
+		txPkts, rxPkts, txErr, rxErr uint64
+		alive, total                 int
+	}
+	agg := make(map[string]*baseAgg)
+
 	for _, p := range m.paths {
 		state := "down"
 		if p.alive && p.conn != nil {
@@ -1889,7 +1916,37 @@ func (m *multipathConn) logTelemetrySnapshot() {
 			formatTime(p.lastUp),
 			formatTime(p.lastDown),
 		)
+
+		// Aggregate by base path (for multi-pipe summary)
+		base := p.cfg.BasePath
+		if base == "" {
+			base = p.cfg.Name
+		}
+		a := agg[base]
+		if a == nil {
+			a = &baseAgg{}
+			agg[base] = a
+		}
+		a.txPkts += p.txPackets
+		a.rxPkts += p.rxPackets
+		a.txErr += p.txErrors
+		a.rxErr += p.rxErrors
+		a.total++
+		if p.alive && p.conn != nil {
+			a.alive++
+		}
 	}
+
+	// Log aggregate per base path (only when pipes > 1)
+	for base, a := range agg {
+		if a.total > 1 {
+			m.logger.Infof(
+				"path aggregate base=%s pipes=%d/%d tx_pkts=%d rx_pkts=%d tx_err=%d rx_err=%d",
+				base, a.alive, a.total, a.txPkts, a.rxPkts, a.txErr, a.rxErr,
+			)
+		}
+	}
+
 	classes := make([]string, 0, len(m.classTx))
 	for className := range m.classTx {
 		classes = append(classes, className)
@@ -2220,6 +2277,128 @@ func runTunnelWithTUN(ctx context.Context, conn datagramConn, tun *water.Interfa
 		}
 		logger.Debugf("RX %d bytes", len(pkt))
 	}
+}
+
+// expandMultipathPipes expands path configs with pipes > 1 into N individual
+// path entries. Each pipe gets a unique name (e.g. "wan5.0", "wan5.1") but
+// shares the same bind IP, remote address, priority, and weight.
+// Each pipe will open its own UDP socket (different source port), creating
+// separate UDP sessions that bypass per-session traffic shaping (e.g. Starlink).
+func expandMultipathPipes(paths []MultipathPathConfig, cfg *Config, logger *Logger) []MultipathPathConfig {
+	var expanded []MultipathPathConfig
+	for _, p := range paths {
+		pipes := p.Pipes
+		// Auto-detect Starlink if configured and pipes not explicitly set
+		if pipes <= 0 && cfg.DetectStarlink {
+			if detectStarlink(p.BindIP, logger) {
+				pipes = cfg.StarlinkDefaultPipes
+				if pipes <= 0 {
+					pipes = 4
+				}
+				logger.Infof("starlink detected path=%s auto_pipes=%d", p.Name, pipes)
+			}
+		}
+		if pipes <= 1 {
+			p.BasePath = p.Name
+			expanded = append(expanded, p)
+			continue
+		}
+		logger.Infof("expanding path=%s into %d pipes", p.Name, pipes)
+		for i := 0; i < pipes; i++ {
+			ep := p
+			ep.Name = fmt.Sprintf("%s.%d", p.Name, i)
+			ep.BasePath = p.Name
+			ep.Pipes = 1
+			expanded = append(expanded, ep)
+		}
+	}
+	return expanded
+}
+
+// detectStarlink checks if a network interface is connected via Starlink by
+// performing a reverse DNS lookup on the interface's WAN IP.
+// Starlink IPs resolve to *.starlinkisp.net PTR records.
+// Uses the interface name extracted from bind_ip (e.g. "if:enp7s7") to
+// obtain the external IP via a DNS resolver bound to that interface.
+func detectStarlink(bindIP string, logger *Logger) bool {
+	ip, err := resolveBindIP(bindIP)
+	if err != nil {
+		logger.Debugf("starlink detect: cannot resolve %s: %v", bindIP, err)
+		return false
+	}
+
+	// First check: CGNAT range 100.64.0.0/10 is commonly used by Starlink
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	cgnat := net.IPNet{IP: net.ParseIP("100.64.0.0"), Mask: net.CIDRMask(10, 32)}
+	isCGNAT := cgnat.Contains(parsed)
+
+	// Try reverse DNS on the local IP (Starlink assigns IPs with PTR records)
+	names, err := net.LookupAddr(ip)
+	if err == nil {
+		for _, name := range names {
+			lower := strings.ToLower(name)
+			if strings.Contains(lower, "starlinkisp.net") || strings.Contains(lower, "starlink") {
+				logger.Debugf("starlink detect: positive via rDNS %s → %s", ip, name)
+				return true
+			}
+		}
+	}
+
+	// Fallback: try to obtain WAN IP via DNS (dig-style) and check rDNS on that
+	wanIP := getWANIPViaDNS(ip, logger)
+	if wanIP != "" {
+		wanNames, err := net.LookupAddr(wanIP)
+		if err == nil {
+			for _, name := range wanNames {
+				lower := strings.ToLower(name)
+				if strings.Contains(lower, "starlinkisp.net") || strings.Contains(lower, "starlink") {
+					logger.Debugf("starlink detect: positive via WAN rDNS %s → %s", wanIP, name)
+					return true
+				}
+			}
+		}
+	}
+
+	// Heuristic: CGNAT range is a strong indicator (most Starlink installations)
+	if isCGNAT {
+		logger.Debugf("starlink detect: CGNAT range match %s (heuristic positive)", ip)
+		return true
+	}
+
+	logger.Debugf("starlink detect: negative for %s", ip)
+	return false
+}
+
+// getWANIPViaDNS obtains the external (WAN) IP for traffic exiting via a
+// specific local IP by using OpenDNS myip resolution.
+// This is equivalent to: dig +short myip.opendns.com @resolver1.opendns.com -b <localIP>
+func getWANIPViaDNS(localIP string, logger *Logger) string {
+	laddr := net.ParseIP(localIP)
+	if laddr == nil {
+		return ""
+	}
+	dialer := &net.Dialer{
+		LocalAddr: &net.UDPAddr{IP: laddr},
+		Timeout:   3 * time.Second,
+	}
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "udp", "208.67.222.222:53") // resolver1.opendns.com
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ips, err := resolver.LookupHost(ctx, "myip.opendns.com")
+	if err != nil || len(ips) == 0 {
+		logger.Debugf("starlink detect: WAN IP lookup failed via %s: %v", localIP, err)
+		return ""
+	}
+	logger.Debugf("starlink detect: WAN IP via %s = %s", localIP, ips[0])
+	return ips[0]
 }
 
 func resolveBindIP(value string) (string, error) {

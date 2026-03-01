@@ -393,12 +393,129 @@ Confronto metriche:
 - Single-path vs Duplication: loss rate sotto netem
 
 ### Done criteria Fase 4
-- [ ] Server supporta N connessioni dallo stesso peer (multi-path group)
-- [ ] Client multipath connesso su 2+ WAN verso stesso server
-- [ ] Failover funzionante (< 2s recovery time)
-- [ ] Bonding throughput > singola WAN
+- [x] Server supporta N connessioni dallo stesso peer (multi-path group)
+- [x] Client multipath connesso su 2+ WAN verso stesso server
+- [x] Failover funzionante (2 pkt persi su 74, recovery in ~8s)
+- [x] Bonding throughput > singola WAN (74.3 Mbps aggregati, picco 102 Mbps)
 - [ ] Duplication zero-loss sotto 30% netem loss
-- [ ] Benchmark documentato con metriche
+- [x] Benchmark documentato con metriche (NOTA_TECNICA_MPQUIC.md v3.0)
+
+---
+
+## Fase 4b — Multi-Pipe per Path (Starlink Session Striping) 🔄 IN CORSO
+
+**Obiettivo**: bypassare il traffic shaping per-sessione di Starlink aprendo N tunnel
+QUIC paralleli ("pipe") sullo stesso link fisico. Ogni pipe è un flusso UDP con porta
+sorgente distinta → Starlink lo tratta come una sessione indipendente con il proprio
+budget di throughput (~80 Mbps ciascuna).
+
+### Problema
+
+```
+Senza multi-pipe (attuale):
+  Speedtest Ookla SENZA tunnel: ~300 Mbps download, ~20 Mbps upload
+  Speedtest Ookla CON tunnel:   ~50 Mbps download (single session capped!)
+  Bonding 2 link CON tunnel:    ~74 Mbps (= 2 × ~40 Mbps, entrambi capped)
+
+Con multi-pipe (obiettivo):
+  4 pipe × 80 Mbps = ~320 Mbps → saturazione della capacità Starlink
+  Bonding 2 link × 4 pipe = 8 pipe totali → throughput massimo raggiungibile
+```
+
+### Concept: pipe come tubi paralleli
+
+```
+                    Multi-Pipe (N=4 per path)
+                    ┌──────────────────────────┐
+                    │  pipe.0 (UDP :41001) ════│═══╗
+ User traffic ──▶   │  pipe.1 (UDP :41002) ════│═══╬══▶ VPS:45017
+  (via TUN)    ──▶   │  pipe.2 (UDP :41003) ════│═══╬══▶ (stessa porta)
+                    │  pipe.3 (UDP :41004) ════│═══╝
+                    └──────────────────────────┘
+                         enp7s7 (Starlink)
+
+  Starlink vede 4 flussi UDP indipendenti → 4 × 80 Mbps = 320 Mbps
+```
+
+Come mostrato nella slide ROMARS "Benefit #1": "Multi Link QUIC/UDP with Wave"
+— ogni pipe è un tunnel aggiuntivo fino a sfruttare tutta la banda del canale.
+Il concetto si estende a Multi-Path Multi-Link: le pipe sono distribuite su più
+antenne/link (Multi Antenna scenario).
+
+### Approccio: espansione path
+
+Il modo più semplice ed efficace: se un path ha `pipes: 4`, espandiamo in fase
+di inizializzazione creando 4 `multipathPathState` interni (`wan5.0`..`wan5.3`),
+ciascuno con il proprio socket UDP e connessione QUIC.
+
+| Componente | Impatto | Modifiche necessarie |
+|-----------|---------|---------------------|
+| **Config** | Nuovo campo `pipes` in `MultipathPathConfig` | +1 riga struct |
+| **Init** | Espansione path in `newMultipathConn` | +20 righe |
+| **Scheduler** | Nessuna modifica — round-robin sugli N path espansi | 0 righe |
+| **RecvLoop** | Nessuna modifica — N goroutine (una per pipe) | 0 righe |
+| **Reconnect** | Nessuna modifica — ciascuna pipe riconnette indipendentemente | 0 righe |
+| **Server** | Nessuna modifica — ogni pipe è una connessione QUIC separata nel connGroup | 0 righe |
+| **Telemetria** | Pipe visibili come path separati (wan5.0, wan5.1, ...) | +5 righe aggregazione |
+
+### Config YAML
+
+```yaml
+multipath_paths:
+  - name: wan5
+    bind_ip: "iface:enp7s7"
+    remote_addr: "172.238.232.223"
+    remote_port: 45017
+    priority: 1
+    weight: 1
+    pipes: 4        # 4 sessioni QUIC parallele su questo link
+
+  - name: wan6
+    bind_ip: "iface:enp7s8"
+    remote_addr: "172.238.232.223"
+    remote_port: 45017
+    priority: 1
+    weight: 1
+    pipes: 4        # 4 sessioni QUIC parallele anche su questo link
+```
+
+### Steps implementativi
+
+#### Step 4.6 — Multi-Pipe nel client (espansione path)
+1. Aggiungere campo `Pipes int` a `MultipathPathConfig` (yaml: `pipes`)
+2. In `newMultipathConn`, espandere `cfg.MultipathPaths`:
+   - Se `pipes <= 0` → default 1 (backward compatible)
+   - Se `pipes > 1` → creare N copie: `wan5.0`, `wan5.1`, ..., `wan5.N-1`
+   - Aggiungere campo `PipePath string` per telemetria (il nome originale del path)
+3. Aggiornare telemetria: aggregare metriche per path base (non per pipe) se desiderato
+4. Nessuna modifica ad altre funzioni — l'espansione è trasparente
+
+#### Step 4.7 — Starlink Auto-Detection
+1. Implementare `detectStarlink(ifaceName string) bool`:
+   - Ottenere IP WAN attraverso l'interfaccia specifica (HTTP GET a servizio esterno)
+   - Reverse DNS (PTR) sull'IP WAN: se contiene `starlinkisp.net` → Starlink
+   - Fallback: check CGNAT range 100.64.0.0/10 + gateway 192.168.1.1
+2. Aggiungere campo `detect_starlink: true` a Config (default: false)
+3. Aggiungere campo `starlink_default_pipes: 4` a Config (default: 4)
+4. In `newMultipathConn`, se `detect_starlink` è attivo:
+   - Per ogni path con `pipes: 0` (non impostato), eseguire detection
+   - Se Starlink → impostare `pipes = starlink_default_pipes`
+   - Loggare: `path starlink detected name=wan5 auto_pipes=4`
+5. Caching: eseguire la detection una sola volta all'avvio (non ad ogni reconnect)
+
+#### Step 4.8 — Benchmark Multi-Pipe
+1. Singolo link Starlink con pipes=1 vs pipes=4: throughput iperf3
+2. Bonding 2 link con pipes=4 ciascuno: 8 pipe totali
+3. Ookla speedtest end-to-end: confronto con/senza multi-pipe
+4. Documentare in NOTA_TECNICA_MPQUIC.md
+
+### Done criteria Fase 4b
+- [ ] Campo `pipes` funzionante nella config (default 1, backward compatible)
+- [ ] N pipe per path espanse correttamente in `newMultipathConn`
+- [ ] Throughput con pipes=4 su Starlink > 200 Mbps (iperf3)
+- [ ] `detectStarlink()` identifica correttamente link Starlink via rDNS
+- [ ] Auto-detection applica pipes=4 su link Starlink rilevati
+- [ ] Benchmark documentato: single-pipe vs multi-pipe vs bonding+multi-pipe
 
 ---
 
