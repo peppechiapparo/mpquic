@@ -238,7 +238,8 @@ type pathConn struct {
 	quicConn   quic.Connection
 	dc         datagramConn
 	cancel     context.CancelFunc
-	remoteAddr string // conn.RemoteAddr().String() — unique per path
+	remoteAddr string    // conn.RemoteAddr().String() — unique per path
+	lastRecv   time.Time // last time data was received from this path
 }
 
 // connGroup holds all QUIC connections from the same peer (same TUN IP).
@@ -351,8 +352,29 @@ func (ct *connectionTable) learnRoute(srcIP netip.Addr, peerIP netip.Addr) {
 	ct.mu.Unlock()
 }
 
+// touchPath updates the lastRecv timestamp for a specific path.
+// Called by runServerMultiConnTunnel on every received packet.
+func (ct *connectionTable) touchPath(peerIP netip.Addr, remoteAddr string) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	grp, ok := ct.byIP[peerIP]
+	if !ok {
+		return
+	}
+	now := time.Now()
+	for _, pc := range grp.paths {
+		if pc.remoteAddr == remoteAddr {
+			pc.lastRecv = now
+			return
+		}
+	}
+}
+
 // lookup finds the best datagramConn for a destination IP.
-// For multi-path peers it round-robins across available paths.
+// For multi-path peers it prefers recently-active paths (those that
+// received data within 3 seconds of the most recent), avoiding stale
+// paths whose client connection may have silently died.
+// Among active paths it round-robins.
 func (ct *connectionTable) lookup(dstIP netip.Addr) (datagramConn, bool) {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
@@ -367,14 +389,36 @@ func (ct *connectionTable) lookup(dstIP netip.Addr) (datagramConn, bool) {
 		return grp.paths[0].dc, true
 	}
 
-	// Multi-path: round-robin
-	start := grp.rr % len(grp.paths)
-	for i := 0; i < len(grp.paths); i++ {
-		idx := (start + i) % len(grp.paths)
-		grp.rr = (idx + 1) % len(grp.paths)
-		return grp.paths[idx].dc, true
+	// Find the most recent lastRecv across all paths
+	var newest time.Time
+	for _, pc := range grp.paths {
+		if pc.lastRecv.After(newest) {
+			newest = pc.lastRecv
+		}
 	}
-	return nil, false
+
+	// Paths with lastRecv within 3s of the newest are considered "active".
+	// Stale paths (client disconnected but server hasn't timed out yet)
+	// are excluded from selection.
+	staleThreshold := newest.Add(-3 * time.Second)
+	active := make([]int, 0, len(grp.paths))
+	for i, pc := range grp.paths {
+		if pc.lastRecv.After(staleThreshold) {
+			active = append(active, i)
+		}
+	}
+
+	// Fallback: if nothing looks active use all paths
+	if len(active) == 0 {
+		for i := range grp.paths {
+			active = append(active, i)
+		}
+	}
+
+	start := grp.rr % len(active)
+	idx := active[start]
+	grp.rr = (start + 1) % len(active)
+	return grp.paths[idx].dc, true
 }
 
 // pathCount returns the number of active path connections for a peer.
@@ -957,6 +1001,9 @@ func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, t
 			logger.Debugf("dropping pre-registration packet len=%d", len(pkt))
 			continue
 		}
+
+		// Update last-received timestamp so lookup() prefers active paths.
+		ct.touchPath(peerIP, remoteAddr)
 
 		// De-duplicate: if a multi-path client sends the same packet via
 		// multiple paths (duplication mode), skip writing it to TUN twice.
