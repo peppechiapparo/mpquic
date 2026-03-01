@@ -1077,7 +1077,11 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 }
 
 func (ss *stripeServer) tunWriter(sess *stripeSession) {
+	remoteID := fmt.Sprintf("stripe:%08x", sess.sessionID)
 	for pkt := range sess.rxCh {
+		// Update lastRecv so dispatch() considers this path active
+		ss.ct.touchPath(sess.peerIP, remoteID)
+
 		// Learn routes for return traffic (like runServerMultiConnTunnel does)
 		if len(pkt) >= 20 {
 			version := pkt[0] >> 4
