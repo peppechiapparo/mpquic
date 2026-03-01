@@ -177,6 +177,7 @@ type stripeClientConn struct {
 	txBytes  uint64
 	rxBytes  uint64
 	fecRecov uint64
+	lastRx   int64 // unix-nano timestamp of last received packet (atomic)
 
 	closeCh   chan struct{}
 	closeOnce sync.Once
@@ -253,6 +254,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		closeCh:    make(chan struct{}),
 		logger:     logger,
 	}
+	atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
 
 	// Open N UDP sockets bound to the same interface
 	for i := 0; i < pipes; i++ {
@@ -524,13 +526,15 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 
 		payload := buf[stripeHdrLen:n]
 
+		atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
+
 		switch hdr.Type {
 		case stripeDATA:
 			scc.handleRxShard(hdr, payload, false)
 		case stripePARITY:
 			scc.handleRxShard(hdr, payload, true)
 		case stripeKEEPALIVE:
-			// Server keepalive response — good, NAT mapping is alive
+			// Server keepalive response — NAT mapping is alive
 		}
 	}
 }
@@ -662,6 +666,14 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 		case <-scc.closeCh:
 			return
 		case <-ticker.C:
+			// Check for session timeout — server may have restarted
+			last := time.Unix(0, atomic.LoadInt64(&scc.lastRx))
+			if time.Since(last) > stripeSessionTimeout {
+				scc.logger.Errorf("stripe: session %08x timeout (no rx for %v), closing",
+					scc.sessionID, time.Since(last).Round(time.Second))
+				_ = scc.Close()
+				return
+			}
 			for _, pipe := range scc.pipes {
 				pkt := make([]byte, stripeHdrLen)
 				encodeStripeHdr(pkt, &stripeHdr{
@@ -1221,9 +1233,11 @@ func (ss *stripeServer) deliverGroupToTUN(sess *stripeSession, grp *fecGroup) {
 
 func (ss *stripeServer) handleKeepalive(hdr stripeHdr, from *net.UDPAddr) {
 	sess := ss.lookupSession(hdr.Session, from)
-	if sess != nil {
-		sess.lastActivity = time.Now()
+	if sess == nil {
+		// Unknown session — don't reply so client detects timeout and reconnects
+		return
 	}
+	sess.lastActivity = time.Now()
 	// Reply
 	reply := make([]byte, stripeHdrLen)
 	encodeStripeHdr(reply, &stripeHdr{
