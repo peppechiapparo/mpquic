@@ -186,7 +186,10 @@ type stripeClientConn struct {
 // newStripeClientConn creates a stripe transport for a single multipath path.
 // It opens N UDP sockets on the specified interface, all pointed at the server's
 // stripe port. Each socket = one Starlink session = one ~80 Mbps allocation.
-func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPathConfig, logger *Logger) (*stripeClientConn, error) {
+// pipeOffset is the global index of the first pipe in this connection (so that
+// multiple paths sharing the same session register non-overlapping pipe indices).
+// totalPipes is the total pipe count across all stripe paths for this client.
+func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPathConfig, pipeOffset, totalPipes int, logger *Logger) (*stripeClientConn, error) {
 	pipes := pathCfg.Pipes
 	if pipes <= 1 {
 		pipes = 4
@@ -220,7 +223,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	if err != nil {
 		return nil, fmt.Errorf("stripe: parse tun cidr: %w", err)
 	}
-	sessionID := pathSessionID(tunIP, pathCfg.Name)
+	sessionID := ipToUint32(tunIP) // shared across all stripe paths for this client
 
 	dataK := cfg.StripeDataShards
 	if dataK <= 0 {
@@ -268,9 +271,9 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	for retry := 0; retry < stripeRegisterRetries; retry++ {
 		for i, pipe := range scc.pipes {
 			regPayload := make([]byte, 6)
-			binary.BigEndian.PutUint32(regPayload[0:4], sessionID)
-			regPayload[4] = uint8(i)
-			regPayload[5] = uint8(len(scc.pipes))
+			binary.BigEndian.PutUint32(regPayload[0:4], ipToUint32(tunIP))
+			regPayload[4] = uint8(pipeOffset + i) // globally unique pipe index
+			regPayload[5] = uint8(totalPipes)     // total pipes across all paths
 
 			pkt := make([]byte, stripeHdrLen+len(regPayload))
 			encodeStripeHdr(pkt, &stripeHdr{
@@ -302,8 +305,8 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	// Flush timer for partial FEC groups
 	scc.txTimer = time.AfterFunc(stripeFlushInterval, scc.flushTxGroup)
 
-	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d server=%s",
-		sessionID, len(scc.pipes), dataK, parityM, serverAddr)
+	logger.Infof("stripe client ready: session=%08x pipes=%d (offset=%d total=%d) FEC=%d+%d server=%s",
+		sessionID, len(scc.pipes), pipeOffset, totalPipes, dataK, parityM, serverAddr)
 
 	return scc, nil
 }

@@ -1456,6 +1456,21 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 
 	aliveCount := 0
 
+	// Pre-compute stripe pipe offsets so all stripe paths share one session
+	// with globally unique pipe indices.
+	stripePipeOffset := make(map[string]int) // pathName → offset
+	stripeTotalPipes := 0
+	for _, p := range expandedPaths {
+		if resolvePathTransport(p, cfg, logger) == "stripe" {
+			stripePipeOffset[p.Name] = stripeTotalPipes
+			n := p.Pipes
+			if n <= 1 {
+				n = 4
+			}
+			stripeTotalPipes += n
+		}
+	}
+
 	for _, p := range expandedPaths {
 		state := &multipathPathState{cfg: p}
 		mp.paths = append(mp.paths, state)
@@ -1464,7 +1479,8 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 
 		// ── Stripe transport (Starlink-optimized) ─────────────────
 		if effectiveTransport == "stripe" {
-			sc, err := newStripeClientConn(ctx, cfg, p, logger)
+			offset := stripePipeOffset[p.Name]
+			sc, err := newStripeClientConn(ctx, cfg, p, offset, stripeTotalPipes, logger)
 			if err != nil {
 				logger.Errorf("stripe init failed name=%s err=%v", p.Name, err)
 				state.reconnecting = true
@@ -1966,7 +1982,24 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 
 		// ── Stripe reconnect ──────────────────────────────────────
 		if effectiveTransport == "stripe" {
-			sc, err := newStripeClientConn(ctx, m.cfg, pcfg, m.logger)
+			// Compute pipe offset: sum of pipes of all stripe paths before this one
+			pipeOffset := 0
+			totalPipes := 0
+			for _, pp := range m.cfg.MultipathPaths {
+				pt := resolvePathTransport(pp, m.cfg, m.logger)
+				if pt != "stripe" {
+					continue
+				}
+				n := pp.Pipes
+				if n <= 1 {
+					n = 4
+				}
+				if pp.Name == pcfg.Name {
+					pipeOffset = totalPipes
+				}
+				totalPipes += n
+			}
+			sc, err := newStripeClientConn(ctx, m.cfg, pcfg, pipeOffset, totalPipes, m.logger)
 			if err != nil {
 				m.logger.Errorf("stripe redial failed name=%s err=%v", pcfg.Name, err)
 				time.Sleep(2 * time.Second)
