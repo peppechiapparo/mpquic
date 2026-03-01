@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net"
 	"net/netip"
@@ -219,7 +220,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	if err != nil {
 		return nil, fmt.Errorf("stripe: parse tun cidr: %w", err)
 	}
-	sessionID := ipToUint32(tunIP)
+	sessionID := pathSessionID(tunIP, pathCfg.Name)
 
 	dataK := cfg.StripeDataShards
 	if dataK <= 0 {
@@ -1029,7 +1030,7 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 		})
 
 		_, cancel := context.WithCancel(context.Background())
-		ss.ct.registerStripe(peerIP, fmt.Sprintf("stripe:%s", peerIP), sdc, cancel)
+		ss.ct.registerStripe(peerIP, fmt.Sprintf("stripe:%08x", sessionID), sdc, cancel)
 		ss.logger.Infof("stripe session created: peer=%s session=%08x pipes=%d", peerIP, sessionID, totalPipes)
 
 		// Start goroutine writing decoded packets to TUN
@@ -1265,7 +1266,7 @@ func (ss *stripeServer) runGC() {
 				}
 			}
 			// Unregister from connectionTable
-			ss.ct.unregisterConn(sess.peerIP, fmt.Sprintf("stripe:%s", sess.peerIP))
+			ss.ct.unregisterConn(sess.peerIP, fmt.Sprintf("stripe:%08x", sessID))
 			delete(ss.sessions, sessID)
 			continue
 		}
@@ -1313,6 +1314,16 @@ func ipToUint32(ip net.IP) uint32 {
 		return 0
 	}
 	return binary.BigEndian.Uint32(ip4)
+}
+
+// pathSessionID generates a unique session ID per (TUN IP, path name) pair.
+// This ensures that multiple stripe paths from the same client (e.g. wan5 and
+// wan6) get distinct sessions on the server, so their pipes don't collide.
+func pathSessionID(tunIP net.IP, pathName string) uint32 {
+	base := ipToUint32(tunIP)
+	h := fnv.New32a()
+	h.Write([]byte(pathName))
+	return base ^ h.Sum32()
 }
 
 // Ensure stripeClientConn implements io.Closer for clean shutdown.

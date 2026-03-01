@@ -185,3 +185,20 @@ func TestStripeHdrRegisterPacket(t *testing.T) {
 		t.Errorf("totalPipes = %d, want 4", payload[5])
 	}
 }
+
+func TestPathSessionID_UniquePerPath(t *testing.T) {
+	ip, _ := parseTUNIP("10.200.17.1")
+
+	sid1 := pathSessionID(ip, "wan5")
+	sid2 := pathSessionID(ip, "wan6")
+
+	if sid1 == sid2 {
+		t.Errorf("pathSessionID should differ for wan5 vs wan6, both = 0x%08X", sid1)
+	}
+
+	// Same path name → same session ID
+	sid1b := pathSessionID(ip, "wan5")
+	if sid1 != sid1b {
+		t.Errorf("pathSessionID should be deterministic: 0x%08X != 0x%08X", sid1, sid1b)
+	}
+}
