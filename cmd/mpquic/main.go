@@ -251,13 +251,15 @@ type connectionTable struct {
 // This prevents one path's congestion window from blocking the TUN reader
 // and starving other paths (critical for multi-pipe where N pipes share a link).
 type pathConn struct {
-	quicConn   quic.Connection
-	dc         datagramConn
-	cancel     context.CancelFunc
-	remoteAddr string        // conn.RemoteAddr().String() — unique per path
-	lastRecv   time.Time     // last time data was received from this path
-	sendCh     chan []byte    // buffered async send queue (TUN→QUIC)
-	sendDone   chan struct{}  // closed when the drain goroutine exits
+	quicConn     quic.Connection
+	dc           datagramConn
+	cancel       context.CancelFunc
+	remoteAddr   string        // conn.RemoteAddr().String() — unique per path
+	lastRecv     time.Time     // last time data was received from this path
+	sendCh       chan []byte    // buffered async send queue (TUN→QUIC)
+	sendDone     chan struct{}  // closed when the drain goroutine exits
+	dispatchHit  uint64        // atomic: packets successfully queued via dispatch
+	dispatchDrop uint64        // atomic: packets dropped (sendCh full)
 }
 
 // connGroup holds all QUIC connections from the same peer (same TUN IP).
@@ -610,12 +612,6 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 		}
 	}
 
-	// Diagnostic: log every 10000th multi-path dispatch
-	if n := atomic.AddUint64(&dispatchCounter, 1); n%10000 == 1 {
-		log.Printf("[DIAG] dispatch: MULTI paths=%d active=%d/%v dst=%s count=%d",
-			len(grp.paths), len(active), active, dstIP, n)
-	}
-
 	// Flow-based hash: same 5-tuple → same path (prevents TCP reordering).
 	// Falls back to round-robin for non-TCP/UDP or unparseable packets.
 	var idx int
@@ -627,12 +623,28 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 		grp.rr = (start + 1) % len(active)
 	}
 
+	var dispatched bool
 	select {
 	case grp.paths[idx].sendCh <- pkt:
-		return true
+		atomic.AddUint64(&grp.paths[idx].dispatchHit, 1)
+		dispatched = true
 	default:
-		return false // buffer full on selected path, drop
+		atomic.AddUint64(&grp.paths[idx].dispatchDrop, 1)
 	}
+
+	// Diagnostic: log every 10000th multi-path dispatch with per-path stats
+	if n := atomic.AddUint64(&dispatchCounter, 1); n%10000 == 1 {
+		var parts []string
+		for i, pc := range grp.paths {
+			hit := atomic.LoadUint64(&pc.dispatchHit)
+			drop := atomic.LoadUint64(&pc.dispatchDrop)
+			parts = append(parts, fmt.Sprintf("[%d]hit=%d,drop=%d,remote=%s", i, hit, drop, pc.remoteAddr))
+		}
+		log.Printf("[DIAG] dispatch: MULTI paths=%d active=%d/%v dst=%s count=%d %s",
+			len(grp.paths), len(active), active, dstIP, n, strings.Join(parts, " "))
+	}
+
+	return dispatched
 }
 
 // pathCount returns the number of active path connections for a peer.
