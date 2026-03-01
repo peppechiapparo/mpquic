@@ -26,8 +26,10 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/klauspost/reedsolomon"
@@ -189,6 +191,23 @@ type stripeClientConn struct {
 // stripe port. Each socket = one Starlink session = one ~80 Mbps allocation.
 // Each path gets a unique session ID so FEC groups stay within a single path's
 // pipes, while the server connectionTable balances TX across multiple sessions.
+// bindPipeToDevice sets SO_BINDTODEVICE on a UDP socket so that all
+// outgoing packets are forced through the named interface, bypassing
+// source-based policy routing. Requires CAP_NET_RAW or root.
+func bindPipeToDevice(conn *net.UDPConn, ifname string) error {
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		return fmt.Errorf("SyscallConn: %w", err)
+	}
+	var sysErr error
+	if err := rawConn.Control(func(fd uintptr) {
+		sysErr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, ifname)
+	}); err != nil {
+		return fmt.Errorf("Control: %w", err)
+	}
+	return sysErr
+}
+
 func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPathConfig, logger *Logger) (*stripeClientConn, error) {
 	pipes := pathCfg.Pipes
 	if pipes <= 1 {
@@ -198,6 +217,12 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	bindIP, err := resolveBindIP(pathCfg.BindIP)
 	if err != nil {
 		return nil, fmt.Errorf("stripe: resolve bind: %w", err)
+	}
+
+	// Extract interface name for SO_BINDTODEVICE (e.g. "if:enp7s7" → "enp7s7")
+	var ifName string
+	if strings.HasPrefix(pathCfg.BindIP, "if:") {
+		ifName = strings.TrimPrefix(pathCfg.BindIP, "if:")
 	}
 
 	remoteHost := pathCfg.RemoteAddr
@@ -259,16 +284,23 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	// Open N UDP sockets bound to the same interface
 	for i := 0; i < pipes; i++ {
 		laddr := &net.UDPAddr{IP: net.ParseIP(bindIP), Port: 0}
-		conn, err := net.ListenUDP("udp", laddr)
+		conn, err := net.ListenUDP("udp4", laddr)
 		if err != nil {
 			scc.Close()
 			return nil, fmt.Errorf("stripe: listen pipe %d: %w", i, err)
 		}
+		if ifName != "" {
+			if err := bindPipeToDevice(conn, ifName); err != nil {
+				logger.Errorf("stripe: SO_BINDTODEVICE pipe %d to %s: %v", i, ifName, err)
+				// non-fatal: proceed without device binding
+			}
+		}
 		scc.pipes = append(scc.pipes, conn)
-		logger.Infof("stripe pipe %d: local=%s → remote=%s", i, conn.LocalAddr(), serverAddr)
+		logger.Infof("stripe pipe %d: local=%s → remote=%s dev=%s", i, conn.LocalAddr(), serverAddr, ifName)
 	}
 
 	// Register each pipe with the server (with retries for NAT traversal)
+	var totalSendOK int
 	for retry := 0; retry < stripeRegisterRetries; retry++ {
 		// Check context before each retry round
 		if ctx.Err() != nil {
@@ -293,6 +325,8 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 
 			if _, err := pipe.WriteToUDP(pkt, serverAddr); err != nil {
 				logger.Errorf("stripe: register pipe %d attempt %d failed: %v", i, retry, err)
+			} else {
+				totalSendOK++
 			}
 		}
 		if retry < stripeRegisterRetries-1 {
@@ -303,6 +337,10 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 			case <-time.After(stripeRegisterDelay):
 			}
 		}
+	}
+	if totalSendOK == 0 {
+		scc.Close()
+		return nil, fmt.Errorf("stripe: all register sends failed (0/%d×%d)", len(scc.pipes), stripeRegisterRetries)
 	}
 
 	// Start recv goroutines
