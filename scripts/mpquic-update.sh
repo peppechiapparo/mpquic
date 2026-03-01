@@ -79,19 +79,26 @@ log "instances: ${INSTANCES[*]:-none}"
 # ── Step 4: Stop all instances ────────────────────────────────────────────
 if [[ ${#INSTANCES[@]} -gt 0 ]]; then
   log "--- stopping ${#INSTANCES[@]} instance(s) ---"
+  # Stop all instances in parallel for faster shutdown
   for inst in "${INSTANCES[@]}"; do
-    systemctl stop "mpquic@${inst}" 2>/dev/null || true
+    systemctl stop "mpquic@${inst}" &
   done
+  wait
   # Brief wait to ensure binary is released
   sleep 1
 fi
 
-# ── Step 5: Install binary + scripts ──────────────────────────────────────
+# ── Step 5: Install binary + scripts + systemd units ──────────────────────
 log "--- installing ---"
 cp bin/mpquic /usr/local/bin/mpquic
 cp scripts/ensure_tun.sh    /usr/local/lib/mpquic/ensure_tun.sh    2>/dev/null || true
 cp scripts/render_config.sh /usr/local/lib/mpquic/render_config.sh 2>/dev/null || true
 chmod 0755 /usr/local/bin/mpquic
+# Install updated systemd service file
+if [[ -f deploy/systemd/mpquic@.service ]]; then
+  cp deploy/systemd/mpquic@.service /etc/systemd/system/mpquic@.service
+  log "systemd unit updated"
+fi
 log "binary installed to /usr/local/bin/mpquic"
 
 # ── Step 6: Restart all instances ─────────────────────────────────────────

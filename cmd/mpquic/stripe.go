@@ -268,6 +268,11 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 
 	// Register each pipe with the server (with retries for NAT traversal)
 	for retry := 0; retry < stripeRegisterRetries; retry++ {
+		// Check context before each retry round
+		if ctx.Err() != nil {
+			scc.Close()
+			return nil, ctx.Err()
+		}
 		for i, pipe := range scc.pipes {
 			regPayload := make([]byte, 6)
 			binary.BigEndian.PutUint32(regPayload[0:4], ipToUint32(tunIP))
@@ -289,7 +294,12 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 			}
 		}
 		if retry < stripeRegisterRetries-1 {
-			time.Sleep(stripeRegisterDelay)
+			select {
+			case <-ctx.Done():
+				scc.Close()
+				return nil, ctx.Err()
+			case <-time.After(stripeRegisterDelay):
+			}
 		}
 	}
 
@@ -449,6 +459,12 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 }
 
 func (scc *stripeClientConn) flushTxGroup() {
+	// Don't flush if connection is closing/closed
+	select {
+	case <-scc.closeCh:
+		return
+	default:
+	}
 	scc.txMu.Lock()
 	defer scc.txMu.Unlock()
 	if len(scc.txGroup) > 0 {

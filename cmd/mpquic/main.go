@@ -768,11 +768,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
+	// Log shutdown initiation and enforce hard deadline
+	go func() {
+		<-ctx.Done()
+		logger.Infof("shutdown signal received, stopping...")
+		time.AfterFunc(10*time.Second, func() {
+			logger.Errorf("shutdown deadline exceeded, forcing exit")
+			os.Exit(1)
+		})
+	}()
+
 	if cfg.Role == "server" {
 		err = runServer(ctx, cfg, logger)
 	} else {
 		err = runClientLoop(ctx, cfg, logger)
 	}
+	logger.Infof("clean exit")
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("fatal: %v", err)
 	}
@@ -1902,6 +1913,13 @@ func (m *multipathConn) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 
 func (m *multipathConn) recvLoop(ctx context.Context, idx int) {
 	for {
+		// Fast exit check — essential for clean shutdown
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		conn := m.currentPathConn(idx)
 		if conn == nil {
 			select {
@@ -1914,6 +1932,10 @@ func (m *multipathConn) recvLoop(ctx context.Context, idx int) {
 
 		pkt, err := conn.ReceiveDatagram(ctx)
 		if err != nil {
+			// During shutdown, don't trigger reconnect — just exit
+			if ctx.Err() != nil {
+				return
+			}
 			m.onPathError(ctx, idx, err)
 			continue
 		}
@@ -1948,6 +1970,11 @@ func (m *multipathConn) onPathSuccess(idx int) {
 }
 
 func (m *multipathConn) onPathError(ctx context.Context, idx int, err error) {
+	// Skip reconnect during shutdown
+	if ctx.Err() != nil {
+		return
+	}
+
 	m.mu.Lock()
 	p := m.paths[idx]
 	p.alive = false
@@ -1958,25 +1985,30 @@ func (m *multipathConn) onPathError(ctx context.Context, idx int, err error) {
 		p.consecutiveFails = 6
 	}
 	p.cooldownUntil = time.Now().Add(time.Duration(p.consecutiveFails) * time.Second)
+	oldStripe := p.stripeConn
+	oldConn := p.conn
+	oldUDP := p.udpConn
 	p.dc = nil
-	if p.stripeConn != nil {
-		_ = p.stripeConn.Close()
-		p.stripeConn = nil
-	}
-	if p.conn != nil {
-		_ = p.conn.CloseWithError(0, "rx-error")
-		p.conn = nil
-	}
-	if p.udpConn != nil {
-		_ = p.udpConn.Close()
-		p.udpConn = nil
-	}
+	p.stripeConn = nil
+	p.conn = nil
+	p.udpConn = nil
 	name := p.cfg.Name
 	needReconnect := !p.reconnecting
 	if needReconnect {
 		p.reconnecting = true
 	}
 	m.mu.Unlock()
+
+	// Close outside lock to prevent deadlock with closeAll
+	if oldStripe != nil {
+		_ = oldStripe.Close()
+	}
+	if oldConn != nil {
+		_ = oldConn.CloseWithError(0, "rx-error")
+	}
+	if oldUDP != nil {
+		_ = oldUDP.Close()
+	}
 
 	m.logger.Errorf("path down name=%s err=%v", name, err)
 	if needReconnect {
@@ -2011,8 +2043,15 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 		if effectiveTransport == "stripe" {
 			sc, err := newStripeClientConn(ctx, m.cfg, pcfg, m.logger)
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				m.logger.Errorf("stripe redial failed name=%s err=%v", pcfg.Name, err)
-				time.Sleep(2 * time.Second)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(2 * time.Second):
+				}
 				continue
 			}
 			m.mu.Lock()
@@ -2036,7 +2075,11 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 		bindIP, err := resolveBindIP(pcfg.BindIP)
 		if err != nil {
 			m.logger.Errorf("path redial resolve failed name=%s err=%v", pcfg.Name, err)
-			time.Sleep(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
 			continue
 		}
 
@@ -2044,7 +2087,11 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 		udpConn, err := net.ListenUDP("udp", localUDP)
 		if err != nil {
 			m.logger.Errorf("path redial listen failed name=%s err=%v", pcfg.Name, err)
-			time.Sleep(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
 			continue
 		}
 
@@ -2052,7 +2099,11 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 		if err != nil {
 			_ = udpConn.Close()
 			m.logger.Errorf("path redial remote resolve failed name=%s err=%v", pcfg.Name, err)
-			time.Sleep(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
 			continue
 		}
 
@@ -2060,7 +2111,11 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 		if err != nil {
 			_ = udpConn.Close()
 			m.logger.Errorf("path redial tls failed name=%s err=%v", pcfg.Name, err)
-			time.Sleep(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
 			continue
 		}
 
@@ -2076,7 +2131,11 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 		if err != nil {
 			_ = udpConn.Close()
 			m.logger.Errorf("path redial failed name=%s err=%v", pcfg.Name, err)
-			time.Sleep(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
 			continue
 		}
 
@@ -2087,7 +2146,11 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 				_ = conn.CloseWithError(0, "stream-open-failed")
 				_ = udpConn.Close()
 				m.logger.Errorf("path redial stream failed name=%s err=%v", pcfg.Name, err)
-				time.Sleep(2 * time.Second)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(2 * time.Second):
+				}
 				continue
 			}
 			dc = sc
@@ -2218,17 +2281,41 @@ func formatTime(t time.Time) string {
 }
 
 func (m *multipathConn) closeAll(code quic.ApplicationErrorCode, reason string) {
+	// Collect references under lock, then close outside the lock.
+	// This prevents deadlock with recvLoop → onPathError which also
+	// needs m.mu. Closing stripe/QUIC connections unblocks those goroutines.
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	type toClose struct {
+		stripe *stripeClientConn
+		conn   quic.Connection
+		udp    *net.UDPConn
+	}
+	var items []toClose
 	for _, p := range m.paths {
-		if p.stripeConn != nil {
-			_ = p.stripeConn.Close()
+		items = append(items, toClose{
+			stripe: p.stripeConn,
+			conn:   p.conn,
+			udp:    p.udpConn,
+		})
+		// Nil out refs so onPathError won't double-close
+		p.stripeConn = nil
+		p.conn = nil
+		p.dc = nil
+		p.udpConn = nil
+		p.alive = false
+	}
+	m.mu.Unlock()
+
+	// Close outside lock — these calls unblock recvLoop goroutines
+	for _, item := range items {
+		if item.stripe != nil {
+			_ = item.stripe.Close()
 		}
-		if p.conn != nil {
-			_ = p.conn.CloseWithError(code, reason)
+		if item.conn != nil {
+			_ = item.conn.CloseWithError(code, reason)
 		}
-		if p.udpConn != nil {
-			_ = p.udpConn.Close()
+		if item.udp != nil {
+			_ = item.udp.Close()
 		}
 	}
 }
@@ -2481,24 +2568,46 @@ func runTunnel(ctx context.Context, cfg *Config, conn datagramConn, logger *Logg
 	if err != nil {
 		return err
 	}
-	defer tun.Close()
+	var tunCloseOnce sync.Once
+	closeTun := func() { tunCloseOnce.Do(func() { tun.Close() }) }
+	defer closeTun()
 
-	return runTunnelWithTUN(ctx, conn, tun, logger)
+	return runTunnelWithTUN(ctx, conn, tun, closeTun, logger)
 }
 
-func runTunnelWithTUN(ctx context.Context, conn datagramConn, tun *water.Interface, logger *Logger) error {
+func runTunnelWithTUN(ctx context.Context, conn datagramConn, tun *water.Interface, closeTun func(), logger *Logger) error {
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
+
+	// Close TUN device when context is cancelled to unblock tun.Read goroutine.
+	// This runs BEFORE the deferred tun.Close() in the caller, ensuring the
+	// read goroutine doesn't stay blocked during shutdown.
+	go func() {
+		<-ctx.Done()
+		closeTun()
+	}()
+
 	go func() {
 		buf := make([]byte, 65535)
 		for {
 			n, err := tun.Read(buf)
 			if err != nil {
+				// Check context first — if shutting down, exit silently
+				if ctx.Err() != nil {
+					return
+				}
 				errCh <- err
+				return
+			}
+			// Check context before sending — don't attempt write on closed conn
+			if ctx.Err() != nil {
 				return
 			}
 			pkt := append([]byte(nil), buf[:n]...)
 			if err := conn.SendDatagram(pkt); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				errCh <- err
 				return
 			}
@@ -2519,6 +2628,9 @@ func runTunnelWithTUN(ctx context.Context, conn datagramConn, tun *water.Interfa
 			return err
 		}
 		if _, err := tun.Write(pkt); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return err
 		}
 		logger.Debugf("RX %d bytes", len(pkt))
