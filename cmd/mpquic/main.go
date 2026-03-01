@@ -268,6 +268,38 @@ type connGroup struct {
 	rr     int // round-robin index for send distribution
 }
 
+// flowHash extracts a lightweight hash from an IP packet's 5-tuple
+// (src IP, dst IP, protocol, src port, dst port) so that packets belonging
+// to the same TCP/UDP flow consistently map to the same path index.
+// Returns (hash, true) for parseable IPv4 TCP/UDP packets, (0, false) otherwise.
+func flowHash(pkt []byte) (uint32, bool) {
+	if len(pkt) < 20 {
+		return 0, false
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	proto := pkt[9]
+	if ihl < 20 || len(pkt) < ihl+4 {
+		return 0, false
+	}
+	// Only hash TCP (6) and UDP (17) — other protocols fall back to round-robin
+	if proto != 6 && proto != 17 {
+		return 0, false
+	}
+	// FNV-1a-inspired hash of: srcIP(4) + dstIP(4) + proto(1) + srcPort(2) + dstPort(2)
+	h := uint32(2166136261)
+	for _, b := range pkt[12:20] { // src IP + dst IP
+		h ^= uint32(b)
+		h *= 16777619
+	}
+	h ^= uint32(proto)
+	h *= 16777619
+	for _, b := range pkt[ihl : ihl+4] { // src port + dst port
+		h ^= uint32(b)
+		h *= 16777619
+	}
+	return h, true
+}
+
 func newConnectionTable() *connectionTable {
 	return &connectionTable{
 		byIP:   make(map[netip.Addr]*connGroup),
@@ -512,6 +544,10 @@ func (ct *connectionTable) lookup(dstIP netip.Addr) (datagramConn, bool) {
 // to the path's sendCh and the drain goroutine handles the actual write.
 // If the send buffer is full, the packet is dropped (backpressure).
 // Returns true if the packet was queued, false if no path or buffer full.
+//
+// For multi-path groups, uses flow-based hashing on the IP 5-tuple so that
+// packets from the same TCP/UDP connection always traverse the same path,
+// preventing reordering that would cripple TCP throughput.
 func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
@@ -531,7 +567,7 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 		}
 	}
 
-	// Multi-path: same active-path selection as lookup()
+	// Multi-path: find active paths
 	var newest time.Time
 	for _, pc := range grp.paths {
 		if pc.lastRecv.After(newest) {
@@ -551,9 +587,16 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 		}
 	}
 
-	start := grp.rr % len(active)
-	idx := active[start]
-	grp.rr = (start + 1) % len(active)
+	// Flow-based hash: same 5-tuple → same path (prevents TCP reordering).
+	// Falls back to round-robin for non-TCP/UDP or unparseable packets.
+	var idx int
+	if h, ok := flowHash(pkt); ok {
+		idx = active[int(h)%len(active)]
+	} else {
+		start := grp.rr % len(active)
+		idx = active[start]
+		grp.rr = (start + 1) % len(active)
+	}
 
 	select {
 	case grp.paths[idx].sendCh <- pkt:
