@@ -36,25 +36,42 @@ La logica esistente rimane invariata:
 Il POC si inserisce sopra il piano L3: ogni processo `mpquic@i` usa la WAN associata tramite bind sorgente UDP.
 
 ## Struttura file rilevante
-- `cmd/mpquic/main.go`: dataplane TUN <-> QUIC DATAGRAM
+- `cmd/mpquic/main.go`: dataplane TUN <-> QUIC DATAGRAM / stripe dispatch
+- `cmd/mpquic/stripe.go`: trasporto UDP stripe + FEC Reed-Solomon (~1400 LOC)
+- `cmd/mpquic/stripe_test.go`: test unitari stripe (13 test)
 - `deploy/systemd/mpquic@.service`: template servizio
 - `deploy/config/client/{1..6}.yaml`
 - `deploy/config/server/{1..6}.yaml`
 - `scripts/ensure_tun.sh`: creazione/config TUN persistente e idempotente
+- `scripts/render_config.sh`: rendering YAML con sostituzione `VPS_PUBLIC_IP`
 - `scripts/mpquic-healthcheck.sh`: check strutturato per ruolo (`client|server`) con auto-recovery opzionale
 - `scripts/mpquic-lan-routing-check.sh`: validazione/fix routing LAN->tunnel (`check|fix`, target `1..6|all`)
+- `scripts/mpquic-update.sh`: aggiornamento automatico (pull, build, stop/start, self-re-exec)
 - `scripts/install_client.sh`: installazione lato client
 - `scripts/install_server.sh`: installazione lato server
 
 ## Parametri configurazione per istanza
 Ogni YAML include:
 - `role`: `client` o `server`
-- `bind_ip`: IP locale o `if:<ifname>`
+- `bind_ip`: IP locale o `if:<ifname>` (con `if:` applica anche SO_BINDTODEVICE)
 - `remote_addr`: endpoint remoto (richiesto lato client)
 - `remote_port`: porta UDP/QUIC istanza
 - `tun_name`: nome TUN
 - `tun_cidr`: CIDR locale TUN
 - `log_level`: `debug|info|error`
+- `tls_ca_file`: path CA certificato (client)
+- `tls_cert_file` / `tls_key_file`: certificato e chiave (server)
+- `tls_server_name`: CN atteso nel certificato server (client)
+- `tls_insecure_skip_verify`: disabilita verifica TLS (solo test)
+- `congestion_algorithm`: `cubic` (default) o `bbr`
+- `transport_mode`: `datagram` (default) o `reliable` (QUIC streams)
+- `multipath_enabled`: `true/false` — abilita multipath
+- `multipath_policy`: `priority|failover|balanced`
+- `multi_conn_enabled`: `true/false` — server accetta N connessioni sulla stessa porta
+- `stripe_enabled`: `true/false` — server abilita listener stripe
+- `stripe_port`: porta UDP per protocollo stripe
+- `stripe_data_shards`: K shards dati FEC (default 10)
+- `stripe_parity_shards`: M shards parità FEC (default 2)
 
 ## Architettura a 3 livelli
 
@@ -95,14 +112,20 @@ Alla connessione iniziale, il client invia un pacchetto di registrazione con il 
 4. Ogni TUN ha la propria istanza `mpquic` client
 5. NAT MASQUERADE su ogni TUN per gestire traffico di ritorno
 
-### Livello 3: Multi-path per tunnel (FUTURO)
+### Livello 3: Multi-path per tunnel (IMPLEMENTATO)
 Un singolo tunnel può usare N link per resilienza:
 - Bonding: aggregazione bandwidth su più WAN
 - Backup: failover automatico
 - Duplicazione: pacchetti critici su più link simultaneamente
 
-Richiede QUIC Multipath (RFC 9443) o implementazione applicativa.
-Il codice `multipathConn` esistente implementa una versione applicativa di questo livello.
+Implementato con codice applicativo `multipathConn` + UDP Stripe + FEC.
+Testato su infra reale: 303 Mbps su 3 link Starlink (12 pipe UDP).
+
+```
+WAN4 (enp7s6) ─── 4 pipe stripe ───┐
+WAN5 (enp7s7) ─── 4 pipe stripe ───┼─── mp1 ─── 10.200.17.1/24 ↔ 10.200.17.254/24
+WAN6 (enp7s8) ─── 4 pipe stripe ───┘
+```
 
 ## Architettura multipath applicativa (codice esistente, client)
 
@@ -125,6 +148,14 @@ La sessione multipath parte se almeno un path è up. Se uno o più path sono non
 - `remote_port`: porta UDP del listener server
 - `priority`: priorità relativa (valore più basso = path più preferito)
 - `weight`: peso di preferenza (valore più alto = lieve favore in selezione)
+- `pipes`: numero di socket UDP paralleli per path (default: 1; usato con `transport: stripe`)
+- `transport`: tipo di trasporto per il path (`quic` default, `stripe` per UDP stripe + FEC)
+
+### Campi stripe (globali, livello root YAML)
+- `stripe_port`: porta UDP del server per il protocollo stripe (default: `remote_port` + 1000)
+- `stripe_data_shards`: K — numero shards dati per gruppo FEC (default: 10)
+- `stripe_parity_shards`: M — numero shards parità per gruppo FEC (default: 2)
+- `stripe_enabled`: (solo server) abilita il listener stripe
 
 ### Policy multipath (`multipath_policy`)
 - `priority` (default): bilancia priorità/peso/penalità errori
@@ -189,6 +220,81 @@ Per QoS L3/L2 avanzata si possono applicare policy Linux esterne (`tc`, queueing
 - `install_*` abilita `mpquic@1..6.service`
 - Ad ogni start, `ExecStartPre` assicura presenza/configurazione TUN
 - `Restart=always` mantiene sessioni attive in caso di fault
+
+## SO_BINDTODEVICE — binding interfaccia a livello kernel
+
+Quando il client ha multiple interfacce WAN con IP sorgente diversi, il solo
+`bind(IP)` non è sufficiente: il kernel potrebbe non sapere su quale interfaccia
+instradare il pacchetto, producendo `sendto: invalid argument` (EINVAL).
+
+La soluzione è `SO_BINDTODEVICE`, una socket option Linux che forza l'interfaccia
+di uscita a livello kernel:
+
+```go
+syscall.SetsockoptString(fd, syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, "enp7s6")
+```
+
+**Quando serve**: obbligo su ogni socket UDP delle pipe stripe quando ci sono
+più interfacce WAN sulla stessa macchina.
+
+**Come funziona nel codice**: il campo `bind_ip: if:enp7s6` viene parsato da
+`resolveBindIP()`:
+1. Il prefisso `if:` identifica il nome interfaccia
+2. L'IP viene risolto dall'interfaccia (`getFirstIPv4()`)
+3. Il nome interfaccia viene passato a `bindPipeToDevice()` che applica `SO_BINDTODEVICE`
+4. Il socket usa `udp4` (non `udp`) per forzare IPv4
+
+## Architettura UDP Stripe + FEC Transport
+
+### Motivazione: bypass traffic shaping Starlink
+Starlink applica un cap di ~80 Mbps per sessione UDP. Con un singolo tunnel QUIC
+il throughput è limitato a ~50 Mbps. Il trasporto stripe apre N socket UDP
+("pipe") per path, ciascuno trattato da Starlink come sessione indipendente.
+
+### Schema complessivo
+
+```
+CLIENT                                                           SERVER
+                                                                
+TUN read ──→ FEC encoder (K=10 data + M=2 parity) ──→ stripe TX  │ stripe RX ──→ FEC decode ──→ TUN write
+                                                                  │
+  Pipe 0 (UDP :rand, SO_BINDTODEVICE=enp7s6) ────────────────────┤
+  Pipe 1 (UDP :rand, SO_BINDTODEVICE=enp7s6) ────────────────────┤
+  Pipe 2 (UDP :rand, SO_BINDTODEVICE=enp7s6) ────────────────────┤  UDP listener :46017
+  Pipe 3 (UDP :rand, SO_BINDTODEVICE=enp7s6) ────────────────────┤
+                                                                  │
+   ↑ round-robin distribuzione shards FEC                         │
+                                                                  
+                       (ripetuto per wan5/enp7s7 e wan6/enp7s8)   
+```
+
+### Wire Protocol
+```
+Pacchetto stripe:
+  [stripeHdr 16 bytes][shard payload (variabile)]
+
+Header: magic(2) + ver(1) + type(1) + session(4) + groupSeq(4) +
+        shardIdx(1) + groupDataN(1) + dataLen(2) = 16 bytes
+
+Tipi: DATA (0x01), PARITY (0x02), REGISTER (0x03), KEEPALIVE (0x04)
+```
+
+### FEC Reed-Solomon
+- K=10 shards dati (il pacchetto TUN viene copiato in uno shard)
+- M=2 shards parità (calcolati da Reed-Solomon)
+- Tolleranza: fino al 16.7% di loss per gruppo FEC senza retransmit
+- Dipendenza: `github.com/klauspost/reedsolomon`
+
+### Flow-hash dispatch (server → client)
+Il server usa hash FNV-1a sulla 5-tupla IP (srcIP, dstIP, proto, srcPort, dstPort)
+per assegnare ogni flusso TCP/UDP a una sessione stripe specifica. Pacchetti dello
+stesso flusso percorrono sempre lo stesso link → nessun reordering TCP.
+
+### Session management
+- Session ID: `ipToUint32(tunIP) ^ fnv32a(pathName)` — unico per path
+- Keepalive: ogni 5s client→server, server risponde solo per sessioni note
+- Timeout: 30s senza RX → close + reconnect
+- GC: server rimuove sessioni idle dopo timeout
 
 ## Limiti deliberati (fase corrente)
 - Multipath in singola connessione QUIC disponibile in modalità sperimentale (scheduler path-aware con priorità/peso e fail-cooldown)
