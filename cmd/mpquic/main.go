@@ -222,41 +222,111 @@ func acceptStreamConn(ctx context.Context, conn quic.Connection) (*streamConn, e
 // behind the client). This allows return traffic to be dispatched to the correct
 // QUIC connection even when the dst IP in the reply packet is not the peer's
 // TUN address but a LAN host behind it.
+//
+// Multi-path support: a single peerIP may have multiple QUIC connections
+// (one per WAN path). The table aggregates them in a connGroup and the
+// lookup method round-robins across alive paths for the return direction.
 type connectionTable struct {
 	mu      sync.RWMutex
-	byIP    map[netip.Addr]*connEntry  // primary: peerIP → entry
+	byIP    map[netip.Addr]*connGroup  // primary: peerIP → group of paths
 	routed  map[netip.Addr]netip.Addr  // learned: srcIP → peerIP (reverse map)
+	dedup   *packetDedup               // optional: de-duplicate packets from multi-path clients
 }
 
-type connEntry struct {
-	quicConn quic.Connection
-	dc       datagramConn
-	cancel   context.CancelFunc
-	peerIP   netip.Addr
+// pathConn represents a single QUIC connection (path) within a connGroup.
+type pathConn struct {
+	quicConn   quic.Connection
+	dc         datagramConn
+	cancel     context.CancelFunc
+	remoteAddr string // conn.RemoteAddr().String() — unique per path
+}
+
+// connGroup holds all QUIC connections from the same peer (same TUN IP).
+// For single-path clients this has exactly one entry; for multi-path clients
+// it has one entry per WAN path.
+type connGroup struct {
+	peerIP netip.Addr
+	paths  []*pathConn
+	rr     int // round-robin index for send distribution
 }
 
 func newConnectionTable() *connectionTable {
 	return &connectionTable{
-		byIP:   make(map[netip.Addr]*connEntry),
+		byIP:   make(map[netip.Addr]*connGroup),
 		routed: make(map[netip.Addr]netip.Addr),
+		dedup:  newPacketDedup(4096),
 	}
 }
 
+// register adds (or replaces) a connection in the group for peerIP.
+// If a connection with the same RemoteAddr already exists it is superseded.
+// Otherwise the connection is appended to the group (multi-path).
 func (ct *connectionTable) register(peerIP netip.Addr, quicConn quic.Connection, dc datagramConn, cancel context.CancelFunc) {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
-	// If there's an old connection for this IP, supersede it
-	if old, ok := ct.byIP[peerIP]; ok {
-		old.cancel()
-		_ = old.quicConn.CloseWithError(0, "superseded")
+
+	remote := quicConn.RemoteAddr().String()
+	pc := &pathConn{quicConn: quicConn, dc: dc, cancel: cancel, remoteAddr: remote}
+
+	grp, exists := ct.byIP[peerIP]
+	if !exists {
+		ct.byIP[peerIP] = &connGroup{peerIP: peerIP, paths: []*pathConn{pc}}
+		return
 	}
-	ct.byIP[peerIP] = &connEntry{quicConn: quicConn, dc: dc, cancel: cancel, peerIP: peerIP}
+
+	// Replace existing path from same remote address (reconnect case)
+	for i, old := range grp.paths {
+		if old.remoteAddr == remote {
+			old.cancel()
+			_ = old.quicConn.CloseWithError(0, "superseded")
+			grp.paths[i] = pc
+			return
+		}
+	}
+
+	// New path from a different remote address → append (multi-path)
+	grp.paths = append(grp.paths, pc)
 }
 
+// unregisterConn removes a specific connection (by remoteAddr) from the
+// group for peerIP. If the group becomes empty, the entire entry is removed.
+func (ct *connectionTable) unregisterConn(peerIP netip.Addr, remoteAddr string) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	grp, exists := ct.byIP[peerIP]
+	if !exists {
+		return
+	}
+
+	for i, pc := range grp.paths {
+		if pc.remoteAddr == remoteAddr {
+			grp.paths = append(grp.paths[:i], grp.paths[i+1:]...)
+			break
+		}
+	}
+
+	if len(grp.paths) == 0 {
+		// No more paths — remove peer and all learned routes
+		for src, peer := range ct.routed {
+			if peer == peerIP {
+				delete(ct.routed, src)
+			}
+		}
+		delete(ct.byIP, peerIP)
+	}
+}
+
+// unregister removes ALL connections for a peerIP (full teardown).
 func (ct *connectionTable) unregister(peerIP netip.Addr) {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
-	// Remove all routed IPs that pointed to this peer
+	if grp, ok := ct.byIP[peerIP]; ok {
+		for _, pc := range grp.paths {
+			pc.cancel()
+			_ = pc.quicConn.CloseWithError(0, "unregistered")
+		}
+	}
 	for src, peer := range ct.routed {
 		if peer == peerIP {
 			delete(ct.routed, src)
@@ -281,20 +351,55 @@ func (ct *connectionTable) learnRoute(srcIP netip.Addr, peerIP netip.Addr) {
 	ct.mu.Unlock()
 }
 
+// lookup finds the best datagramConn for a destination IP.
+// For multi-path peers it round-robins across available paths.
 func (ct *connectionTable) lookup(dstIP netip.Addr) (datagramConn, bool) {
-	ct.mu.RLock()
-	defer ct.mu.RUnlock()
-	// First: direct peer IP lookup
-	if entry, ok := ct.byIP[dstIP]; ok {
-		return entry.dc, true
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	grp := ct.resolveGroup(dstIP)
+	if grp == nil || len(grp.paths) == 0 {
+		return nil, false
 	}
-	// Second: learned route lookup (LAN hosts behind a peer)
-	if peerIP, ok := ct.routed[dstIP]; ok {
-		if entry, ok := ct.byIP[peerIP]; ok {
-			return entry.dc, true
-		}
+
+	// Single path — fast path (most common)
+	if len(grp.paths) == 1 {
+		return grp.paths[0].dc, true
+	}
+
+	// Multi-path: round-robin
+	start := grp.rr % len(grp.paths)
+	for i := 0; i < len(grp.paths); i++ {
+		idx := (start + i) % len(grp.paths)
+		grp.rr = (idx + 1) % len(grp.paths)
+		return grp.paths[idx].dc, true
 	}
 	return nil, false
+}
+
+// pathCount returns the number of active path connections for a peer.
+func (ct *connectionTable) pathCount(peerIP netip.Addr) int {
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
+	grp, ok := ct.byIP[peerIP]
+	if !ok {
+		return 0
+	}
+	return len(grp.paths)
+}
+
+// resolveGroup looks up a connGroup by direct IP or learned route.
+// Caller must hold ct.mu (read or write).
+func (ct *connectionTable) resolveGroup(dstIP netip.Addr) *connGroup {
+	if grp, ok := ct.byIP[dstIP]; ok {
+		return grp
+	}
+	if peerIP, ok := ct.routed[dstIP]; ok {
+		if grp, ok := ct.byIP[peerIP]; ok {
+			return grp
+		}
+	}
+	return nil
 }
 
 func (ct *connectionTable) count() int {
@@ -312,14 +417,56 @@ func (ct *connectionTable) routedCount() int {
 func (ct *connectionTable) closeAll() {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
-	for ip, entry := range ct.byIP {
-		entry.cancel()
-		_ = entry.quicConn.CloseWithError(0, "shutdown")
+	for ip, grp := range ct.byIP {
+		for _, pc := range grp.paths {
+			pc.cancel()
+			_ = pc.quicConn.CloseWithError(0, "shutdown")
+		}
 		delete(ct.byIP, ip)
 	}
 	for src := range ct.routed {
 		delete(ct.routed, src)
 	}
+}
+
+// packetDedup tracks recently-seen packet hashes to de-duplicate packets
+// received from multi-path clients using duplication mode.
+// Uses a simple ring buffer of FNV-1a hashes.
+type packetDedup struct {
+	mu   sync.Mutex
+	ring []uint32
+	pos  int
+	size int
+}
+
+func newPacketDedup(size int) *packetDedup {
+	return &packetDedup{ring: make([]uint32, size), size: size}
+}
+
+// isDuplicate returns true if this packet was recently seen.
+// It hashes the packet and checks against the ring buffer.
+func (d *packetDedup) isDuplicate(pkt []byte) bool {
+	h := fnv1aHash(pkt)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, existing := range d.ring {
+		if existing == h {
+			return true
+		}
+	}
+	d.ring[d.pos] = h
+	d.pos = (d.pos + 1) % d.size
+	return false
+}
+
+// fnv1aHash computes a fast 32-bit FNV-1a hash of the packet.
+func fnv1aHash(data []byte) uint32 {
+	h := uint32(2166136261)
+	for _, b := range data {
+		h ^= uint32(b)
+		h *= 16777619
+	}
+	return h
 }
 
 type Logger struct {
@@ -741,9 +888,15 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 // First datagram received is expected to be a 4-byte registration containing the
 // client's TUN IP. After registration, all received datagrams are written to TUN.
 // Return path is handled by the shared TUN reader via connectionTable.
+//
+// Multi-path aware: multiple connections from the same peer IP are grouped in
+// the connectionTable. When this goroutine exits, only this specific connection
+// is removed from the group (not the entire peer entry).
 func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, tun *water.Interface, ct *connectionTable, cfg *Config, logger *Logger) error {
 	connCtx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
+
+	remoteAddr := conn.RemoteAddr().String()
 
 	// Wrap connection based on transport mode
 	var dc datagramConn
@@ -761,6 +914,15 @@ func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, t
 	var peerIP netip.Addr
 	registered := false
 
+	// On exit, remove this specific connection from the group
+	defer func() {
+		if registered {
+			ct.unregisterConn(peerIP, remoteAddr)
+			logger.Infof("multi-conn unregistered peer=%s remote=%s remaining_paths=%d",
+				peerIP, remoteAddr, ct.pathCount(peerIP))
+		}
+	}()
+
 	for {
 		pkt, err := dc.ReceiveDatagram(connCtx)
 		if err != nil {
@@ -773,7 +935,8 @@ func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, t
 				peerIP = netip.AddrFrom4([4]byte{pkt[0], pkt[1], pkt[2], pkt[3]})
 				ct.register(peerIP, conn, dc, cancel)
 				registered = true
-				logger.Infof("multi-conn registered peer=%s remote=%s", peerIP, conn.RemoteAddr())
+				logger.Infof("multi-conn registered peer=%s remote=%s paths=%d",
+					peerIP, remoteAddr, ct.pathCount(peerIP))
 				continue
 			}
 			// Not a registration packet, try to auto-detect from IP header
@@ -783,7 +946,8 @@ func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, t
 					peerIP = netip.AddrFrom4([4]byte{pkt[12], pkt[13], pkt[14], pkt[15]})
 					ct.register(peerIP, conn, dc, cancel)
 					registered = true
-					logger.Infof("multi-conn auto-registered peer=%s remote=%s (from packet src)", peerIP, conn.RemoteAddr())
+					logger.Infof("multi-conn auto-registered peer=%s remote=%s paths=%d (from packet src)",
+						peerIP, remoteAddr, ct.pathCount(peerIP))
 					// Fall through to write this packet to TUN
 				}
 			}
@@ -791,6 +955,13 @@ func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, t
 
 		if !registered {
 			logger.Debugf("dropping pre-registration packet len=%d", len(pkt))
+			continue
+		}
+
+		// De-duplicate: if a multi-path client sends the same packet via
+		// multiple paths (duplication mode), skip writing it to TUN twice.
+		if ct.pathCount(peerIP) > 1 && ct.dedup.isDuplicate(pkt) {
+			logger.Debugf("dedup: skipping duplicate packet from peer=%s remote=%s len=%d", peerIP, remoteAddr, len(pkt))
 			continue
 		}
 
@@ -808,10 +979,9 @@ func runServerMultiConnTunnel(parentCtx context.Context, conn quic.Connection, t
 		}
 
 		if _, err := tun.Write(pkt); err != nil {
-			ct.unregister(peerIP)
 			return err
 		}
-		logger.Debugf("RX %d bytes from peer=%s", len(pkt), peerIP)
+		logger.Debugf("RX %d bytes from peer=%s via %s", len(pkt), peerIP, remoteAddr)
 	}
 }
 
