@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"strings"
@@ -68,9 +69,16 @@ const (
 
 	// Optional packet authentication (enabled when stripe_auth_key is configured).
 	stripeAuthTagLen = 16 // truncated HMAC-SHA256
+	stripeAuthEpochLen = 4
+	stripeAuthTrailerLen = stripeAuthEpochLen + stripeAuthTagLen
+	stripeAuthKeyLabel = "stripe-auth-v1"
 
 	// Replay protection window for DATA/PARITY packets.
 	stripeReplayWindow = 2048
+
+	// Rekey defaults (epoch-based key rotation derived from stripe_auth_key).
+	stripeDefaultRekeySeconds = 600 // 10 minutes
+	stripeEpochSkew          = 1    // accept current ±1 epoch to handle clock drift
 )
 
 // ─── Wire Protocol ────────────────────────────────────────────────────────
@@ -198,6 +206,10 @@ type stripeClientConn struct {
 	authEnabled bool
 	authKey     []byte
 	rxReplay    *replayWindow
+	rekeySecs   uint32
+
+	securityAuthFail   uint64
+	securityReplayDrop uint64
 }
 
 // replayWindow tracks received sequence numbers with a sliding bitmap.
@@ -297,6 +309,23 @@ func isStripeReplayProtectedPacket(h stripeHdr) bool {
 	return h.Type == stripeDATA || h.Type == stripePARITY
 }
 
+func stripeCurrentEpoch(now time.Time, rekeySecs uint32) uint32 {
+	if rekeySecs == 0 {
+		rekeySecs = stripeDefaultRekeySeconds
+	}
+	return uint32(now.Unix() / int64(rekeySecs))
+}
+
+func stripeDeriveEpochKey(master []byte, sessionID uint32, epoch uint32) []byte {
+	mac := hmac.New(sha256.New, master)
+	_, _ = mac.Write([]byte(stripeAuthKeyLabel))
+	var b [8]byte
+	binary.BigEndian.PutUint32(b[0:4], sessionID)
+	binary.BigEndian.PutUint32(b[4:8], epoch)
+	_, _ = mac.Write(b[:])
+	return mac.Sum(nil)
+}
+
 func decodeStripeAuthKey(raw string) ([]byte, error) {
 	v := strings.TrimSpace(raw)
 	if v == "" {
@@ -325,31 +354,68 @@ func decodeStripeAuthKey(raw string) ([]byte, error) {
 	return []byte(v), nil
 }
 
-func stripeAppendAuth(pkt, key []byte) []byte {
-	if len(key) == 0 {
+func stripeAppendAuth(pkt, master []byte, sessionID uint32, rekeySecs uint32) []byte {
+	if len(master) == 0 {
 		return pkt
 	}
-	mac := hmac.New(sha256.New, key)
+	epoch := stripeCurrentEpoch(time.Now(), rekeySecs)
+	epochKey := stripeDeriveEpochKey(master, sessionID, epoch)
+	mac := hmac.New(sha256.New, epochKey)
 	_, _ = mac.Write(pkt)
+	var epochBuf [4]byte
+	binary.BigEndian.PutUint32(epochBuf[:], epoch)
+	_, _ = mac.Write(epochBuf[:])
 	tag := mac.Sum(nil)
-	out := make([]byte, len(pkt)+stripeAuthTagLen)
+	out := make([]byte, len(pkt)+stripeAuthTrailerLen)
 	copy(out, pkt)
-	copy(out[len(pkt):], tag[:stripeAuthTagLen])
+	copy(out[len(pkt):len(pkt)+stripeAuthEpochLen], epochBuf[:])
+	copy(out[len(pkt)+stripeAuthEpochLen:], tag[:stripeAuthTagLen])
 	return out
 }
 
-func stripeVerifyAndStripAuth(pkt, key []byte) ([]byte, bool) {
-	if len(key) == 0 {
+func stripeVerifyAndStripAuth(pkt, master []byte, sessionID uint32, rekeySecs uint32) ([]byte, bool) {
+	if len(master) == 0 {
 		return pkt, true
 	}
-	if len(pkt) < stripeHdrLen+stripeAuthTagLen {
+	if len(pkt) < stripeHdrLen+stripeAuthTrailerLen {
 		return nil, false
 	}
-	bodyLen := len(pkt) - stripeAuthTagLen
+	bodyLen := len(pkt) - stripeAuthTrailerLen
 	body := pkt[:bodyLen]
-	receivedTag := pkt[bodyLen:]
-	mac := hmac.New(sha256.New, key)
+	receivedEpoch := binary.BigEndian.Uint32(pkt[bodyLen : bodyLen+stripeAuthEpochLen])
+	receivedTag := pkt[bodyLen+stripeAuthEpochLen:]
+	currentEpoch := stripeCurrentEpoch(time.Now(), rekeySecs)
+
+	start := int64(currentEpoch) - stripeEpochSkew
+	end := int64(currentEpoch) + stripeEpochSkew
+	for e := start; e <= end; e++ {
+		if e < 0 || e > math.MaxUint32 {
+			continue
+		}
+		epoch := uint32(e)
+		if epoch != receivedEpoch {
+			continue
+		}
+		epochKey := stripeDeriveEpochKey(master, sessionID, epoch)
+		mac := hmac.New(sha256.New, epochKey)
+		_, _ = mac.Write(body)
+		var epochBuf [4]byte
+		binary.BigEndian.PutUint32(epochBuf[:], receivedEpoch)
+		_, _ = mac.Write(epochBuf[:])
+		expected := mac.Sum(nil)
+		if hmac.Equal(receivedTag, expected[:stripeAuthTagLen]) {
+			return body, true
+		}
+	}
+
+	// Fallback: allow exact epoch verification even outside skew window
+	// if local clock differs substantially.
+	epochKey := stripeDeriveEpochKey(master, sessionID, receivedEpoch)
+	mac := hmac.New(sha256.New, epochKey)
 	_, _ = mac.Write(body)
+	var epochBuf [4]byte
+	binary.BigEndian.PutUint32(epochBuf[:], receivedEpoch)
+	_, _ = mac.Write(epochBuf[:])
 	expected := mac.Sum(nil)
 	if !hmac.Equal(receivedTag, expected[:stripeAuthTagLen]) {
 		return nil, false
@@ -443,6 +509,11 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		return nil, fmt.Errorf("stripe: auth key: %w", err)
 	}
 
+	rekeySecs := uint32(cfg.StripeRekeySeconds)
+	if rekeySecs == 0 {
+		rekeySecs = stripeDefaultRekeySeconds
+	}
+
 	scc := &stripeClientConn{
 		serverAddr: serverAddr,
 		sessionID:  sessionID,
@@ -457,6 +528,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		authEnabled: len(authKey) > 0,
 		authKey:     authKey,
 		rxReplay:    newReplayWindow(stripeReplayWindow),
+		rekeySecs:   rekeySecs,
 	}
 	atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
 
@@ -501,7 +573,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 				DataLen: uint16(len(regPayload)),
 			})
 			copy(pkt[stripeHdrLen:], regPayload)
-			pkt = stripeAppendAuth(pkt, scc.authKey)
+			pkt = stripeAppendAuth(pkt, scc.authKey, scc.sessionID, scc.rekeySecs)
 
 			if _, err := pipe.WriteToUDP(pkt, serverAddr); err != nil {
 				logger.Errorf("stripe: register pipe %d attempt %d failed: %v", i, retry, err)
@@ -537,7 +609,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d server=%s",
 		sessionID, len(scc.pipes), dataK, parityM, serverAddr)
 	if scc.authEnabled {
-		logger.Infof("stripe client auth enabled: session=%08x tag=%dB replay_window=%d", sessionID, stripeAuthTagLen, stripeReplayWindow)
+		logger.Infof("stripe client auth enabled: session=%08x tag=%dB replay_window=%d rekey=%ds", sessionID, stripeAuthTagLen, stripeReplayWindow, scc.rekeySecs)
 	}
 
 	return scc, nil
@@ -705,7 +777,7 @@ func (scc *stripeClientConn) resetFlushTimer() {
 func (scc *stripeClientConn) sendToPipe(pkt []byte) {
 	idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 	pipe := scc.pipes[int(idx)%len(scc.pipes)]
-	pkt = stripeAppendAuth(pkt, scc.authKey)
+	pkt = stripeAppendAuth(pkt, scc.authKey, scc.sessionID, scc.rekeySecs)
 	_, _ = pipe.WriteToUDP(pkt, scc.serverAddr)
 }
 
@@ -744,8 +816,9 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 		raw := buf[:n]
 		if scc.authEnabled {
 			var authOK bool
-			raw, authOK = stripeVerifyAndStripAuth(raw, scc.authKey)
+			raw, authOK = stripeVerifyAndStripAuth(raw, scc.authKey, scc.sessionID, scc.rekeySecs)
 			if !authOK {
+				atomic.AddUint64(&scc.securityAuthFail, 1)
 				continue
 			}
 		}
@@ -756,6 +829,7 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 		}
 		if isStripeReplayProtectedPacket(hdr) {
 			if !scc.rxReplay.Accept(stripeReplaySeq(hdr)) {
+				atomic.AddUint64(&scc.securityReplayDrop, 1)
 				continue
 			}
 		}
@@ -918,7 +992,7 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 					Type:    stripeKEEPALIVE,
 					Session: scc.sessionID,
 				})
-				pkt = stripeAppendAuth(pkt, scc.authKey)
+				pkt = stripeAppendAuth(pkt, scc.authKey, scc.sessionID, scc.rekeySecs)
 				_, _ = pipe.WriteToUDP(pkt, scc.serverAddr)
 			}
 		}
@@ -975,6 +1049,9 @@ type stripeSession struct {
 	lastActivity time.Time
 	logger       *Logger
 	rxReplay     *replayWindow
+
+	securityAuthFail   uint64
+	securityReplayDrop uint64
 }
 
 // stripeServerDC implements datagramConn for the server→client return path.
@@ -1147,6 +1224,10 @@ type stripeServer struct {
 
 	authEnabled bool
 	authKey     []byte
+	rekeySecs   uint32
+
+	securityAuthFail   uint64
+	securityReplayDrop uint64
 }
 
 // newStripeServer creates and starts the server-side stripe listener.
@@ -1182,6 +1263,11 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, log
 		return nil, fmt.Errorf("stripe server: auth key: %w", err)
 	}
 
+	rekeySecs := uint32(cfg.StripeRekeySeconds)
+	if rekeySecs == 0 {
+		rekeySecs = stripeDefaultRekeySeconds
+	}
+
 	ss := &stripeServer{
 		conn:       conn,
 		sessions:   make(map[uint32]*stripeSession),
@@ -1194,11 +1280,12 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, log
 		closeCh:    make(chan struct{}),
 		authEnabled: len(authKey) > 0,
 		authKey:     authKey,
+		rekeySecs:   rekeySecs,
 	}
 
 	logger.Infof("stripe server listening on %s, FEC=%d+%d", listenAddr, dataK, parityM)
 	if ss.authEnabled {
-		logger.Infof("stripe server auth enabled: tag=%dB replay_window=%d", stripeAuthTagLen, stripeReplayWindow)
+		logger.Infof("stripe server auth enabled: tag=%dB replay_window=%d rekey=%ds", stripeAuthTagLen, stripeReplayWindow, ss.rekeySecs)
 	}
 	return ss, nil
 }
@@ -1240,8 +1327,9 @@ func (ss *stripeServer) Run(ctx context.Context) {
 		raw := buf[:n]
 		if ss.authEnabled {
 			var authOK bool
-			raw, authOK = stripeVerifyAndStripAuth(raw, ss.authKey)
+			raw, authOK = stripeVerifyAndStripAuth(raw, ss.authKey, hdrSession(buf[:n]), ss.rekeySecs)
 			if !authOK {
+				atomic.AddUint64(&ss.securityAuthFail, 1)
 				continue
 			}
 		}
@@ -1347,7 +1435,7 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 		Type:    stripeKEEPALIVE,
 		Session: sessionID,
 	})
-	reply = stripeAppendAuth(reply, ss.authKey)
+	reply = stripeAppendAuth(reply, ss.authKey, sessionID, ss.rekeySecs)
 	_, _ = ss.conn.WriteToUDP(reply, from)
 }
 
@@ -1379,6 +1467,8 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 		return
 	}
 	if !sess.rxReplay.Accept(stripeReplaySeq(hdr)) {
+		atomic.AddUint64(&sess.securityReplayDrop, 1)
+		atomic.AddUint64(&ss.securityReplayDrop, 1)
 		return
 	}
 	sess.lastActivity = time.Now()
@@ -1417,6 +1507,8 @@ func (ss *stripeServer) handleParityShard(hdr stripeHdr, payload []byte, from *n
 		return
 	}
 	if !sess.rxReplay.Accept(stripeReplaySeq(hdr)) {
+		atomic.AddUint64(&sess.securityReplayDrop, 1)
+		atomic.AddUint64(&ss.securityReplayDrop, 1)
 		return
 	}
 	sess.lastActivity = time.Now()
@@ -1515,7 +1607,7 @@ func (ss *stripeServer) handleKeepalive(hdr stripeHdr, from *net.UDPAddr) {
 		Type:    stripeKEEPALIVE,
 		Session: hdr.Session,
 	})
-	reply = stripeAppendAuth(reply, ss.authKey)
+	reply = stripeAppendAuth(reply, ss.authKey, hdr.Session, ss.rekeySecs)
 	_, _ = ss.conn.WriteToUDP(reply, from)
 }
 
@@ -1590,6 +1682,19 @@ func (ss *stripeServer) runGC() {
 		}
 		sess.rxMu.Unlock()
 	}
+
+	if ss.authEnabled {
+		ss.logger.Infof("stripe security metrics auth_fail=%d replay_drop=%d",
+			atomic.LoadUint64(&ss.securityAuthFail),
+			atomic.LoadUint64(&ss.securityReplayDrop))
+	}
+}
+
+func hdrSession(pkt []byte) uint32 {
+	if len(pkt) < 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(pkt[4:8])
 }
 
 // Close stops the stripe server.

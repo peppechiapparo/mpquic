@@ -205,12 +205,14 @@ func TestPathSessionID_UniquePerPath(t *testing.T) {
 
 func TestStripeAuthAppendVerify(t *testing.T) {
 	key := []byte("super-secret-key")
+	sessionID := uint32(0x01020304)
+	rekeySecs := uint32(60)
 	pkt := make([]byte, stripeHdrLen+4)
 	encodeStripeHdr(pkt, &stripeHdr{
 		Magic:      stripeMagic,
 		Version:    stripeVersion,
 		Type:       stripeDATA,
-		Session:    0x01020304,
+		Session:    sessionID,
 		GroupSeq:   11,
 		ShardIdx:   1,
 		GroupDataN: 2,
@@ -218,12 +220,12 @@ func TestStripeAuthAppendVerify(t *testing.T) {
 	})
 	copy(pkt[stripeHdrLen:], []byte{0xAA, 0xBB, 0xCC, 0xDD})
 
-	signed := stripeAppendAuth(pkt, key)
-	if len(signed) != len(pkt)+stripeAuthTagLen {
-		t.Fatalf("unexpected signed len: got=%d want=%d", len(signed), len(pkt)+stripeAuthTagLen)
+	signed := stripeAppendAuth(pkt, key, sessionID, rekeySecs)
+	if len(signed) != len(pkt)+stripeAuthTrailerLen {
+		t.Fatalf("unexpected signed len: got=%d want=%d", len(signed), len(pkt)+stripeAuthTrailerLen)
 	}
 
-	raw, ok := stripeVerifyAndStripAuth(signed, key)
+	raw, ok := stripeVerifyAndStripAuth(signed, key, sessionID, rekeySecs)
 	if !ok {
 		t.Fatal("expected auth verification to pass")
 	}
@@ -233,9 +235,23 @@ func TestStripeAuthAppendVerify(t *testing.T) {
 
 	// Tamper payload -> must fail
 	signed[len(signed)-1] ^= 0x01
-	_, ok = stripeVerifyAndStripAuth(signed, key)
+	_, ok = stripeVerifyAndStripAuth(signed, key, sessionID, rekeySecs)
 	if ok {
 		t.Fatal("expected auth verification to fail after tamper")
+	}
+}
+
+func TestStripeDeriveEpochKeyDeterministicAndDistinct(t *testing.T) {
+	master := []byte("k")
+	k1 := stripeDeriveEpochKey(master, 0xAABBCCDD, 1)
+	k2 := stripeDeriveEpochKey(master, 0xAABBCCDD, 1)
+	k3 := stripeDeriveEpochKey(master, 0xAABBCCDD, 2)
+
+	if string(k1) != string(k2) {
+		t.Fatal("same inputs should produce same key")
+	}
+	if string(k1) == string(k3) {
+		t.Fatal("different epochs should produce different keys")
 	}
 }
 

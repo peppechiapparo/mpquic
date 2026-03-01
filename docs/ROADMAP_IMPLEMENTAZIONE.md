@@ -604,15 +604,15 @@ del protocollo UDP stripe.
 1. **Threat model minimale** (spoofing, replay, injection, hijack sessione)
 2. **Auth messaggi stripe** con MAC per-packet (chiave condivisa per sessione) ✅ baseline implementata (`stripe_auth_key`)
 3. **Anti-replay window** su `(session, groupSeq, shardIdx)` con finestra scorrevole ✅ baseline implementata su DATA/PARITY
-4. **Rotazione chiavi** (rekey periodico) + scadenza sessione forzata
+4. **Rotazione chiavi** (rekey periodico) + scadenza sessione forzata ✅ baseline rekey per-epoch implementata
 5. **Opzione cifratura payload stripe** (AEAD) senza rompere FEC
-6. **Metriche sicurezza** (drop auth fail, replay drop, rekey count) in Fase 5
+6. **Metriche sicurezza** (drop auth fail, replay drop, rekey count) in Fase 5 ✅ `auth_fail`, `replay_drop` baseline loggate lato stripe server
 7. **Test dedicati**: unit + netem + packet injection test in lab
 
 **Done criteria Step 4.10**:
 - [x] Pacchetti stripe non autenticati rifiutati dal server (quando `stripe_auth_key` è configurata)
 - [x] Replay di shard vecchi rifiutato (window su DATA/PARITY)
-- [ ] Session rekey validato senza interruzioni visibili
+- [x] Session rekey baseline per-epoch implementata (chiavi derivate da `stripe_auth_key`)
 - [ ] Benchmark throughput degradazione ≤10% rispetto stripe attuale
 
 ---

@@ -73,6 +73,7 @@ Ogni YAML include:
 - `stripe_data_shards`: K shards dati FEC (default 10)
 - `stripe_parity_shards`: M shards parità FEC (default 2)
 - `stripe_auth_key`: chiave opzionale MAC HMAC per autenticazione pacchetti stripe (`plain`, `hex:...`, `base64:...`)
+- `stripe_rekey_seconds`: intervallo rotazione chiavi MAC per-epoch (default 600s)
 
 ## Architettura a 3 livelli
 
@@ -161,6 +162,7 @@ La sessione multipath parte se almeno un path è up. Se uno o più path sono non
 - `stripe_parity_shards`: M — numero shards parità per gruppo FEC (default: 2)
 - `stripe_enabled`: (solo server) abilita il listener stripe
 - `stripe_auth_key`: abilita MAC per-packet HMAC-SHA256 (tag 16 byte) e verifica lato peer
+- `stripe_rekey_seconds`: rekey automatico MAC per-epoch (derivazione chiave da `stripe_auth_key`)
 
 ### Policy multipath (`multipath_policy`)
 - `priority` (default): bilancia priorità/peso/penalità errori
@@ -319,7 +321,9 @@ multipath **restano valide**, ma con perimetro diverso tra path QUIC e path stri
 - Le policy QoS per classe (`preferred_paths`, `excluded_paths`, duplication)
   continuano a funzionare in modo trasversale al tipo trasporto.
 - Baseline sicurezza già implementata in stripe: MAC HMAC + anti-replay su DATA/PARITY;
-  area aperta: cifratura payload (AEAD) e rotazione chiavi.
+  con rekey periodico per-epoch.
+- Metriche sicurezza baseline disponibili lato server: `auth_fail`, `replay_drop`.
+- Area aperta: cifratura payload (AEAD) per confidenzialità equivalente a TLS.
 
 ## Limiti deliberati (fase corrente)
 - Multipath in singola connessione QUIC disponibile in modalità sperimentale (scheduler path-aware con priorità/peso e fail-cooldown)

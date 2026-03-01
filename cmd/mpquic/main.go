@@ -61,6 +61,7 @@ type Config struct {
 	StripeParityShards    int                   `yaml:"stripe_parity_shards"`
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
 	StripeAuthKey         string                `yaml:"stripe_auth_key"`
+	StripeRekeySeconds    int                   `yaml:"stripe_rekey_seconds"`
 }
 
 type MultipathPathConfig struct {
