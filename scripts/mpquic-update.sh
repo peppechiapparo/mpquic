@@ -84,12 +84,17 @@ if [[ ${#INSTANCES[@]} -gt 0 ]]; then
     systemctl stop "mpquic@${inst}" &
   done
   wait
-  # Brief wait to ensure binary is released
+  # Brief wait to ensure processes are fully gone
   sleep 1
+  # Kill any stragglers still holding the binary open
+  pkill -9 -x mpquic 2>/dev/null || true
+  sleep 0.5
 fi
 
 # ── Step 5: Install binary + scripts + systemd units ──────────────────────
 log "--- installing ---"
+# rm first: avoids "Text file busy" if a process still holds the old binary fd
+rm -f /usr/local/bin/mpquic
 cp bin/mpquic /usr/local/bin/mpquic
 cp scripts/ensure_tun.sh    /usr/local/lib/mpquic/ensure_tun.sh    2>/dev/null || true
 cp scripts/render_config.sh /usr/local/lib/mpquic/render_config.sh 2>/dev/null || true
