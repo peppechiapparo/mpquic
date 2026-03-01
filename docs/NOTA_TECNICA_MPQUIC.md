@@ -1,7 +1,7 @@
 # Nota Tecnica — Piattaforma MPQUIC: Test e Risultati
 
 **Data**: 1 marzo 2026  
-**Versione**: 3.0  
+**Versione**: 3.1  
 **Autori**: Team Engineering SATCOMVAS  
 **Classificazione**: Interna / Clienti
 
@@ -30,11 +30,15 @@
 11. [Test 5 — Multi-Path Bonding (Balanced)](#11-test-5--multi-path-bonding-balanced)
 12. [Test 6 — Speedtest End-to-End con Bonding](#12-test-6--speedtest-end-to-end-con-bonding)
 
+**Fase 4b — Multi-Pipe per Path (Starlink Session Striping)**
+
+13. [Test 7 — Multi-Pipe: Analisi e Risultati](#13-test-7--multi-pipe-analisi-e-risultati)
+
 **Conclusioni e Appendice**
 
-13. [Vantaggi per il Cliente](#13-vantaggi-per-il-cliente)
-14. [Conclusioni](#14-conclusioni)
-15. [Appendice — Comandi Completi](#15-appendice--comandi-completi)
+14. [Vantaggi per il Cliente](#14-vantaggi-per-il-cliente)
+15. [Conclusioni](#15-conclusioni)
+16. [Appendice — Comandi Completi](#16-appendice--comandi-completi)
 
 ---
 
@@ -1005,9 +1009,187 @@ in un contesto completamente satellitare.
 
 ---
 
-## 13. Vantaggi per il Cliente
+## 13. Test 7 — Multi-Pipe: Analisi e Risultati
 
-### 13.1 Qualità del Servizio Garantita
+### 13.1 Contesto: il problema del traffic shaping per sessione su Starlink
+
+Starlink applica un meccanismo di **traffic shaping per sessione UDP**: ogni flusso
+UDP individuale viene limitato a circa **80 Mbps** in download, indipendentemente dalla
+capacità reale del link (che in condizioni favorevoli raggiunge ~300 Mbps).
+
+Con un singolo tunnel QUIC (che opera su un singolo socket UDP), il throughput massimo
+ottenibile è quindi vincolato da questo limite per sessione:
+
+| Scenario | Throughput Download |
+|----------|--------------------|
+| Starlink diretto (Ookla, multi-conn) | ~300 Mbps |
+| Singolo tunnel QUIC su Starlink | **~80 Mbps** (cap per sessione) |
+| Bonding 2× Starlink (singolo tunnel per link) | ~74 Mbps (limitato dal cap) |
+
+Questa limitazione è stata confermata empiricamente nei test di Fase 4: il bonding
+di due link Starlink raggiunge 74 Mbps aggregati, ma ciascun link contribuisce solo
+~40 Mbps perché il singolo flusso UDP del tunnel è soggetto al cap di ~80 Mbps.
+
+### 13.2 Approccio: Multi-Pipe (N tunnel paralleli per link)
+
+Per bypassare il traffic shaping per sessione, è stata implementata la funzionalità
+**multi-pipe**: N connessioni QUIC parallele ("pipe") sullo stesso link fisico, ciascuna
+con il proprio socket UDP e quindi trattata da Starlink come una sessione indipendente.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Link Starlink (WAN5)            Traffic Shaper Starlink         │
+│                                                                 │
+│  wan5.0 (UDP :40001) ───── sessione 1 ───── ~80 Mbps cap       │
+│  wan5.1 (UDP :40002) ───── sessione 2 ───── ~80 Mbps cap       │
+│  wan5.2 (UDP :40003) ───── sessione 3 ───── ~80 Mbps cap       │
+│  wan5.3 (UDP :40004) ───── sessione 4 ───── ~80 Mbps cap       │
+│                                                                 │
+│  Throughput teorico aggregato: 4 × 80 = 320 Mbps               │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Implementazione
+
+- **Espansione path**: configurazione `pipes: 4` su un path espande `wan5` in
+  `wan5.0`, `wan5.1`, `wan5.2`, `wan5.3`, ciascuno con socket UDP dedicato
+- **Dispatch asincrono**: goroutine `sendDrain` per path con canale non-bloccante
+  (256 pacchetti) e round-robin tra pipe attive, per evitare che il TUN reader
+  si blocchi quando il cwnd di una pipe è pieno
+- **Starlink auto-detection**: risoluzione rDNS dell'IP WAN (`.starlinkisp.net`)
+  con fallback CGNAT `100.64.0.0/10` per attivare automaticamente le pipe
+- **Telemetria aggregata**: statistiche per-pipe e aggregate per base-path
+
+### 13.3 Configurazione di test
+
+```yaml
+# /etc/mpquic/instances/mp1.yaml — test multi-pipe
+multipath_policy: balanced
+paths:
+  - name: wan5
+    interface: enp7s7
+    priority: 1
+    weight: 1
+    pipes: 4          # espande in wan5.0 .. wan5.3
+  - name: wan6
+    interface: enp7s8
+    priority: 1
+    weight: 1
+    pipes: 4          # espande in wan6.0 .. wan6.3
+```
+
+Risultato: **8 pipe totali** (4 per link × 2 link), ciascuna con connessione QUIC
+indipendente, BBR congestion control e reliable transport (QUIC streams).
+
+### 13.4 Risultati dei test
+
+#### Test A — 8 stream paralleli iperf3
+
+```bash
+iperf3 -c 10.200.17.254 -p 5201 -t 15 -P 8 -R --bind-dev mp1
+```
+
+| Metrica | pipes=1 (baseline) | pipes=4 | Delta |
+|---------|-------------------|---------|-------|
+| **SUM Receiver** | **74.3 Mbps** | **32.9 Mbps** | **−56%** |
+| **Retransmit** | 185 | **5.724** | **+3.000%** |
+| **Picco** | 102 Mbps | 58 Mbps | −43% |
+
+#### Test B — 4 stream paralleli iperf3
+
+```bash
+iperf3 -c 10.200.17.254 -p 5201 -t 15 -P 4 -R --bind-dev mp1
+```
+
+| Metrica | pipes=1 (baseline) | pipes=4 | Delta |
+|---------|-------------------|---------|-------|
+| **SUM Receiver** | **74.3 Mbps** | **30.1 Mbps** | **−60%** |
+| **Retransmit** | 185 | **2.836** | **+1.432%** |
+
+#### Telemetria TX/RX
+
+La telemetria ha mostrato:
+- **TX**: distribuzione perfetta tra le 8 pipe (~10.576 pacchetti ciascuna)
+- **RX**: concentrazione su sole 3 pipe (wan5.0, wan5.3, wan6.2), le altre a zero
+
+Questo pattern asimmetrico è stato il primo indizio del problema fondamentale.
+
+### 13.5 Analisi della causa: competizione CC (Congestion Control)
+
+Il degrado prestazionale **non** è dovuto a un bug implementativo, ma a un **problema
+fondamentale dell'architettura** reliable transport + congestion control indipendente:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Link Starlink WAN5 — Banda reale: ~50 Mbps                      │
+│                                                                 │
+│  wan5.0: BBR probe → stima BtlBw = 50 Mbps ──┐                 │
+│  wan5.1: BBR probe → stima BtlBw = 50 Mbps ──┤ Totale TX:      │
+│  wan5.2: BBR probe → stima BtlBw = 50 Mbps ──┤ 4 × 50 = 200   │
+│  wan5.3: BBR probe → stima BtlBw = 50 Mbps ──┘ vs 50 reali     │
+│                                                                 │
+│  Risultato: overshoot 4×, congestione, loss massiccio           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Meccanismo del fallimento:**
+
+1. **BBR bandwidth probing**: ogni istanza BBR stima indipendentemente la bandwidth
+   del bottleneck (~50 Mbps per WAN5). Ciascuna prova a inviare a quella velocità.
+
+2. **Overshoot collettivo**: 4 istanze BBR × 50 Mbps = 200 Mbps di invio aggregato
+   su un link da 50 Mbps → **4× il carico sostenibile**.
+
+3. **Congestione e loss**: il buffer del router intermedio si riempie, causando
+   packet loss massiccio. BBR di ciascuna pipe rileva il loss e riduce il rate,
+   ma il processo è oscillatorio e instabile.
+
+4. **Retransmit a cascata**: con reliable transport (QUIC streams), ogni pacchetto
+   perso deve essere ritrasmesso, creando ulteriore congestione.
+
+5. **Equilibrio degradato**: le 4 pipe convergono a ~12 Mbps ciascuna (50/4) con
+   enormi oscillazioni, invece dei 50 Mbps che una singola pipe otterrebbe.
+
+Questo fenomeno è noto in letteratura come **"intra-flow competition"** ed è analogo
+al problema TCP-over-TCP dei tunnel VPN tradizionali.
+
+### 13.6 Verifica: rollback a pipes=1
+
+Dopo il rollback a `pipes: 1` (2 path singoli, wan5 + wan6):
+
+| Metrica | pipes=4 (degradato) | pipes=1 (ripristinato) |
+|---------|--------------------|-----------------------|
+| **SUM Receiver** | 30–33 Mbps | **63.3 Mbps** |
+| **Picco** | 58 Mbps | **92.8 Mbps** |
+
+Il throughput è tornato immediatamente ai livelli normali, confermando che la
+degradazione era causata esclusivamente dalla competizione CC tra pipe.
+
+### 13.7 Conclusione e strategia
+
+L'approccio multi-pipe con **reliable transport + CC indipendente per pipe** è
+strutturalmente inadatto al bypass del traffic shaping per sessione. Le N istanze
+BBR competono per la stessa banda fisica, causando un degrado peggiore del singolo
+tunnel.
+
+**Architetture alternative in valutazione:**
+
+| Approccio | Descrizione | Pro | Contro |
+|-----------|-------------|-----|--------|
+| **UDP striping + FEC** | N socket UDP raw con Forward Error Correction | Nessun CC per pipe, bypass shaping | Implementazione complessa |
+| **Datagram mode** | Multi-pipe con QUIC DATAGRAM (unreliable) | Nessun CC, codice esistente | Loss delegato a TCP interno |
+| **Shared CC** | Una sola istanza CC per link, distribuzione interna | Nessuna competizione | Stesso socket UDP, no bypass shaping |
+| **BBR condiviso + pacing** | CC unico con pacing distribuito su N socket | Bypass shaping + CC corretto | Implementazione molto complessa |
+
+La Fase 4b rimane aperta. Il codice multi-pipe è funzionante e pronto per essere
+riattivato con un'architettura di trasporto adeguata. La priorità è identificare
+l'approccio che combini il bypass del traffic shaping con una gestione CC coerente.
+
+---
+
+## 14. Vantaggi per il Cliente
+
+### 14.1 Qualità del Servizio Garantita
 
 La piattaforma MPQUIC garantisce che le applicazioni critiche del cliente mantengano
 prestazioni ottimali **indipendentemente dallo stato delle altre applicazioni**:
@@ -1019,7 +1201,7 @@ prestazioni ottimali **indipendentemente dallo stato delle altre applicazioni**:
 - **Backup e sincronizzazione**: possono saturare la loro quota di banda senza
   impattare le altre classi di traffico
 
-### 13.2 Resilienza alle Condizioni del Link
+### 14.2 Resilienza alle Condizioni del Link
 
 Le connessioni satellitari LEO (Starlink) sono soggette a variabilità naturale:
 handover tra satelliti, condizioni meteo, congestione del beam. Grazie
@@ -1029,14 +1211,14 @@ all'isolamento per classe:
 - Le **applicazioni critiche** continuano a funzionare normalmente
 - Non è necessario **interrompere il backup** per fare una telefonata
 
-### 13.3 Monitorabilità e Trasparenza
+### 14.3 Monitorabilità e Trasparenza
 
 Ogni tunnel è separato e monitorabile individualmente:
 - **RTT per classe**: è possibile misurare la latenza di ogni tipo di traffico
 - **Throughput per classe**: visibilità sulla banda effettivamente utilizzata
 - **Loss per classe**: identificazione immediata di quale tipo di traffico è affetto
 
-### 13.4 Scalabilità
+### 14.4 Scalabilità
 
 L'architettura è stata progettata per scalare:
 - **3 link × 3 classi = 9 tunnel** già operativi
@@ -1045,7 +1227,7 @@ L'architettura è stata progettata per scalare:
 - Classificazione flessibile tramite VLAN: l'apparato di rete del cliente decide
   quale traffico va in quale classe
 
-### 13.5 Confronto sintetico: prima e dopo
+### 14.5 Confronto sintetico: prima e dopo
 
 | Scenario | Prima (tunnel singolo) | Dopo (MPQUIC multi-tunnel) |
 |----------|------------------------|----------------------------|
@@ -1056,7 +1238,7 @@ L'architettura è stata progettata per scalare:
 
 ---
 
-## 14. Conclusioni
+## 15. Conclusioni
 
 I test condotti tra il 28 febbraio e il 1 marzo 2026 dimostrano in modo
 **quantitativo e riproducibile** che la piattaforma MPQUIC soddisfa tutti gli
@@ -1101,6 +1283,20 @@ BBR su satellite, failover automatico e aggregazione multi-link.
 9. **Architettura scalabile**: 19 tunnel operativi (16 attivi) su 6 WAN, con
    supporto multi-path, failover e bonding integrati.
 
+**Fase 4b — Multi-Pipe (Starlink Session Striping):**
+
+10. **Traffic shaping per sessione**: Starlink limita ogni flusso UDP a ~80 Mbps.
+    Il multi-pipe (N connessioni QUIC parallele per link) è stato implementato
+    e testato per bypassare questo limite.
+
+11. **Competizione CC**: con reliable transport, N istanze BBR indipendenti sullo
+    stesso link competono per la stessa banda → **overshoot collettivo**,
+    retransmit massivi, throughput degradato del 56% (da 74 a 33 Mbps).
+
+12. **Strategia**: il multi-pipe richiede un'architettura di trasporto diversa
+    (UDP striping + FEC, oppure datagram mode senza CC per pipe). Il codice
+    è pronto per essere riattivato con il trasporto adeguato.
+
 **Prossimi sviluppi**:
 
 - **BBRv2/v3**: implementazione completa con reazione proporzionale alla loss
@@ -1110,12 +1306,14 @@ BBR su satellite, failover automatico e aggregazione multi-link.
   non solo al tunnel mp1 di test
 - **Adaptive CC selection**: selezione automatica di BBR vs Cubic basata sulle
   condizioni del link in tempo reale
+- **Multi-Pipe con trasporto adeguato**: riattivazione del multi-pipe con UDP
+  striping + FEC o datagram mode per bypassare il cap Starlink senza competizione CC
 - **Monitoring dashboard**: interfaccia web per visualizzare lo stato di tutti
   i tunnel, path e metriche in tempo reale
 
 ---
 
-## 15. Appendice — Comandi Completi
+## 16. Appendice — Comandi Completi
 
 ### A.1 Verifica stato tunnel
 
@@ -1186,10 +1384,12 @@ paths:
     interface: enp7s7
     priority: 1
     weight: 1
+    # pipes: 4                   # multi-pipe (Fase 4b, attualmente disabilitato)
   - name: wan6
     interface: enp7s8
     priority: 1                  # per failover: priority: 2
     weight: 1
+    # pipes: 4                   # multi-pipe (Fase 4b, attualmente disabilitato)
 
 # Routing SL1 tramite mp1
 ip route replace default dev mp1 table wan1
@@ -1234,5 +1434,5 @@ Per riprodurre i test è necessario:
 
 ---
 
-*Documento aggiornato il 01/03/2026 — Piattaforma MPQUIC v3.0*  
-*Commit di riferimento: 1cc40bc (main)*
+*Documento aggiornato il 01/03/2026 — Piattaforma MPQUIC v3.1*  
+*Commit di riferimento: 8b5b4ef (main)*
