@@ -60,6 +60,7 @@ type Config struct {
 	StripeDataShards      int                   `yaml:"stripe_data_shards"`
 	StripeParityShards    int                   `yaml:"stripe_parity_shards"`
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
+	StripeAuthKey         string                `yaml:"stripe_auth_key"`
 }
 
 type MultipathPathConfig struct {
@@ -820,6 +821,7 @@ func loadConfig(path string) (*Config, error) {
 	cfg.LogLevel = strings.ToLower(strings.TrimSpace(cfg.LogLevel))
 	cfg.ControlAPIListen = strings.TrimSpace(cfg.ControlAPIListen)
 	cfg.ControlAPIAuthToken = strings.TrimSpace(cfg.ControlAPIAuthToken)
+	cfg.StripeAuthKey = strings.TrimSpace(cfg.StripeAuthKey)
 	if cfg.Role != "client" && cfg.Role != "server" {
 		return nil, fmt.Errorf("role must be client or server")
 	}

@@ -202,3 +202,93 @@ func TestPathSessionID_UniquePerPath(t *testing.T) {
 		t.Errorf("pathSessionID should be deterministic: 0x%08X != 0x%08X", sid1, sid1b)
 	}
 }
+
+func TestStripeAuthAppendVerify(t *testing.T) {
+	key := []byte("super-secret-key")
+	pkt := make([]byte, stripeHdrLen+4)
+	encodeStripeHdr(pkt, &stripeHdr{
+		Magic:      stripeMagic,
+		Version:    stripeVersion,
+		Type:       stripeDATA,
+		Session:    0x01020304,
+		GroupSeq:   11,
+		ShardIdx:   1,
+		GroupDataN: 2,
+		DataLen:    2,
+	})
+	copy(pkt[stripeHdrLen:], []byte{0xAA, 0xBB, 0xCC, 0xDD})
+
+	signed := stripeAppendAuth(pkt, key)
+	if len(signed) != len(pkt)+stripeAuthTagLen {
+		t.Fatalf("unexpected signed len: got=%d want=%d", len(signed), len(pkt)+stripeAuthTagLen)
+	}
+
+	raw, ok := stripeVerifyAndStripAuth(signed, key)
+	if !ok {
+		t.Fatal("expected auth verification to pass")
+	}
+	if len(raw) != len(pkt) {
+		t.Fatalf("unexpected raw len: got=%d want=%d", len(raw), len(pkt))
+	}
+
+	// Tamper payload -> must fail
+	signed[len(signed)-1] ^= 0x01
+	_, ok = stripeVerifyAndStripAuth(signed, key)
+	if ok {
+		t.Fatal("expected auth verification to fail after tamper")
+	}
+}
+
+func TestDecodeStripeAuthKeyFormats(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		wantLen int
+		wantErr bool
+	}{
+		{name: "empty", in: "", wantLen: 0},
+		{name: "plain", in: "abc", wantLen: 3},
+		{name: "hex", in: "hex:414243", wantLen: 3},
+		{name: "base64", in: "base64:QUJD", wantLen: 3},
+		{name: "badhex", in: "hex:zz", wantErr: true},
+		{name: "badbase64", in: "base64:***", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := decodeStripeAuthKey(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != tt.wantLen {
+				t.Fatalf("unexpected len: got=%d want=%d", len(got), tt.wantLen)
+			}
+		})
+	}
+}
+
+func TestReplayWindowAccept(t *testing.T) {
+	rw := newReplayWindow(8)
+
+	if !rw.Accept(100) {
+		t.Fatal("first packet should be accepted")
+	}
+	if rw.Accept(100) {
+		t.Fatal("duplicate packet should be rejected")
+	}
+	if !rw.Accept(101) {
+		t.Fatal("new packet should be accepted")
+	}
+	if rw.Accept(90) {
+		t.Fatal("too old packet should be rejected")
+	}
+	if !rw.Accept(102) {
+		t.Fatal("newer packet should be accepted")
+	}
+}

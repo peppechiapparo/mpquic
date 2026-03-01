@@ -72,6 +72,7 @@ Ogni YAML include:
 - `stripe_port`: porta UDP per protocollo stripe
 - `stripe_data_shards`: K shards dati FEC (default 10)
 - `stripe_parity_shards`: M shards parità FEC (default 2)
+- `stripe_auth_key`: chiave opzionale MAC HMAC per autenticazione pacchetti stripe (`plain`, `hex:...`, `base64:...`)
 
 ## Architettura a 3 livelli
 
@@ -159,6 +160,7 @@ La sessione multipath parte se almeno un path è up. Se uno o più path sono non
 - `stripe_data_shards`: K — numero shards dati per gruppo FEC (default: 10)
 - `stripe_parity_shards`: M — numero shards parità per gruppo FEC (default: 2)
 - `stripe_enabled`: (solo server) abilita il listener stripe
+- `stripe_auth_key`: abilita MAC per-packet HMAC-SHA256 (tag 16 byte) e verifica lato peer
 
 ### Policy multipath (`multipath_policy`)
 - `priority` (default): bilancia priorità/peso/penalità errori
@@ -307,7 +309,7 @@ multipath **restano valide**, ma con perimetro diverso tra path QUIC e path stri
 | Tema | Path `transport: quic` | Path `transport: stripe` |
 |------|------------------------|--------------------------|
 | Congestion control (`bbr`/`cubic`) | **Sì**: governato da QUIC stack | **No**: stripe non usa CC QUIC per pipe |
-| Cifratura TLS | **Sì**: TLS 1.3 intrinseco QUIC | **No nativo** nel wire stripe attuale |
+| Cifratura TLS | **Sì**: TLS 1.3 intrinseco QUIC | **No TLS nativo**; MAC opzionale con `stripe_auth_key` |
 | Classi di traffico dataplane | **Sì** | **Sì** (decisione resta a livello scheduler/classifier) |
 | Multipath applicativo | **Sì** | **Sì** (con FEC + pipe multiple per path) |
 
@@ -316,8 +318,8 @@ multipath **restano valide**, ma con perimetro diverso tra path QUIC e path stri
   non dal CC QUIC.
 - Le policy QoS per classe (`preferred_paths`, `excluded_paths`, duplication)
   continuano a funzionare in modo trasversale al tipo trasporto.
-- La principale area aperta è l'hardening di sicurezza del protocollo stripe
-  (autenticazione, cifratura, anti-replay).
+- Baseline sicurezza già implementata in stripe: MAC HMAC + anti-replay su DATA/PARITY;
+  area aperta: cifratura payload (AEAD) e rotazione chiavi.
 
 ## Limiti deliberati (fase corrente)
 - Multipath in singola connessione QUIC disponibile in modalità sperimentale (scheduler path-aware con priorità/peso e fail-cooldown)

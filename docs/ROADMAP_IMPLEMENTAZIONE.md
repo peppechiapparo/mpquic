@@ -594,7 +594,7 @@ multipath_paths:
 - [x] Session timeout + graceful shutdown (commit `21d6845`, `f401eab`)
 - [x] Bilanciamento TX verificato: ±0.2% su 3 path
 
-### Step 4.10 — Stripe Security Hardening 🔄 PROPOSTO (priorità alta)
+### Step 4.10 — Stripe Security Hardening 🔄 IN CORSO (priorità alta)
 
 **Perché ora**: con `transport: stripe` il canale non eredita automaticamente la
 sicurezza TLS di QUIC; il focus diventa autenticazione + confidenzialità + anti-replay
@@ -602,16 +602,16 @@ del protocollo UDP stripe.
 
 **Checklist implementativa**:
 1. **Threat model minimale** (spoofing, replay, injection, hijack sessione)
-2. **Auth messaggi stripe** con MAC per-packet (chiave condivisa per sessione)
-3. **Anti-replay window** su `(session, groupSeq, shardIdx)` con finestra scorrevole
+2. **Auth messaggi stripe** con MAC per-packet (chiave condivisa per sessione) ✅ baseline implementata (`stripe_auth_key`)
+3. **Anti-replay window** su `(session, groupSeq, shardIdx)` con finestra scorrevole ✅ baseline implementata su DATA/PARITY
 4. **Rotazione chiavi** (rekey periodico) + scadenza sessione forzata
 5. **Opzione cifratura payload stripe** (AEAD) senza rompere FEC
 6. **Metriche sicurezza** (drop auth fail, replay drop, rekey count) in Fase 5
 7. **Test dedicati**: unit + netem + packet injection test in lab
 
 **Done criteria Step 4.10**:
-- [ ] Pacchetti stripe non autenticati rifiutati dal server
-- [ ] Replay di shard vecchi rifiutato
+- [x] Pacchetti stripe non autenticati rifiutati dal server (quando `stripe_auth_key` è configurata)
+- [x] Replay di shard vecchi rifiutato (window su DATA/PARITY)
 - [ ] Session rekey validato senza interruzioni visibili
 - [ ] Benchmark throughput degradazione ≤10% rispetto stripe attuale
 
