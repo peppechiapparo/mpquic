@@ -238,12 +238,18 @@ type connectionTable struct {
 }
 
 // pathConn represents a single QUIC connection (path) within a connGroup.
+// Each pathConn has a sendCh for non-blocking async sends from the TUN reader.
+// A dedicated drain goroutine reads from sendCh and calls dc.SendDatagram().
+// This prevents one path's congestion window from blocking the TUN reader
+// and starving other paths (critical for multi-pipe where N pipes share a link).
 type pathConn struct {
 	quicConn   quic.Connection
 	dc         datagramConn
 	cancel     context.CancelFunc
-	remoteAddr string    // conn.RemoteAddr().String() — unique per path
-	lastRecv   time.Time // last time data was received from this path
+	remoteAddr string        // conn.RemoteAddr().String() — unique per path
+	lastRecv   time.Time     // last time data was received from this path
+	sendCh     chan []byte    // buffered async send queue (TUN→QUIC)
+	sendDone   chan struct{}  // closed when the drain goroutine exits
 }
 
 // connGroup holds all QUIC connections from the same peer (same TUN IP).
@@ -266,12 +272,21 @@ func newConnectionTable() *connectionTable {
 // register adds (or replaces) a connection in the group for peerIP.
 // If a connection with the same RemoteAddr already exists it is superseded.
 // Otherwise the connection is appended to the group (multi-path).
+// Each registered pathConn gets a sendCh and a drain goroutine for async sends.
 func (ct *connectionTable) register(peerIP netip.Addr, quicConn quic.Connection, dc datagramConn, cancel context.CancelFunc) {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 
 	remote := quicConn.RemoteAddr().String()
-	pc := &pathConn{quicConn: quicConn, dc: dc, cancel: cancel, remoteAddr: remote}
+	pc := &pathConn{
+		quicConn:   quicConn,
+		dc:         dc,
+		cancel:     cancel,
+		remoteAddr: remote,
+		sendCh:     make(chan []byte, 256),
+		sendDone:   make(chan struct{}),
+	}
+	go pc.drainSendCh()
 
 	grp, exists := ct.byIP[peerIP]
 	if !exists {
@@ -282,6 +297,7 @@ func (ct *connectionTable) register(peerIP netip.Addr, quicConn quic.Connection,
 	// Replace existing path from same remote address (reconnect case)
 	for i, old := range grp.paths {
 		if old.remoteAddr == remote {
+			old.stopSendCh()
 			old.cancel()
 			_ = old.quicConn.CloseWithError(0, "superseded")
 			grp.paths[i] = pc
@@ -291,6 +307,23 @@ func (ct *connectionTable) register(peerIP netip.Addr, quicConn quic.Connection,
 
 	// New path from a different remote address → append (multi-path)
 	grp.paths = append(grp.paths, pc)
+}
+
+// drainSendCh is the per-path goroutine that reads from sendCh and writes
+// to the QUIC stream/datagram. Runs until sendCh is closed.
+func (pc *pathConn) drainSendCh() {
+	defer close(pc.sendDone)
+	for pkt := range pc.sendCh {
+		_ = pc.dc.SendDatagram(pkt)
+	}
+}
+
+// stopSendCh closes the send channel and waits for the drain goroutine to exit.
+func (pc *pathConn) stopSendCh() {
+	if pc.sendCh != nil {
+		close(pc.sendCh)
+		<-pc.sendDone
+	}
 }
 
 // unregisterConn removes a specific connection (by remoteAddr) from the
@@ -306,6 +339,7 @@ func (ct *connectionTable) unregisterConn(peerIP netip.Addr, remoteAddr string) 
 
 	for i, pc := range grp.paths {
 		if pc.remoteAddr == remoteAddr {
+			pc.stopSendCh()
 			grp.paths = append(grp.paths[:i], grp.paths[i+1:]...)
 			break
 		}
@@ -328,6 +362,7 @@ func (ct *connectionTable) unregister(peerIP netip.Addr) {
 	defer ct.mu.Unlock()
 	if grp, ok := ct.byIP[peerIP]; ok {
 		for _, pc := range grp.paths {
+			pc.stopSendCh()
 			pc.cancel()
 			_ = pc.quicConn.CloseWithError(0, "unregistered")
 		}
@@ -425,6 +460,62 @@ func (ct *connectionTable) lookup(dstIP netip.Addr) (datagramConn, bool) {
 	return grp.paths[idx].dc, true
 }
 
+// dispatch sends a packet to the best path for dstIP asynchronously.
+// Unlike lookup+SendDatagram, this is non-blocking: the packet is pushed
+// to the path's sendCh and the drain goroutine handles the actual write.
+// If the send buffer is full, the packet is dropped (backpressure).
+// Returns true if the packet was queued, false if no path or buffer full.
+func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	grp := ct.resolveGroup(dstIP)
+	if grp == nil || len(grp.paths) == 0 {
+		return false
+	}
+
+	// Single path — fast path
+	if len(grp.paths) == 1 {
+		select {
+		case grp.paths[0].sendCh <- pkt:
+			return true
+		default:
+			return false // buffer full, drop
+		}
+	}
+
+	// Multi-path: same active-path selection as lookup()
+	var newest time.Time
+	for _, pc := range grp.paths {
+		if pc.lastRecv.After(newest) {
+			newest = pc.lastRecv
+		}
+	}
+	staleThreshold := newest.Add(-3 * time.Second)
+	active := make([]int, 0, len(grp.paths))
+	for i, pc := range grp.paths {
+		if pc.lastRecv.After(staleThreshold) {
+			active = append(active, i)
+		}
+	}
+	if len(active) == 0 {
+		for i := range grp.paths {
+			active = append(active, i)
+		}
+	}
+
+	start := grp.rr % len(active)
+	idx := active[start]
+	grp.rr = (start + 1) % len(active)
+
+	select {
+	case grp.paths[idx].sendCh <- pkt:
+		return true
+	default:
+		return false // buffer full on selected path, drop
+	}
+}
+
 // pathCount returns the number of active path connections for a peer.
 func (ct *connectionTable) pathCount(peerIP netip.Addr) int {
 	ct.mu.RLock()
@@ -467,6 +558,7 @@ func (ct *connectionTable) closeAll() {
 	defer ct.mu.Unlock()
 	for ip, grp := range ct.byIP {
 		for _, pc := range grp.paths {
+			pc.stopSendCh()
 			pc.cancel()
 			_ = pc.quicConn.CloseWithError(0, "shutdown")
 		}
@@ -888,15 +980,9 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 				continue
 			}
 
-			dc, ok := ct.lookup(dstIP)
-			if !ok {
-				logger.Debugf("no connection for dst=%s, dropping", dstIP)
-				continue
-			}
-
 			pktCopy := append([]byte(nil), pkt...)
-			if sendErr := dc.SendDatagram(pktCopy); sendErr != nil {
-				logger.Debugf("TX to %s failed: %v", dstIP, sendErr)
+			if !ct.dispatch(dstIP, pktCopy) {
+				logger.Debugf("dispatch failed for dst=%s (no path or buffer full)", dstIP)
 			}
 		}
 	}()
