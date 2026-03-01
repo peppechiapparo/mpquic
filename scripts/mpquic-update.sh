@@ -12,6 +12,7 @@ set -euo pipefail
 
 REPO_DIR="${1:-/opt/mpquic}"
 GO_BIN=""
+SKIP_PULL="${MPQUIC_UPDATE_SKIP_PULL:-0}"
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 log()  { echo "[mpquic-update] $*"; }
@@ -51,16 +52,27 @@ log "remote=$(git remote get-url origin)"
 log "current=$OLD_HEAD"
 
 # ── Step 1: Pull ──────────────────────────────────────────────────────────
-log "--- pulling ---"
-git fetch origin
-git pull --ff-only
-
-NEW_HEAD="$(git rev-parse --short HEAD)"
-if [[ "$OLD_HEAD" == "$NEW_HEAD" ]]; then
-  log "already up-to-date ($NEW_HEAD), proceeding with rebuild+restart."
+if [[ "$SKIP_PULL" == "1" ]]; then
+  log "--- pull skipped (re-exec) ---"
+  NEW_HEAD="$(git rev-parse --short HEAD)"
 else
-  log "updated: $OLD_HEAD → $NEW_HEAD"
-  git --no-pager log --oneline "${OLD_HEAD}..${NEW_HEAD}" | sed 's/^/  /'
+  log "--- pulling ---"
+  git fetch origin
+  git pull --ff-only
+
+  NEW_HEAD="$(git rev-parse --short HEAD)"
+  if [[ "$OLD_HEAD" == "$NEW_HEAD" ]]; then
+    log "already up-to-date ($NEW_HEAD), proceeding with rebuild+restart."
+  else
+    log "updated: $OLD_HEAD → $NEW_HEAD"
+    git --no-pager log --oneline "${OLD_HEAD}..${NEW_HEAD}" | sed 's/^/  /'
+
+    # If this script itself was updated, re-exec the new version
+    if git diff --name-only "$OLD_HEAD" "$NEW_HEAD" -- scripts/mpquic-update.sh | grep -q .; then
+      log "update script changed, re-executing new version..."
+      MPQUIC_UPDATE_SKIP_PULL=1 exec "$REPO_DIR/scripts/mpquic-update.sh" "$REPO_DIR"
+    fi
+  fi
 fi
 
 # ── Step 2: Build ─────────────────────────────────────────────────────────
