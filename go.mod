@@ -3,6 +3,7 @@ module mpquic
 go 1.22
 
 require (
+	github.com/klauspost/reedsolomon v1.12.1
 	github.com/quic-go/quic-go v0.48.2
 	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 	gopkg.in/yaml.v3 v3.0.1
@@ -13,6 +14,7 @@ replace github.com/quic-go/quic-go => ./local-quic-go
 require (
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
 	github.com/google/pprof v0.0.0-20210407192527-94a9f03dee38 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.6 // indirect
 	github.com/onsi/ginkgo/v2 v2.9.5 // indirect
 	go.uber.org/mock v0.4.0 // indirect
 	golang.org/x/crypto v0.26.0 // indirect

@@ -54,6 +54,11 @@ type Config struct {
 	TransportMode         string                `yaml:"transport_mode"`
 	DetectStarlink        bool                  `yaml:"detect_starlink"`
 	StarlinkDefaultPipes  int                   `yaml:"starlink_default_pipes"`
+	StarlinkTransport     string                `yaml:"starlink_transport"`
+	StripePort            int                   `yaml:"stripe_port"`
+	StripeDataShards      int                   `yaml:"stripe_data_shards"`
+	StripeParityShards    int                   `yaml:"stripe_parity_shards"`
+	StripeEnabled         bool                  `yaml:"stripe_enabled"`
 }
 
 type MultipathPathConfig struct {
@@ -64,7 +69,8 @@ type MultipathPathConfig struct {
 	Priority   int    `yaml:"priority"`
 	Weight     int    `yaml:"weight"`
 	Pipes      int    `yaml:"pipes"`
-	BasePath   string `yaml:"-"` // original path name before pipe expansion
+	BasePath   string `yaml:"-"`        // original path name before pipe expansion
+	Transport  string `yaml:"transport"` // "quic" (default), "stripe", or "auto"
 }
 
 type DataplaneConfig struct {
@@ -136,6 +142,7 @@ type multipathPathState struct {
 	transport        *quic.Transport
 	conn             quic.Connection
 	dc               datagramConn
+	stripeConn       *stripeClientConn   // non-nil for stripe transport paths
 	alive            bool
 	reconnecting     bool
 	consecutiveFails int
@@ -299,13 +306,51 @@ func (ct *connectionTable) register(peerIP netip.Addr, quicConn quic.Connection,
 		if old.remoteAddr == remote {
 			old.stopSendCh()
 			old.cancel()
-			_ = old.quicConn.CloseWithError(0, "superseded")
+			if old.quicConn != nil {
+				_ = old.quicConn.CloseWithError(0, "superseded")
+			}
 			grp.paths[i] = pc
 			return
 		}
 	}
 
 	// New path from a different remote address → append (multi-path)
+	grp.paths = append(grp.paths, pc)
+}
+
+// registerStripe adds a stripe transport connection to the group for peerIP.
+// Unlike register(), it does not require a quic.Connection — only a datagramConn
+// and a unique remote identifier string.
+func (ct *connectionTable) registerStripe(peerIP netip.Addr, remoteID string, dc datagramConn, cancel context.CancelFunc) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	pc := &pathConn{
+		dc:         dc,
+		cancel:     cancel,
+		remoteAddr: remoteID,
+		sendCh:     make(chan []byte, 256),
+		sendDone:   make(chan struct{}),
+	}
+	go pc.drainSendCh()
+
+	grp, exists := ct.byIP[peerIP]
+	if !exists {
+		ct.byIP[peerIP] = &connGroup{peerIP: peerIP, paths: []*pathConn{pc}}
+		return
+	}
+
+	for i, old := range grp.paths {
+		if old.remoteAddr == remoteID {
+			old.stopSendCh()
+			old.cancel()
+			if old.quicConn != nil {
+				_ = old.quicConn.CloseWithError(0, "superseded")
+			}
+			grp.paths[i] = pc
+			return
+		}
+	}
 	grp.paths = append(grp.paths, pc)
 }
 
@@ -364,7 +409,9 @@ func (ct *connectionTable) unregister(peerIP netip.Addr) {
 		for _, pc := range grp.paths {
 			pc.stopSendCh()
 			pc.cancel()
-			_ = pc.quicConn.CloseWithError(0, "unregistered")
+			if pc.quicConn != nil {
+				_ = pc.quicConn.CloseWithError(0, "unregistered")
+			}
 		}
 	}
 	for src, peer := range ct.routed {
@@ -560,7 +607,9 @@ func (ct *connectionTable) closeAll() {
 		for _, pc := range grp.paths {
 			pc.stopSendCh()
 			pc.cancel()
-			_ = pc.quicConn.CloseWithError(0, "shutdown")
+			if pc.quicConn != nil {
+				_ = pc.quicConn.CloseWithError(0, "shutdown")
+			}
 		}
 		delete(ct.byIP, ip)
 	}
@@ -991,6 +1040,18 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 	if err != nil {
 		return err
 	}
+
+	// Start stripe listener if enabled (for Starlink session bypass clients)
+	if cfg.StripeEnabled {
+		ss, err := newStripeServer(cfg, tun, ct, logger)
+		if err != nil {
+			logger.Errorf("stripe server init failed: %v (continuing with QUIC only)", err)
+		} else {
+			defer ss.Close()
+			go ss.Run(ctx)
+		}
+	}
+
 	listenAddr := net.JoinHostPort(bindIP, fmt.Sprintf("%d", cfg.RemotePort))
 	logger.Infof("server multi-conn listen=%s tun=%s", listenAddr, cfg.TunName)
 	listener, err := quic.ListenAddr(listenAddr, tlsConf, &quic.Config{
@@ -1399,6 +1460,27 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 		state := &multipathPathState{cfg: p}
 		mp.paths = append(mp.paths, state)
 
+		effectiveTransport := resolvePathTransport(p, cfg, logger)
+
+		// ── Stripe transport (Starlink-optimized) ─────────────────
+		if effectiveTransport == "stripe" {
+			sc, err := newStripeClientConn(ctx, cfg, p, logger)
+			if err != nil {
+				logger.Errorf("stripe init failed name=%s err=%v", p.Name, err)
+				state.reconnecting = true
+				continue
+			}
+			state.dc = sc
+			state.stripeConn = sc
+			state.alive = true
+			state.reconnecting = false
+			state.lastUp = time.Now()
+			aliveCount++
+			logger.Infof("stripe path up name=%s pipes=%d", p.Name, p.Pipes)
+			continue
+		}
+
+		// ── QUIC transport (default) ──────────────────────────────
 		bindIP, err := resolveBindIP(p.BindIP)
 		if err != nil {
 			logger.Errorf("path init failed name=%s step=bind-resolve err=%v", p.Name, err)
@@ -1834,6 +1916,10 @@ func (m *multipathConn) onPathError(ctx context.Context, idx int, err error) {
 	}
 	p.cooldownUntil = time.Now().Add(time.Duration(p.consecutiveFails) * time.Second)
 	p.dc = nil
+	if p.stripeConn != nil {
+		_ = p.stripeConn.Close()
+		p.stripeConn = nil
+	}
 	if p.conn != nil {
 		_ = p.conn.CloseWithError(0, "rx-error")
 		p.conn = nil
@@ -1876,6 +1962,34 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 		pcfg := m.paths[idx].cfg
 		m.mu.RUnlock()
 
+		effectiveTransport := resolvePathTransport(pcfg, m.cfg, m.logger)
+
+		// ── Stripe reconnect ──────────────────────────────────────
+		if effectiveTransport == "stripe" {
+			sc, err := newStripeClientConn(ctx, m.cfg, pcfg, m.logger)
+			if err != nil {
+				m.logger.Errorf("stripe redial failed name=%s err=%v", pcfg.Name, err)
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			m.mu.Lock()
+			if idx >= 0 && idx < len(m.paths) {
+				p := m.paths[idx]
+				p.dc = sc
+				p.stripeConn = sc
+				p.alive = true
+				p.reconnecting = false
+				p.lastUp = time.Now()
+				if p.consecutiveFails > 0 {
+					p.consecutiveFails--
+				}
+			}
+			m.mu.Unlock()
+			m.logger.Infof("stripe path recovered name=%s pipes=%d", pcfg.Name, pcfg.Pipes)
+			return
+		}
+
+		// ── QUIC reconnect (existing logic) ───────────────────────
 		bindIP, err := resolveBindIP(pcfg.BindIP)
 		if err != nil {
 			m.logger.Errorf("path redial resolve failed name=%s err=%v", pcfg.Name, err)
@@ -2064,6 +2178,9 @@ func (m *multipathConn) closeAll(code quic.ApplicationErrorCode, reason string) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, p := range m.paths {
+		if p.stripeConn != nil {
+			_ = p.stripeConn.Close()
+		}
 		if p.conn != nil {
 			_ = p.conn.CloseWithError(code, reason)
 		}
@@ -2373,6 +2490,24 @@ func runTunnelWithTUN(ctx context.Context, conn datagramConn, tun *water.Interfa
 func expandMultipathPipes(paths []MultipathPathConfig, cfg *Config, logger *Logger) []MultipathPathConfig {
 	var expanded []MultipathPathConfig
 	for _, p := range paths {
+		effectiveTransport := resolvePathTransport(p, cfg, logger)
+
+		// Stripe transport: do NOT expand pipes — stripeClientConn manages its
+		// own N UDP sockets internally. The path stays as a single entry.
+		if effectiveTransport == "stripe" {
+			p.BasePath = p.Name
+			if p.Pipes <= 0 {
+				p.Pipes = cfg.StarlinkDefaultPipes
+				if p.Pipes <= 0 {
+					p.Pipes = 4
+				}
+			}
+			logger.Infof("stripe path=%s pipes=%d (managed internally)", p.Name, p.Pipes)
+			expanded = append(expanded, p)
+			continue
+		}
+
+		// QUIC transport: expand pipes as before
 		pipes := p.Pipes
 		// Auto-detect Starlink if configured and pipes not explicitly set
 		if pipes <= 0 && cfg.DetectStarlink {
@@ -2399,6 +2534,28 @@ func expandMultipathPipes(paths []MultipathPathConfig, cfg *Config, logger *Logg
 		}
 	}
 	return expanded
+}
+
+// resolvePathTransport determines the effective transport mode for a path.
+// Returns "stripe" for Starlink paths or "quic" (default).
+// Priority: explicit per-path → global starlink_transport → auto-detect.
+func resolvePathTransport(p MultipathPathConfig, cfg *Config, logger *Logger) string {
+	// Explicit per-path transport
+	if p.Transport != "" && p.Transport != "auto" {
+		return p.Transport
+	}
+	// Global starlink_transport setting
+	if cfg.StarlinkTransport == "stripe" {
+		return "stripe"
+	}
+	// Auto-detect: if detect_starlink is enabled, check rDNS/CGNAT
+	if p.Transport == "auto" || cfg.DetectStarlink {
+		if detectStarlink(p.BindIP, logger) {
+			logger.Infof("starlink auto-detected for path=%s → stripe transport", p.Name)
+			return "stripe"
+		}
+	}
+	return "quic"
 }
 
 // detectStarlink checks if a network interface is connected via Starlink by

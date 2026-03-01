@@ -402,12 +402,12 @@ Confronto metriche:
 
 ---
 
-## Fase 4b — Multi-Pipe per Path (Starlink Session Striping) 🔄 IN CORSO
+## Fase 4b — Starlink Session Striping (UDP Stripe + FEC) 🔄 IN CORSO
 
-**Obiettivo**: bypassare il traffic shaping per-sessione di Starlink aprendo N tunnel
-QUIC paralleli ("pipe") sullo stesso link fisico. Ogni pipe è un flusso UDP con porta
-sorgente distinta → Starlink lo tratta come una sessione indipendente con il proprio
-budget di throughput (~80 Mbps ciascuna).
+**Obiettivo**: bypassare il traffic shaping per-sessione di Starlink aprendo N
+socket UDP paralleli ("pipe") sullo stesso link fisico. Ogni pipe è un flusso UDP
+con porta sorgente distinta → Starlink lo tratta come sessione indipendente con
+il proprio budget di throughput (~80 Mbps ciascuna).
 
 ### Problema
 
@@ -417,50 +417,97 @@ Senza multi-pipe (attuale):
   Speedtest Ookla CON tunnel:   ~50 Mbps download (single session capped!)
   Bonding 2 link CON tunnel:    ~74 Mbps (= 2 × ~40 Mbps, entrambi capped)
 
-Con multi-pipe (obiettivo):
+Con stripe transport (obiettivo):
   4 pipe × 80 Mbps = ~320 Mbps → saturazione della capacità Starlink
   Bonding 2 link × 4 pipe = 8 pipe totali → throughput massimo raggiungibile
 ```
 
-### Concept: pipe come tubi paralleli
+### Approccio 1 FALLITO: Multi-Pipe QUIC (N connessioni BBR indipendenti)
+
+Il primo tentativo utilizzava N connessioni QUIC parallele con BBR indipendente.
+**Risultato: ❌ FALLITO** — le N istanze BBR competono per la stessa banda:
+
+| Config | Throughput | Retransmit | Verdetto |
+|--------|-----------|------------|----------|
+| pipes=1 (baseline) | 74.3 Mbps | 185 | ✅ |
+| pipes=4 (8 pipe totali) | 30-33 Mbps | 2.836-5.724 | ❌ -56% |
+| pipes=1 ripristinato | 63.3 Mbps | 6.798 | ✅ |
+
+**Causa**: N istanze BBR × bandwidth stimata = N× overshoot → congestione →
+loss massiccio → throughput collapse. Problema noto come "intra-flow competition".
+
+### Approccio 2 ATTUALE: UDP Stripe + FEC (nessun CC per pipe)
+
+Nuovo layer di trasporto che sostituisce QUIC sulle connettività Starlink:
 
 ```
-                    Multi-Pipe (N=4 per path)
-                    ┌──────────────────────────┐
-                    │  pipe.0 (UDP :41001) ════│═══╗
- User traffic ──▶   │  pipe.1 (UDP :41002) ════│═══╬══▶ VPS:45017
-  (via TUN)    ──▶   │  pipe.2 (UDP :41003) ════│═══╬══▶ (stessa porta)
-                    │  pipe.3 (UDP :41004) ════│═══╝
-                    └──────────────────────────┘
-                         enp7s7 (Starlink)
-
-  Starlink vede 4 flussi UDP indipendenti → 4 × 80 Mbps = 320 Mbps
+┌─────────────────────────────────────────────────────────────────────┐
+│ Stripe Transport (per link Starlink)                                │
+│                                                                     │
+│  TUN reader ──▶ FEC encoder (K data + M parity shards)             │
+│              ──▶ round-robin across N UDP sockets                   │
+│              ──▶ each socket = independent Starlink session          │
+│                                                                     │
+│  N UDP sockets ──▶ FEC decoder (reconstruct if K of K+M received)  │
+│                ──▶ TUN writer                                       │
+│                                                                     │
+│  NO congestion control per pipe (rate limited by TCP inside tunnel) │
+│  Loss recovery via Reed-Solomon FEC                                 │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-Come mostrato nella slide ROMARS "Benefit #1": "Multi Link QUIC/UDP with Wave"
-— ogni pipe è un tunnel aggiuntivo fino a sfruttare tutta la banda del canale.
-Il concetto si estende a Multi-Path Multi-Link: le pipe sono distribuite su più
-antenne/link (Multi Antenna scenario).
+**Vantaggi rispetto a Multi-Pipe QUIC:**
 
-### Approccio: espansione path
+| Aspetto | Multi-Pipe QUIC | UDP Stripe + FEC |
+|---------|----------------|------------------|
+| CC per pipe | BBR indipendente (compete) | **Nessuno** (TCP in-tunnel) |
+| Loss recovery | QUIC retransmit (lento) | **FEC proattivo** (< 5ms) |
+| Overhead | TLS + QUIC headers per pipe | **16 byte** header stripe |
+| Complessità | N connessioni QUIC separate | **1 stripe conn** con N socket |
 
-Il modo più semplice ed efficace: se un path ha `pipes: 4`, espandiamo in fase
-di inizializzazione creando 4 `multipathPathState` interni (`wan5.0`..`wan5.3`),
-ciascuno con il proprio socket UDP e connessione QUIC.
+### Architettura Wire Protocol
 
-| Componente | Impatto | Modifiche necessarie |
-|-----------|---------|---------------------|
-| **Config** | Nuovo campo `pipes` in `MultipathPathConfig` | +1 riga struct |
-| **Init** | Espansione path in `newMultipathConn` | +20 righe |
-| **Scheduler** | Nessuna modifica — round-robin sugli N path espansi | 0 righe |
-| **RecvLoop** | Nessuna modifica — N goroutine (una per pipe) | 0 righe |
-| **Reconnect** | Nessuna modifica — ciascuna pipe riconnette indipendentemente | 0 righe |
-| **Server** | Nessuna modifica — ogni pipe è una connessione QUIC separata nel connGroup | 0 righe |
-| **Telemetria** | Pipe visibili come path separati (wan5.0, wan5.1, ...) | +5 righe aggregazione |
+```
+Pacchetto stripe:
+  [stripeHdr 16 bytes][shard payload (variable)]
+
+Header: magic(2) + ver(1) + type(1) + session(4) + groupSeq(4) +
+        shardIdx(1) + groupDataN(1) + dataLen(2) = 16 bytes
+
+Tipi: DATA (0x01), PARITY (0x02), REGISTER (0x03), KEEPALIVE (0x04)
+
+FEC default: K=10 data shards, M=2 parity shards (20% redundancy)
+```
+
+### Coesistenza con QUIC standard
+
+Il stripe transport è **solo per connettività Starlink**. Le altre connettività
+(fibra, LTE, VSAT) continuano a usare il trasporto QUIC standard (BBR, reliable):
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│ mp1 — multipath tunnel                                         │
+│                                                                │
+│  wan5 (Starlink enp7s7) ─── transport: stripe ─── 4 UDP pipes │
+│  wan6 (Starlink enp7s8) ─── transport: stripe ─── 4 UDP pipes │
+│  wan4 (Fibra enp7s6)    ─── transport: quic   ─── 1 QUIC conn │
+│                                                                │
+│  multipath_policy: balanced (round-robin across all paths)     │
+└────────────────────────────────────────────────────────────────┘
+```
 
 ### Config YAML
 
 ```yaml
+# Globale: auto-detect Starlink e usa stripe transport
+detect_starlink: true
+starlink_transport: stripe        # "stripe" o "quic" (default)
+starlink_default_pipes: 4
+stripe_port: 46017                # porta UDP server per stripe (default: remote_port + 1000)
+stripe_data_shards: 10            # K (default 10)
+stripe_parity_shards: 2           # M (default 2)
+stripe_enabled: true              # server: abilita listener stripe
+
 multipath_paths:
   - name: wan5
     bind_ip: "iface:enp7s7"
@@ -468,7 +515,8 @@ multipath_paths:
     remote_port: 45017
     priority: 1
     weight: 1
-    pipes: 4        # 4 sessioni QUIC parallele su questo link
+    pipes: 4
+    transport: stripe             # oppure: "auto" per auto-detect
 
   - name: wan6
     bind_ip: "iface:enp7s8"
@@ -476,46 +524,65 @@ multipath_paths:
     remote_port: 45017
     priority: 1
     weight: 1
-    pipes: 4        # 4 sessioni QUIC parallele anche su questo link
+    pipes: 4
+    transport: stripe
+
+  - name: wan4                    # path non-Starlink → QUIC standard
+    bind_ip: "iface:enp7s6"
+    remote_addr: "172.238.232.223"
+    remote_port: 45017
+    priority: 2
+    weight: 1
+    # transport: quic (default)
 ```
+
+### Implementazione (stripe.go — 1320 righe)
+
+| Componente | File | Righe | Descrizione |
+|-----------|------|-------|-------------|
+| Wire protocol | stripe.go | ~100 | Header 16 byte, encode/decode, costanti |
+| FEC group | stripe.go | ~50 | Accumulatore shard con stato present/received |
+| Client conn | stripe.go | ~350 | N UDP socket, FEC encode TX, decode RX, keepalive |
+| Server listener | stripe.go | ~400 | UDP listener, session management, GC |
+| Server DC | stripe.go | ~150 | `datagramConn` per return-path server→client |
+| Helpers | stripe.go | ~30 | parseTUNIP, ipToUint32 |
+| Unit tests | stripe_test.go | 188 | Header, FEC group, helpers, 9 test |
+| Main integration | main.go | ~100 | Config, registerStripe, path init, server startup |
 
 ### Steps implementativi
 
-#### Step 4.6 — Multi-Pipe nel client (espansione path)
-1. Aggiungere campo `Pipes int` a `MultipathPathConfig` (yaml: `pipes`)
-2. In `newMultipathConn`, espandere `cfg.MultipathPaths`:
-   - Se `pipes <= 0` → default 1 (backward compatible)
-   - Se `pipes > 1` → creare N copie: `wan5.0`, `wan5.1`, ..., `wan5.N-1`
-   - Aggiungere campo `PipePath string` per telemetria (il nome originale del path)
-3. Aggiornare telemetria: aggregare metriche per path base (non per pipe) se desiderato
-4. Nessuna modifica ad altre funzioni — l'espansione è trasparente
+#### Step 4.6 — Multi-Pipe QUIC ✅ COMPLETATO (poi INVALIDATO)
+- Campo `pipes`, espansione path, async dispatch — implementati e testati
+- **Risultato**: throughput degradato del 56% per competizione CC → **SCARTATO**
 
-#### Step 4.7 — Starlink Auto-Detection
-1. Implementare `detectStarlink(ifaceName string) bool`:
-   - Ottenere IP WAN attraverso l'interfaccia specifica (HTTP GET a servizio esterno)
-   - Reverse DNS (PTR) sull'IP WAN: se contiene `starlinkisp.net` → Starlink
-   - Fallback: check CGNAT range 100.64.0.0/10 + gateway 192.168.1.1
-2. Aggiungere campo `detect_starlink: true` a Config (default: false)
-3. Aggiungere campo `starlink_default_pipes: 4` a Config (default: 4)
-4. In `newMultipathConn`, se `detect_starlink` è attivo:
-   - Per ogni path con `pipes: 0` (non impostato), eseguire detection
-   - Se Starlink → impostare `pipes = starlink_default_pipes`
-   - Loggare: `path starlink detected name=wan5 auto_pipes=4`
-5. Caching: eseguire la detection una sola volta all'avvio (non ad ogni reconnect)
+#### Step 4.7 — Starlink Auto-Detection ✅ COMPLETATO
+- `detectStarlink()` via rDNS (`*.starlinkisp.net`) + CGNAT fallback
+- `getWANIPViaDNS()` via OpenDNS resolver bound a interfaccia specifica
+- Config: `detect_starlink`, `starlink_default_pipes`, `starlink_transport`
 
-#### Step 4.8 — Benchmark Multi-Pipe
-1. Singolo link Starlink con pipes=1 vs pipes=4: throughput iperf3
-2. Bonding 2 link con pipes=4 ciascuno: 8 pipe totali
-3. Ookla speedtest end-to-end: confronto con/senza multi-pipe
-4. Documentare in NOTA_TECNICA_MPQUIC.md
+#### Step 4.8 — UDP Stripe + FEC Transport ✅ IMPLEMENTATO
+1. `stripe.go`: wire protocol, FEC (Reed-Solomon), client/server transport
+2. Integrazione main.go: `registerStripe`, `resolvePathTransport`, server listener
+3. `stripe_test.go`: 9 unit test (header encode/decode, FEC group, helpers)
+4. Dipendenza: `github.com/klauspost/reedsolomon` aggiunta a go.mod
+
+#### Step 4.9 — Test Stripe su Starlink 🔄 IN CORSO
+1. Deploy su client e VPS con stripe_enabled
+2. Configurare mp1 con `transport: stripe` + `pipes: 4` su wan5/wan6
+3. iperf3 throughput test: baseline QUIC vs stripe
+4. Ookla speedtest end-to-end
+5. Documentare risultati in NOTA_TECNICA_MPQUIC.md
 
 ### Done criteria Fase 4b
-- [ ] Campo `pipes` funzionante nella config (default 1, backward compatible)
-- [ ] N pipe per path espanse correttamente in `newMultipathConn`
-- [ ] Throughput con pipes=4 su Starlink > 200 Mbps (iperf3)
-- [ ] `detectStarlink()` identifica correttamente link Starlink via rDNS
-- [ ] Auto-detection applica pipes=4 su link Starlink rilevati
-- [ ] Benchmark documentato: single-pipe vs multi-pipe vs bonding+multi-pipe
+- [x] Multi-pipe QUIC implementato e testato (❌ fallito per CC competition)
+- [x] `detectStarlink()` identifica link Starlink via rDNS
+- [x] UDP Stripe + FEC transport implementato (stripe.go, 1320 righe)
+- [x] Wire protocol con header 16 byte e FEC Reed-Solomon
+- [x] Integrazione main.go: client stripe path + server stripe listener
+- [x] 9 unit test passing
+- [ ] Deploy e test su infrastruttura reale (client + VPS)
+- [ ] Throughput con stripe su Starlink > 200 Mbps (iperf3)
+- [ ] Benchmark documentato: QUIC vs stripe vs stripe+bonding
 
 ---
 
