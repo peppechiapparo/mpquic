@@ -1,5 +1,18 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-03-01
+
+### Cleanup diagnostico (`c15b235`)
+- Rimosse log temporanee `[DIAG]` da `cmd/mpquic/main.go` in `registerStripe()`:
+  - `CREATED group`
+  - `REPLACED path`
+  - `APPENDED path`
+- Rimosse log temporanee `[DIAG]` da `dispatch()`:
+  - `SINGLE path`
+  - `MULTI paths`
+- Eliminato anche il contatore di sampling diagnostico `dispatchCounter` (non più usato)
+- Verifica locale: `go test ./cmd/mpquic` → `ok`
+
 ## 2026-02-28 — Fase 2: Multi-tunnel per link ✅
 
 ### Step 2.1 — Server multi-connessione (`b0bbddf`)
