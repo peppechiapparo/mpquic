@@ -1,6 +1,6 @@
 # Roadmap implementazione MPQUIC
 
-*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-02-28*
+*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-01*
 
 ---
 
@@ -34,9 +34,9 @@
 | Step | Descrizione | Nostro concetto | Stato |
 |------|-------------|-----------------|-------|
 | **1** | QUIC tunnels multi-link 1:1 | Multi-link | **✅ DONE** |
-| **2** | Traffico distribuito per applicazione, non per pacchetto | Multi-tunnel per link | **🔄 IN PROGRESS** (2.1-2.4 ✅) |
-| **3** | BBRv3 / Wave congestion control | CC per tunnel | **⬜ NOT STARTED** |
-| **4** | Bonding, Backup, Duplicazione | Multi-path per tunnel | **⬜ NOT STARTED** |
+| **2** | Traffico distribuito per applicazione, non per pacchetto | Multi-tunnel per link | **🔄 IN PROGRESS** (2.1-2.4 ✅, 2.5 in pausa) |
+| **3** | BBR + Reliable Transport | CC per tunnel + transport mode | **✅ DONE** (BBRv1, reliable streams, benchmarkato) |
+| **4** | Bonding, Backup, Duplicazione | Multi-path per tunnel | **🔄 IN PROGRESS** |
 | **5** | AI/ML-Ready (Quality on Demand) | Decision layer | **⬜ NOT STARTED** |
 
 ---
@@ -236,42 +236,65 @@ giusta (mwan3, firewall zone, DSCP→VLAN map, ecc.)
 
 ---
 
-## Fase 3 — BBRv3 Congestion Control ⬜ NON INIZIATA
+## Fase 3 — BBR Congestion Control + Reliable Transport ✅ COMPLETATA
 
-**Obiettivo (Step 3 PDF)**: sostituire Cubic (default quic-go) con BBRv3 per ottimizzare
+**Obiettivo (Step 3 PDF)**: sostituire Cubic (default quic-go) con BBR per ottimizzare
 throughput su canali LEO con alta variabilità RTT e loss non da congestione.
 
 > "Cubic: slow and decreasing. BBRv3 is relatively fast."
 > "Congestion control of Wave was created for high packet loss environments"
 
-### Motivazione (dal PDF §10-12)
-- **Cubic**: lento a crescere, interpreta OGNI loss come congestione → rallenta drasticamente
-- **BBRv3**: model-based CC, stima bandwidth e RTT, non rallenta su loss isolati
-- **Wave** (futuro): CC ottimizzato specificamente per canali LEO altamente variabili
+### Approccio adottato: Fork quic-go + Pluggable CC
+Poiché quic-go v0.48.2 non espone API CC pubblica (issue #4565), è stato creato un fork
+locale (`local-quic-go/`) con:
+1. **BBRv1 sender** (`bbr_sender.go`, ~555 LOC) — 4 stati: STARTUP→DRAIN→PROBE_BW→PROBE_RTT
+2. **Pluggable CC**: campo `CongestionAlgorithm string` in `quic.Config`, factory in `congestion/`
+3. **Death spiral fix**: startup non riduce mai cwnd, BDP floor a initialCwnd, pacing floor
+4. **Config YAML**: `congestion_algorithm: bbr|cubic` (default: cubic)
 
-### Stato tecnico
-- quic-go v0.48.2 usa Cubic come default, NESSUNA API CC pubblica
-- quic-go v0.59+ (richiede Go 1.24+) potrebbe avere API CC estensibili
-- Nota: QUIC DATAGRAM sfrutta CC solo per flow control, non per packet-level reliability
+### Scoperta critica: Transport Mode Reliable
+Durante i test su Starlink, BBR non mostrava benefici. Root cause:
+- **QUIC DATAGRAM frames (RFC 9221) sono unreliable** — pacchetti persi non vengono mai ritrasmessi
+- Il TCP dentro il tunnel vedeva direttamente la loss del link → collasso a ~0.5 Mbps
+- Il CC algorithm (BBR o Cubic) era irrilevante perché non governa i DATAGRAM
 
-### Opzioni di implementazione
-1. **Upgrade quic-go + Go** a versioni più recenti
-2. **Fork quic-go** con BBR sender abilitato
-3. **CC applicativo** sopra QUIC datagram: pacing + bandwidth estimation a livello tunnel
-4. **Diverso CC per classe**: critical usa pacing conservativo, bulk usa BBR aggressivo
+**Soluzione**: nuovo `transport_mode: reliable` che usa **QUIC bidirectional streams**
+con framing length-prefixed (2 byte BigEndian + payload). I pacchetti persi vengono
+ritrasmessi dal QUIC stack, e il CC algorithm guida pacing e recovery.
 
-### Steps
-1. Upgrade Go 1.22 → 1.24, quic-go v0.48 → v0.59+
-2. Valutare API CC in quic-go recente
-3. PoC: BBR vs Cubic su canale Starlink reale, singolo tunnel
-4. A/B test con metriche comparative (throughput, recovery time)
-5. Parametrizzare in config YAML (`congestion_control: cubic|bbr`)
-6. Benchmark su profili loss/jitter simulati (netem) e reali
-7. Stretch: prototipo "Wave-like" (pacing su bandwidth estimation, ignora loss isolati)
+### Risultati benchmark su Starlink (WAN6, RTT 25-40ms)
+
+**Datagram mode** (prima del fix):
+| Tunnel | CC | Baseline | 10% loss |
+|--------|-----|----------|----------|
+| cr3 | Cubic | 15.1 Mbps | 0.5 Mbps (−97%) |
+| br3 | BBR | 14.5 Mbps | 0.5 Mbps (−97%) |
+| df3 | Cubic | 14.9 Mbps | 0.9 Mbps (−94%) |
+
+**Reliable mode** (dopo il fix):
+| Tunnel | CC | Baseline | 10% loss | 30% loss |
+|--------|-----|----------|----------|----------|
+| cr3 | Cubic | 45.2 Mbps | 41.9 Mbps (−7%) | 15.5 Mbps (−66%) |
+| br3 | **BBR** | 47.4 Mbps | 28.5 Mbps (−40%) | **26.1 Mbps (−45%)** |
+| df3 | Cubic | 55.8 Mbps | 39.7 Mbps (−29%) | 13.6 Mbps (−76%) |
+
+**Conclusioni chiave**:
+- Reliable transport: **3× throughput** base (15→50 Mbps)
+- BBR con 30% loss: **+79%** vs Cubic (26.1 vs 14.6 Mbps)
+- Strategia: `reliable` su tutti i tunnel, `bbr` su tunnel bulk, `cubic` su critici
+
+### Commits
+- `05f391e` — BBRv1 implementation + pluggable CC
+- `57c7ccd` — BBR death spiral fix
+- `2d903ab` — Reliable transport mode (QUIC streams)
+
+### Prossimi sviluppi CC
+- **BBRv2/v3**: reazione proporzionale alla loss (atteso miglioramento al 10% loss)
+- **Adaptive CC**: selezione automatica BBR vs Cubic basata su condizioni link
 
 ---
 
-## Fase 4 — Multi-path per tunnel: Bonding, Backup, Duplicazione ⬜ NON INIZIATA
+## Fase 4 — Multi-path per tunnel: Bonding, Backup, Duplicazione 🔄 IN CORSO
 
 **Obiettivo (Step 4 PDF)**: un singolo tunnel "applicativo" può usare N link fisici per
 resilienza e aggregazione bandwidth.
@@ -279,36 +302,103 @@ resilienza e aggregazione bandwidth.
 > "New services: Bonding, Backup, Duplications"
 
 ### Prerequisiti
-- Fase 2 completata (multi-tunnel funzionante)
-- quic-go con supporto Multipath QUIC (RFC 9443) — oppure implementazione applicativa
+- [x] Fase 2 funzionante (multi-tunnel, server multi-connessione, connectionTable)
+- [x] Fase 3 completata (BBR + reliable transport)
+- [x] Codice `multipathConn` esistente con scheduler, duplicazione, reconnect
 
 ### Servizi target
 
-| Servizio | Meccanismo | Caso d'uso |
-|----------|-----------|------------|
-| **Bonding** | Un tunnel usa 2+ WAN, pacchetti distribuiti round-robin/weighted | Max throughput |
-| **Active Backup** | Tunnel su WAN primaria, failover su WAN secondaria | Low latency + resilienza |
-| **Duplicazione** | Pacchetti critico inviati su 2+ WAN simultaneamente | Zero-loss per VoIP/controllo |
+| Servizio          | Meccanismo                                                        | Caso d'uso |
+|----------         |-----------                                                        |------------|
+| **Bonding**       | Un tunnel usa 2+ WAN, pacchetti distribuiti round-robin/weighted  | Max throughput |
+| **Active Backup** | Tunnel su WAN primaria, failover su WAN secondaria                | Low latency + resilienza |
+| **Duplicazione**  | Pacchetti critici inviati su 2+ WAN simultaneamente               | Zero-loss per VoIP/controllo |
 
-### Opzioni implementative
-1. **QUIC Multipath nativo** (RFC 9443): una connessione QUIC, N path di rete
-   - Pro: standard IETF, gestione path integrata nel protocollo
-   - Contro: richiede quic-go recente + Go 1.24+
-2. **Applicativo**: N connessioni QUIC (una per WAN), aggregazione nella nostra `multipathConn`
-   - Pro: funziona con quic-go attuale, più controllo
-   - Contro: overhead applicativo, duplicazione gestita manualmente (già implementata nel codice)
-3. **Ibrido**: multipath nativo dove possibile, fallback applicativo
+### Approccio: Applicativo (N connessioni QUIC → `multipathConn`)
+Il fork quic-go v0.48.2 non supporta QUIC Multipath (RFC 9443).
+Usiamo l'implementazione applicativa già presente nel codice (`multipathConn`):
+- N connessioni QUIC indipendenti (una per WAN) → singola TUN client
+- Scheduler path-aware: priority/failover/balanced
+- Duplicazione per classi critiche (configurable copies)
+- Reconnect con backoff esponenziale e recovery automatica
+- Telemetria per-path e per-class (10s interval)
+- Supporto reliable transport mode + BBR/Cubic per-path
 
-### Il codice "multipath" esistente
-Il codice `multipathConn` già presente implementa Opzione 2 a livello applicativo:
-- N connessioni QUIC su N WAN diverse → singola TUN
-- Scheduler path-aware con priority/weight/failover
-- Duplicazione per classi critiche
-- Reconnect con backoff e recovery automatica
+### Codice `multipathConn` esistente (~700 LOC)
 
-**Gap**: non è mai stato testato sulla infra reale e ha un problema di routing server-side
-(ogni path punta a una porta server diversa con TUN diversa). Va riadattato per usare
-server multi-connessione (Fase 2) come base.
+Implementato e compilante, mai testato su infra reale:
+
+| Componente | Funzione | LOC | Stato |
+|-----------|----------|-----|-------|
+| `multipathPathState` | Stato per-path (conn, alive, counters) | ~25 | ✅ |
+| `newMultipathConn` | Init N path, dial QUIC, reliable/datagram | ~115 | ✅ |
+| `SendDatagram` | Invio con retry + dataplane class routing | ~30 | ✅ |
+| `sendDuplicate` | Invio su N path per classi duplicate | ~40 | ✅ |
+| `selectBestPath` | Scheduler: priority/failover/balanced | ~70 | ✅ |
+| `recvLoop` | Ricezione per-path → channel unificato | ~25 | ✅ |
+| `reconnectLoop` | Redial con backoff su path down | ~80 | ✅ |
+| `telemetryLoop` | Log periodico metriche path+class | ~50 | ✅ |
+| `closeAll` | Shutdown graceful | ~15 | ✅ |
+| Dataplane classifier | Routing pacchetti per classe/protocol/DSCP | ~200 | ✅ |
+
+### Gap da risolvere
+
+1. **Server-side routing**: il server multi-conn (`connectionTable`) mappa un peer IP
+   a **una** connessione. Con multipath, lo stesso client arriva da N WAN diverse →
+   N connessioni con lo stesso peer TUN IP. Il server deve:
+   - Accettare N conn dallo stesso peer IP (registration multipla)
+   - Inviare pacchetti di ritorno su **tutte** le connessioni attive per quel peer
+     (o solo la "migliore" / round-robin)
+   - Gestire de-duplicazione per pacchetti ricevuti identici (se client usa duplication)
+
+2. **Peer registration**: il client multipath invia la registration (`TUN_IP`) su
+   ogni path → il server deve aggregarle in un gruppo, non sovrascrivere
+
+3. **Config YAML**: definire formato per `multipath_paths` con N WAN,
+   `multipath_policy`, e `dataplane` config per classe
+
+4. **Test su infra reale**: deploy client multipath su WAN5+WAN6 → stesso server,
+   verificare bonding/failover/duplication
+
+### Steps implementativi
+
+#### Step 4.1 — Server multi-path aware
+Adattare `connectionTable` per supportare N connessioni dallo stesso peer:
+- `connEntry` diventa un gruppo: `[]quic.Connection` per peer IP
+- TUN→QUIC: round-robin o best-path tra le connessioni del gruppo
+- De-duplicazione opzionale in ricezione (sequence number o hash)
+
+#### Step 4.2 — Test `multipathConn` su infra reale
+Creare config multipath client: una TUN, 2 path (WAN5 + WAN6) → stesso server.
+Verificare:
+- Connessione su entrambi i path
+- Failover: spegnere WAN5, traffico migra su WAN6
+- Recovery: riaccendere WAN5, path recuperato
+- Telemetria: counters per-path corretti
+
+#### Step 4.3 — Bonding test
+Verificare aggregazione bandwidth:
+- iperf3 via TUN multipath, throughput > singola WAN
+- Policy `balanced` con weight proporzionali alla banda WAN
+
+#### Step 4.4 — Duplication test
+Verificare zero-loss per classi duplicate:
+- Config: classe `critical` con `duplicate: true, duplicate_copies: 2`
+- netem loss 30% su WAN5 → pacchetti duplicati su WAN6 → 0% loss end-to-end
+
+#### Step 4.5 — Benchmark comparativo
+Confronto metriche:
+- Single-path vs Bonding: throughput aggregato
+- Single-path vs Failover: tempo di recovery
+- Single-path vs Duplication: loss rate sotto netem
+
+### Done criteria Fase 4
+- [ ] Server supporta N connessioni dallo stesso peer (multi-path group)
+- [ ] Client multipath connesso su 2+ WAN verso stesso server
+- [ ] Failover funzionante (< 2s recovery time)
+- [ ] Bonding throughput > singola WAN
+- [ ] Duplication zero-loss sotto 30% netem loss
+- [ ] Benchmark documentato con metriche
 
 ---
 
