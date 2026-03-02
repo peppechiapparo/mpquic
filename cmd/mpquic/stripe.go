@@ -685,17 +685,19 @@ func (scc *stripeClientConn) decodeAndDeliver(groupSeq uint32, grp *fecGroup) {
 		return
 	}
 
-	// Need FEC reconstruction — pad shards to maxLen
+	// Need FEC reconstruction — snapshot and pad shards under lock.
+	shards := make([][]byte, len(grp.shards))
 	for i := range grp.shards {
-		if grp.shards[i] != nil && len(grp.shards[i]) < grp.maxLen {
+		if grp.shards[i] != nil {
 			padded := make([]byte, grp.maxLen)
 			copy(padded, grp.shards[i])
-			grp.shards[i] = padded
+			shards[i] = padded
 		}
 	}
+	delete(scc.rxGroups, groupSeq)
 	scc.rxMu.Unlock()
 
-	if err := scc.enc.Reconstruct(grp.shards); err != nil {
+	if err := scc.enc.Reconstruct(shards); err != nil {
 		scc.logger.Debugf("stripe: FEC reconstruct failed group=%d: %v", groupSeq, err)
 		return
 	}
@@ -703,8 +705,8 @@ func (scc *stripeClientConn) decodeAndDeliver(groupSeq uint32, grp *fecGroup) {
 	atomic.AddUint64(&scc.fecRecov, 1)
 
 	scc.rxMu.Lock()
+	grp.shards = shards
 	scc.deliverGroupData(grp)
-	delete(scc.rxGroups, groupSeq)
 	scc.rxMu.Unlock()
 }
 
@@ -1333,24 +1335,26 @@ func (ss *stripeServer) decodeAndDeliver(sess *stripeSession, groupSeq uint32, g
 		return
 	}
 
-	// FEC reconstruction needed
+	// FEC reconstruction needed — snapshot and pad shards under lock.
+	shards := make([][]byte, len(grp.shards))
 	for i := range grp.shards {
-		if grp.shards[i] != nil && len(grp.shards[i]) < grp.maxLen {
+		if grp.shards[i] != nil {
 			padded := make([]byte, grp.maxLen)
 			copy(padded, grp.shards[i])
-			grp.shards[i] = padded
+			shards[i] = padded
 		}
 	}
+	delete(sess.rxGroups, groupSeq)
 	sess.rxMu.Unlock()
 
-	if err := sess.enc.Reconstruct(grp.shards); err != nil {
+	if err := sess.enc.Reconstruct(shards); err != nil {
 		ss.logger.Debugf("stripe server: FEC reconstruct failed group=%d: %v", groupSeq, err)
 		return
 	}
 
 	sess.rxMu.Lock()
+	grp.shards = shards
 	ss.deliverGroupToTUN(sess, grp)
-	delete(sess.rxGroups, groupSeq)
 	sess.rxMu.Unlock()
 }
 
