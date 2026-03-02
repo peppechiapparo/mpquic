@@ -1028,6 +1028,8 @@ type stripeSession struct {
 	totalPipes int
 	registered int
 	authEnabled bool
+	authKey     []byte
+	rekeySecs   uint32
 
 	// FEC
 	dataK   int
@@ -1172,6 +1174,7 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 			DataLen:    binary.BigEndian.Uint16(sess.txGroup[i][:2]),
 		})
 		copy(pkt[stripeHdrLen:], shard)
+		pkt = stripeAppendAuth(pkt, sess.authKey, sess.sessionID, sess.rekeySecs)
 
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		_, _ = sdc.conn.WriteToUDP(pkt, activePipes[pipeIdx])
@@ -1191,6 +1194,7 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 			DataLen:    0,
 		})
 		copy(pkt[stripeHdrLen:], shard)
+		pkt = stripeAppendAuth(pkt, sess.authKey, sess.sessionID, sess.rekeySecs)
 
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		_, _ = sdc.conn.WriteToUDP(pkt, activePipes[pipeIdx])
@@ -1388,6 +1392,8 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			pipes:        make([]*net.UDPAddr, totalPipes),
 			totalPipes:   totalPipes,
 			authEnabled:  ss.authEnabled,
+			authKey:      ss.authKey,
+			rekeySecs:    ss.rekeySecs,
 			dataK:        ss.dataK,
 			parityM:      ss.parityM,
 			enc:          enc,
