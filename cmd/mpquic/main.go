@@ -260,15 +260,17 @@ type pathConn struct {
 	sendDone     chan struct{}  // closed when the drain goroutine exits
 	dispatchHit  uint64        // atomic: packets successfully queued via dispatch
 	dispatchDrop uint64        // atomic: packets dropped (sendCh full)
+	fecCapable   bool          // true for stripe paths (FEC handles reordering)
 }
 
 // connGroup holds all QUIC connections from the same peer (same TUN IP).
 // For single-path clients this has exactly one entry; for multi-path clients
 // it has one entry per WAN path.
 type connGroup struct {
-	peerIP netip.Addr
-	paths  []*pathConn
-	rr     int // round-robin index for send distribution
+	peerIP     netip.Addr
+	paths      []*pathConn
+	rr         int  // round-robin index for send distribution
+	allFEC     bool // cached: true when all paths are fecCapable
 }
 
 // flowHash extracts a lightweight hash from an IP packet's 5-tuple
@@ -332,7 +334,7 @@ func (ct *connectionTable) register(peerIP netip.Addr, quicConn quic.Connection,
 
 	grp, exists := ct.byIP[peerIP]
 	if !exists {
-		ct.byIP[peerIP] = &connGroup{peerIP: peerIP, paths: []*pathConn{pc}}
+		ct.byIP[peerIP] = &connGroup{peerIP: peerIP, paths: []*pathConn{pc}, allFEC: false}
 		return
 	}
 
@@ -345,12 +347,14 @@ func (ct *connectionTable) register(peerIP netip.Addr, quicConn quic.Connection,
 				_ = old.quicConn.CloseWithError(0, "superseded")
 			}
 			grp.paths[i] = pc
+			ct.refreshAllFEC(grp)
 			return
 		}
 	}
 
 	// New path from a different remote address → append (multi-path)
 	grp.paths = append(grp.paths, pc)
+	ct.refreshAllFEC(grp)
 }
 
 // registerStripe adds a stripe transport connection to the group for peerIP.
@@ -367,12 +371,13 @@ func (ct *connectionTable) registerStripe(peerIP netip.Addr, remoteID string, dc
 		sendCh:     make(chan []byte, 256),
 		sendDone:   make(chan struct{}),
 		lastRecv:   time.Now(), // mark as active on registration
+		fecCapable: true,       // stripe paths use FEC — reorder-safe
 	}
 	go pc.drainSendCh()
 
 	grp, exists := ct.byIP[peerIP]
 	if !exists {
-		ct.byIP[peerIP] = &connGroup{peerIP: peerIP, paths: []*pathConn{pc}}
+		ct.byIP[peerIP] = &connGroup{peerIP: peerIP, paths: []*pathConn{pc}, allFEC: true}
 		return
 	}
 
@@ -384,10 +389,23 @@ func (ct *connectionTable) registerStripe(peerIP netip.Addr, remoteID string, dc
 				_ = old.quicConn.CloseWithError(0, "superseded")
 			}
 			grp.paths[i] = pc
+			ct.refreshAllFEC(grp)
 			return
 		}
 	}
 	grp.paths = append(grp.paths, pc)
+	ct.refreshAllFEC(grp)
+}
+
+// refreshAllFEC recomputes grp.allFEC. Must be called with ct.mu held.
+func (ct *connectionTable) refreshAllFEC(grp *connGroup) {
+	grp.allFEC = true
+	for _, pc := range grp.paths {
+		if !pc.fecCapable {
+			grp.allFEC = false
+			return
+		}
+	}
 }
 
 // drainSendCh is the per-path goroutine that reads from sendCh and writes
@@ -422,6 +440,7 @@ func (ct *connectionTable) unregisterConn(peerIP netip.Addr, remoteAddr string) 
 		if pc.remoteAddr == remoteAddr {
 			pc.stopSendCh()
 			grp.paths = append(grp.paths[:i], grp.paths[i+1:]...)
+			ct.refreshAllFEC(grp)
 			break
 		}
 	}
@@ -559,9 +578,13 @@ func (ct *connectionTable) lookup(dstIP netip.Addr) (datagramConn, bool) {
 // If the send buffer is full, the packet is dropped (backpressure).
 // Returns true if the packet was queued, false if no path or buffer full.
 //
-// For multi-path groups, uses flow-based hashing on the IP 5-tuple so that
-// packets from the same TCP/UDP connection always traverse the same path,
-// preventing reordering that would cripple TCP throughput.
+// Path selection strategy:
+//   - FEC-capable groups (stripe): pure round-robin across active paths.
+//     FEC reassembly at the receiver handles any reordering, so per-flow
+//     affinity is unnecessary and would cause load imbalance.
+//   - QUIC groups: flow-hash on the IP 5-tuple so that packets from the
+//     same TCP/UDP connection always traverse the same path, preventing
+//     reordering that would cripple TCP throughput.
 func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
@@ -601,15 +624,24 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 		}
 	}
 
-	// Flow-based hash: same 5-tuple → same path (prevents TCP reordering).
-	// Falls back to round-robin for non-TCP/UDP or unparseable packets.
 	var idx int
-	if h, ok := flowHash(pkt); ok {
-		idx = active[int(h)%len(active)]
-	} else {
+	if grp.allFEC {
+		// FEC-capable paths: round-robin. The receiver's FEC decoder
+		// reassembles regardless of arrival order, so we maximise
+		// aggregate bandwidth by spreading evenly.
 		start := grp.rr % len(active)
 		idx = active[start]
 		grp.rr = (start + 1) % len(active)
+	} else {
+		// QUIC paths: flow-hash for TCP reordering avoidance.
+		// Falls back to round-robin for non-TCP/UDP or unparseable packets.
+		if h, ok := flowHash(pkt); ok {
+			idx = active[int(h)%len(active)]
+		} else {
+			start := grp.rr % len(active)
+			idx = active[start]
+			grp.rr = (start + 1) % len(active)
+		}
 	}
 
 	var dispatched bool
