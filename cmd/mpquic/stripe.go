@@ -445,6 +445,10 @@ func (scc *stripeClientConn) Close() error {
 
 // sendFECGroupLocked encodes the accumulated data shards with FEC parity
 // and sends all shards round-robin across pipes. Caller must hold txMu.
+//
+// Hot path — optimised to minimise heap allocations:
+//   - data shards alias txGroup entries when all are the same length (zero-copy);
+//   - stripeEncryptShard builds the wire packet in 1 allocation (header+crypto+payload).
 func (scc *stripeClientConn) sendFECGroupLocked() {
 	K := len(scc.txGroup)
 	if K == 0 {
@@ -453,7 +457,7 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 
 	groupSeq := scc.txGrpSeq
 
-	// Find max shard size for FEC alignment
+	// Find max shard size for FEC alignment.
 	maxLen := 0
 	for _, s := range scc.txGroup {
 		if len(s) > maxLen {
@@ -461,15 +465,30 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 		}
 	}
 
-	// Create padded data shards
+	// Build padded data shards. When all shards are the same length (typical
+	// for MTU-sized IP packets) we alias the txGroup entries directly, saving
+	// K heap allocations.
 	shards := make([][]byte, K)
-	for i, s := range scc.txGroup {
-		padded := make([]byte, maxLen)
-		copy(padded, s)
-		shards[i] = padded
+	allSameLen := true
+	for _, s := range scc.txGroup {
+		if len(s) != maxLen {
+			allSameLen = false
+			break
+		}
+	}
+	if allSameLen {
+		for i, s := range scc.txGroup {
+			shards[i] = s
+		}
+	} else {
+		for i, s := range scc.txGroup {
+			padded := make([]byte, maxLen)
+			copy(padded, s)
+			shards[i] = padded
+		}
 	}
 
-	// Compute FEC parity for full groups only
+	// Compute FEC parity for full groups only.
 	var parityShards [][]byte
 	if scc.enc != nil && K == scc.dataK {
 		total := K + scc.parityM
@@ -485,11 +504,10 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 		}
 	}
 
-	// Send data shards round-robin across pipes
+	// Send data shards round-robin across pipes (1 alloc per shard).
 	groupDataN := uint8(K)
 	for i, shard := range shards {
-		pkt := make([]byte, stripeHdrLen+len(shard))
-		encodeStripeHdr(pkt, &stripeHdr{
+		wirePkt := stripeEncryptShard(scc.txCipher, &stripeHdr{
 			Magic:      stripeMagic,
 			Version:    stripeVersion,
 			Type:       stripeDATA,
@@ -498,15 +516,15 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 			ShardIdx:   uint8(i),
 			GroupDataN: groupDataN,
 			DataLen:    binary.BigEndian.Uint16(scc.txGroup[i][:2]),
-		})
-		copy(pkt[stripeHdrLen:], shard)
-		scc.sendToPipe(pkt)
+		}, shard)
+		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
+		pipe := scc.pipes[int(idx)%len(scc.pipes)]
+		_, _ = pipe.WriteToUDP(wirePkt, scc.serverAddr)
 	}
 
-	// Send parity shards
+	// Send parity shards (1 alloc per shard).
 	for i, shard := range parityShards {
-		pkt := make([]byte, stripeHdrLen+len(shard))
-		encodeStripeHdr(pkt, &stripeHdr{
+		wirePkt := stripeEncryptShard(scc.txCipher, &stripeHdr{
 			Magic:      stripeMagic,
 			Version:    stripeVersion,
 			Type:       stripePARITY,
@@ -515,9 +533,10 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 			ShardIdx:   uint8(K + i),
 			GroupDataN: groupDataN,
 			DataLen:    0,
-		})
-		copy(pkt[stripeHdrLen:], shard)
-		scc.sendToPipe(pkt)
+		}, shard)
+		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
+		pipe := scc.pipes[int(idx)%len(scc.pipes)]
+		_, _ = pipe.WriteToUDP(wirePkt, scc.serverAddr)
 	}
 
 	scc.txGroup = scc.txGroup[:0]
@@ -544,6 +563,9 @@ func (scc *stripeClientConn) resetFlushTimer() {
 	}
 }
 
+// sendToPipe encrypts and sends a pre-built stripe packet to a pipe (round-robin).
+// Used only by low-frequency paths (keepalive, register); the FEC TX hot path
+// calls stripeEncryptShard directly to avoid the intermediate cleartext buffer.
 func (scc *stripeClientConn) sendToPipe(pkt []byte) {
 	idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 	pipe := scc.pipes[int(idx)%len(scc.pipes)]
@@ -871,6 +893,9 @@ func (sdc *stripeServerDC) ReceiveDatagram(ctx context.Context) ([]byte, error) 
 }
 
 // sendFECGroupLocked encodes + sends accumulated shards. Caller must hold sess.txMu.
+//
+// Hot path — mirrors client-side optimisations: zero-copy shard aliasing + single-alloc
+// stripeEncryptShard to minimise per-packet heap churn.
 func (sdc *stripeServerDC) sendFECGroupLocked() {
 	sess := sdc.session
 	K := len(sess.txGroup)
@@ -892,7 +917,7 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 
 	groupSeq := sess.txGrpSeq
 
-	// Find max shard size
+	// Find max shard size.
 	maxLen := 0
 	for _, s := range sess.txGroup {
 		if len(s) > maxLen {
@@ -900,15 +925,28 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 		}
 	}
 
-	// Pad data shards
+	// Build data shards. Zero-copy alias when all are the same length.
 	shards := make([][]byte, K)
-	for i, s := range sess.txGroup {
-		padded := make([]byte, maxLen)
-		copy(padded, s)
-		shards[i] = padded
+	allSameLen := true
+	for _, s := range sess.txGroup {
+		if len(s) != maxLen {
+			allSameLen = false
+			break
+		}
+	}
+	if allSameLen {
+		for i, s := range sess.txGroup {
+			shards[i] = s
+		}
+	} else {
+		for i, s := range sess.txGroup {
+			padded := make([]byte, maxLen)
+			copy(padded, s)
+			shards[i] = padded
+		}
 	}
 
-	// Compute FEC parity for full groups
+	// Compute FEC parity for full groups.
 	var parityShards [][]byte
 	if sess.enc != nil && K == sess.dataK {
 		total := K + sess.parityM
@@ -926,10 +964,9 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 
 	groupDataN := uint8(K)
 
-	// Send data shards round-robin across client pipes
+	// Send data shards round-robin across client pipes (1 alloc per shard).
 	for i, shard := range shards {
-		pkt := make([]byte, stripeHdrLen+len(shard))
-		encodeStripeHdr(pkt, &stripeHdr{
+		wirePkt := stripeEncryptShard(sess.txCipher, &stripeHdr{
 			Magic:      stripeMagic,
 			Version:    stripeVersion,
 			Type:       stripeDATA,
@@ -938,18 +975,15 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 			ShardIdx:   uint8(i),
 			GroupDataN: groupDataN,
 			DataLen:    binary.BigEndian.Uint16(sess.txGroup[i][:2]),
-		})
-		copy(pkt[stripeHdrLen:], shard)
-		pkt = stripeEncrypt(sess.txCipher, pkt)
+		}, shard)
 
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
-		_, _ = sdc.conn.WriteToUDP(pkt, activePipes[pipeIdx])
+		_, _ = sdc.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
 	}
 
-	// Send parity shards
+	// Send parity shards (1 alloc per shard).
 	for i, shard := range parityShards {
-		pkt := make([]byte, stripeHdrLen+len(shard))
-		encodeStripeHdr(pkt, &stripeHdr{
+		wirePkt := stripeEncryptShard(sess.txCipher, &stripeHdr{
 			Magic:      stripeMagic,
 			Version:    stripeVersion,
 			Type:       stripePARITY,
@@ -958,12 +992,10 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 			ShardIdx:   uint8(K + i),
 			GroupDataN: groupDataN,
 			DataLen:    0,
-		})
-		copy(pkt[stripeHdrLen:], shard)
-		pkt = stripeEncrypt(sess.txCipher, pkt)
+		}, shard)
 
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
-		_, _ = sdc.conn.WriteToUDP(pkt, activePipes[pipeIdx])
+		_, _ = sdc.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
 	}
 
 	sess.txGroup = sess.txGroup[:0]

@@ -115,11 +115,13 @@ func newStripeCipher(key [32]byte) (*stripeCipher, error) {
 
 // ── Encrypt / Decrypt ─────────────────────────────────────────────────────
 
-// stripeEncrypt encrypts a stripe packet.
+// stripeEncrypt encrypts a stripe packet in-place-friendly fashion.
 // The header stays in cleartext as AAD; the payload is AES-GCM encrypted.
 // Output wire format: [hdr 16B][seq 8B][ciphertext + 16B GCM tag]
 //
 // If sc is nil the packet is returned unmodified (no encryption configured).
+//
+// Hot path — optimised for 1 heap allocation per call.
 func stripeEncrypt(sc *stripeCipher, pkt []byte) []byte {
 	if sc == nil || len(pkt) < stripeHdrLen {
 		return pkt
@@ -134,42 +136,78 @@ func stripeEncrypt(sc *stripeCipher, pkt []byte) []byte {
 	var nonce [12]byte
 	binary.BigEndian.PutUint64(nonce[4:], seq)
 
-	// AAD = [header 16B][seq 8B]  — authenticated but not encrypted.
-	aad := make([]byte, stripeHdrLen+stripeCryptoSeqLen)
-	copy(aad, hdr)
+	// AAD on stack — no heap allocation.
+	var aad [stripeHdrLen + stripeCryptoSeqLen]byte
+	copy(aad[:stripeHdrLen], hdr)
 	binary.BigEndian.PutUint64(aad[stripeHdrLen:], seq)
 
-	ciphertext := sc.aead.Seal(nil, nonce[:], payload, aad)
+	// Single allocation: [hdr 16][seq 8][ciphertext+tag].
+	outLen := stripeHdrLen + stripeCryptoSeqLen + len(payload) + sc.aead.Overhead()
+	out := make([]byte, stripeHdrLen+stripeCryptoSeqLen, outLen)
+	copy(out, aad[:])
+	// Seal appends ciphertext+tag after header+seq.
+	out = sc.aead.Seal(out, nonce[:], payload, aad[:])
+	return out
+}
 
-	out := make([]byte, len(aad)+len(ciphertext))
-	copy(out, aad)
-	copy(out[len(aad):], ciphertext)
+// stripeEncryptShard builds a stripe packet from header fields + shard payload
+// and encrypts it in a single allocation. Used by the FEC TX path to avoid the
+// intermediate [hdr][payload] buffer that stripeEncrypt would then re-copy.
+//
+// Returns the encrypted wire packet ready for sendto(). If sc is nil, returns
+// the cleartext packet with 0 extra allocations beyond the packet itself.
+func stripeEncryptShard(sc *stripeCipher, hdr *stripeHdr, shard []byte) []byte {
+	if sc == nil {
+		pkt := make([]byte, stripeHdrLen+len(shard))
+		encodeStripeHdr(pkt, hdr)
+		copy(pkt[stripeHdrLen:], shard)
+		return pkt
+	}
+
+	seq := atomic.AddUint64(&sc.txNonce, 1) - 1
+
+	var nonce [12]byte
+	binary.BigEndian.PutUint64(nonce[4:], seq)
+
+	// Build AAD on the stack: [encoded_header 16][seq 8].
+	var aad [stripeHdrLen + stripeCryptoSeqLen]byte
+	encodeStripeHdr(aad[:stripeHdrLen], hdr)
+	binary.BigEndian.PutUint64(aad[stripeHdrLen:], seq)
+
+	// Single allocation for the entire wire packet.
+	outLen := stripeHdrLen + stripeCryptoSeqLen + len(shard) + sc.aead.Overhead()
+	out := make([]byte, stripeHdrLen+stripeCryptoSeqLen, outLen)
+	copy(out, aad[:])
+	out = sc.aead.Seal(out, nonce[:], shard, aad[:])
 	return out
 }
 
 // stripeDecryptPkt decrypts an AES-GCM encrypted stripe packet.
 // Returns the reconstructed cleartext [hdr][payload] on success.
+//
+// Hot path — optimised for 1 heap allocation per call.
 func stripeDecryptPkt(aead cipher.AEAD, pkt []byte) ([]byte, bool) {
 	minLen := stripeHdrLen + stripeCryptoSeqLen + aead.Overhead()
 	if len(pkt) < minLen {
 		return nil, false
 	}
 
-	aad := pkt[:stripeHdrLen+stripeCryptoSeqLen]
-	seq := binary.BigEndian.Uint64(pkt[stripeHdrLen : stripeHdrLen+stripeCryptoSeqLen])
-	ciphertext := pkt[stripeHdrLen+stripeCryptoSeqLen:]
+	aadEnd := stripeHdrLen + stripeCryptoSeqLen
+	seq := binary.BigEndian.Uint64(pkt[stripeHdrLen:aadEnd])
+	ciphertext := pkt[aadEnd:]
 
 	var nonce [12]byte
 	binary.BigEndian.PutUint64(nonce[4:], seq)
 
-	plaintext, err := aead.Open(nil, nonce[:], ciphertext, aad)
+	// Single allocation: [hdr 16][plaintext].
+	ptLen := len(ciphertext) - aead.Overhead()
+	out := make([]byte, stripeHdrLen, stripeHdrLen+ptLen)
+	copy(out, pkt[:stripeHdrLen])
+	var err error
+	out, err = aead.Open(out, nonce[:], ciphertext, pkt[:aadEnd])
 	if err != nil {
 		return nil, false
 	}
-
-	out := make([]byte, stripeHdrLen+len(plaintext))
-	copy(out[:stripeHdrLen], pkt[:stripeHdrLen])
-	copy(out[stripeHdrLen:], plaintext)
 	return out, true
 }
 
