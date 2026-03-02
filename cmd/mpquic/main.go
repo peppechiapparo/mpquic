@@ -2244,6 +2244,14 @@ func (m *multipathConn) logTelemetrySnapshot() {
 			formatTime(p.lastDown),
 		)
 
+		// Log stripe security metrics if available
+		if p.stripeConn != nil {
+			af, rd := p.stripeConn.SecurityStats()
+			if af > 0 || rd > 0 {
+				m.logger.Infof("stripe security name=%s auth_fail=%d replay_drop=%d", p.cfg.Name, af, rd)
+			}
+		}
+
 		// Aggregate by base path (for multi-pipe summary)
 		base := p.cfg.BasePath
 		if base == "" {

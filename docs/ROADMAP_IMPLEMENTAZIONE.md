@@ -8,6 +8,44 @@
   - rimosso `dispatchCounter` usato solo per sampling debug
 - Nessun impatto funzionale previsto; modifica di sola pulizia osservabilità
 
+### Nota debug regressione throughput (2026-03-02)
+- Obiettivo immediato: identificare la root-cause del degrado prestazionale osservato
+  dopo le modifiche sicurezza stripe (MAC/rekey) e migliorare il bilanciamento
+  multi-canale lato server/client.
+- Vincolo operativo: test one-by-one, una variabile per volta, con raccolta metrica
+  client + server sincronizzata.
+
+#### Piano operativo (nuova traccia)
+1. Congelare baseline riproducibile (scenario fisso WAN, durata test, parallelismo)
+2. Eseguire matrice A/B `stripe_auth_key` / `stripe_rekey_seconds`
+3. Profilare decode FEC + scheduler path-aware lato runtime
+4. Analizzare contention tra path lato server (dispatch, reorder, recovery)
+5. Ottimizzare instradamento shard/path e policy di selezione
+6. Valutare FEC alternativi a Reed-Solomon con benchmark comparativo
+7. Validare fix su scenario reale e promuovere profilo produzione
+
+#### Fase 1 — Matrice A/B sicurezza Stripe (IN CORSO)
+
+**Scopo**: verificare in modo misurabile se MAC/rekey introducono regressione
+di throughput/stabilità rispetto al baseline storico.
+
+**Test case (stesse condizioni di rete e iperf):**
+- `T1`: `auth=off`, `rekey=off` (baseline riferimento)
+- `T2`: `auth=on`, `rekey=off` (costo MAC puro)
+- `T3`: `auth=on`, `rekey=600s` (config target attuale)
+- `T4`: `auth=on`, `rekey=30s` (stress rekey)
+
+**Metriche obbligatorie per ogni test:**
+- Throughput iperf3 (`-R` e upload) + retry/retransmission
+- Telemetria path/class (`tx_pkts`, `rx_pkts`, `tx_err`, `rx_err`, `fails`)
+- Contatori sicurezza (`auth_fail`, `replay_drop`) se disponibili
+- Eventi sessione (`path recovered/down`, reconnect, timeout)
+
+**Criterio decisionale Fase 1:**
+- Se `T2/T3/T4` degradano nettamente vs `T1`, priorità a ottimizzazione path
+  sicurezza (MAC verify/rekey).
+- Se degrado è presente già in `T1`, priorità a scheduler/dispatch/FEC contention.
+
 ---
 
 ## Concetti chiave: Multi-link vs Multi-tunnel vs Multi-path

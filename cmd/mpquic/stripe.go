@@ -207,9 +207,16 @@ type stripeClientConn struct {
 	authKey     []byte
 	rxReplay    *replayWindow
 	rekeySecs   uint32
+	txKeyCache  *epochKeyCache // cached epoch key for TX (sender)
+	rxKeyCache  *epochKeyCache // cached epoch key for RX (verifier)
 
 	securityAuthFail   uint64
 	securityReplayDrop uint64
+}
+
+// SecurityStats returns the auth failure and replay drop counters.
+func (scc *stripeClientConn) SecurityStats() (authFail, replayDrop uint64) {
+	return atomic.LoadUint64(&scc.securityAuthFail), atomic.LoadUint64(&scc.securityReplayDrop)
 }
 
 // replayWindow tracks received sequence numbers with a sliding bitmap.
@@ -307,6 +314,32 @@ func stripeReplaySeq(h stripeHdr) uint64 {
 
 func isStripeReplayProtectedPacket(h stripeHdr) bool {
 	return h.Type == stripeDATA || h.Type == stripePARITY
+}
+
+// epochKeyCache caches the derived HMAC epoch key to avoid recomputing
+// stripeDeriveEpochKey on every packet. Epoch changes only once per rekeySecs
+// (default 600s), so caching eliminates ~50% of per-packet HMAC overhead.
+type epochKeyCache struct {
+	mu      sync.Mutex
+	epoch   uint32
+	key     []byte
+	master  []byte
+	session uint32
+}
+
+func newEpochKeyCache(master []byte, session uint32) *epochKeyCache {
+	return &epochKeyCache{master: master, session: session}
+}
+
+func (c *epochKeyCache) getKey(epoch uint32) []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.key != nil && c.epoch == epoch {
+		return c.key
+	}
+	c.epoch = epoch
+	c.key = stripeDeriveEpochKey(c.master, c.session, epoch)
+	return c.key
 }
 
 func stripeCurrentEpoch(now time.Time, rekeySecs uint32) uint32 {
@@ -423,6 +456,71 @@ func stripeVerifyAndStripAuth(pkt, master []byte, sessionID uint32, rekeySecs ui
 	return body, true
 }
 
+// stripeAppendAuthCached is like stripeAppendAuth but reuses a cached epoch key
+// to avoid calling stripeDeriveEpochKey on every packet.
+func stripeAppendAuthCached(pkt []byte, cache *epochKeyCache, rekeySecs uint32) []byte {
+	if cache == nil || len(cache.master) == 0 {
+		return pkt
+	}
+	epoch := stripeCurrentEpoch(time.Now(), rekeySecs)
+	epochKey := cache.getKey(epoch)
+	mac := hmac.New(sha256.New, epochKey)
+	_, _ = mac.Write(pkt)
+	var epochBuf [4]byte
+	binary.BigEndian.PutUint32(epochBuf[:], epoch)
+	_, _ = mac.Write(epochBuf[:])
+	tag := mac.Sum(nil)
+	out := make([]byte, len(pkt)+stripeAuthTrailerLen)
+	copy(out, pkt)
+	copy(out[len(pkt):len(pkt)+stripeAuthEpochLen], epochBuf[:])
+	copy(out[len(pkt)+stripeAuthEpochLen:], tag[:stripeAuthTagLen])
+	return out
+}
+
+// stripeVerifyAuthCached is like stripeVerifyAndStripAuth but uses a cached key.
+func stripeVerifyAuthCached(pkt []byte, cache *epochKeyCache, rekeySecs uint32) ([]byte, bool) {
+	if cache == nil || len(cache.master) == 0 {
+		return pkt, true
+	}
+	if len(pkt) < stripeHdrLen+stripeAuthTrailerLen {
+		return nil, false
+	}
+	bodyLen := len(pkt) - stripeAuthTrailerLen
+	body := pkt[:bodyLen]
+	receivedEpoch := binary.BigEndian.Uint32(pkt[bodyLen : bodyLen+stripeAuthEpochLen])
+	receivedTag := pkt[bodyLen+stripeAuthEpochLen:]
+
+	epochKey := cache.getKey(receivedEpoch)
+	mac := hmac.New(sha256.New, epochKey)
+	_, _ = mac.Write(body)
+	var epochBuf [4]byte
+	binary.BigEndian.PutUint32(epochBuf[:], receivedEpoch)
+	_, _ = mac.Write(epochBuf[:])
+	expected := mac.Sum(nil)
+	if hmac.Equal(receivedTag, expected[:stripeAuthTagLen]) {
+		return body, true
+	}
+
+	// Fallback: check adjacent epochs for clock skew
+	currentEpoch := stripeCurrentEpoch(time.Now(), rekeySecs)
+	for delta := int64(-stripeEpochSkew); delta <= int64(stripeEpochSkew); delta++ {
+		e := int64(currentEpoch) + delta
+		if e < 0 || e > math.MaxUint32 || uint32(e) == receivedEpoch {
+			continue
+		}
+		ek := stripeDeriveEpochKey(cache.master, cache.session, uint32(e))
+		m := hmac.New(sha256.New, ek)
+		_, _ = m.Write(body)
+		binary.BigEndian.PutUint32(epochBuf[:], receivedEpoch)
+		_, _ = m.Write(epochBuf[:])
+		exp := m.Sum(nil)
+		if hmac.Equal(receivedTag, exp[:stripeAuthTagLen]) {
+			return body, true
+		}
+	}
+	return nil, false
+}
+
 // newStripeClientConn creates a stripe transport for a single multipath path.
 // It opens N UDP sockets on the specified interface, all pointed at the server's
 // stripe port. Each socket = one Starlink session = one ~80 Mbps allocation.
@@ -529,6 +627,8 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		authKey:     authKey,
 		rxReplay:    newReplayWindow(stripeReplayWindow),
 		rekeySecs:   rekeySecs,
+		txKeyCache:  newEpochKeyCache(authKey, sessionID),
+		rxKeyCache:  newEpochKeyCache(authKey, sessionID),
 	}
 	atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
 
@@ -573,7 +673,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 				DataLen: uint16(len(regPayload)),
 			})
 			copy(pkt[stripeHdrLen:], regPayload)
-			pkt = stripeAppendAuth(pkt, scc.authKey, scc.sessionID, scc.rekeySecs)
+			pkt = stripeAppendAuthCached(pkt, scc.txKeyCache, scc.rekeySecs)
 
 			if _, err := pipe.WriteToUDP(pkt, serverAddr); err != nil {
 				logger.Errorf("stripe: register pipe %d attempt %d failed: %v", i, retry, err)
@@ -777,7 +877,7 @@ func (scc *stripeClientConn) resetFlushTimer() {
 func (scc *stripeClientConn) sendToPipe(pkt []byte) {
 	idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 	pipe := scc.pipes[int(idx)%len(scc.pipes)]
-	pkt = stripeAppendAuth(pkt, scc.authKey, scc.sessionID, scc.rekeySecs)
+	pkt = stripeAppendAuthCached(pkt, scc.txKeyCache, scc.rekeySecs)
 	_, _ = pipe.WriteToUDP(pkt, scc.serverAddr)
 }
 
@@ -816,9 +916,12 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 		raw := buf[:n]
 		if scc.authEnabled {
 			var authOK bool
-			raw, authOK = stripeVerifyAndStripAuth(raw, scc.authKey, scc.sessionID, scc.rekeySecs)
+			raw, authOK = stripeVerifyAuthCached(raw, scc.rxKeyCache, scc.rekeySecs)
 			if !authOK {
-				atomic.AddUint64(&scc.securityAuthFail, 1)
+				count := atomic.AddUint64(&scc.securityAuthFail, 1)
+				if count <= 3 || count%1000 == 0 {
+					scc.logger.Errorf("stripe: pipe %d auth verify FAILED (total=%d pktLen=%d)", pipeIdx, count, n)
+				}
 				continue
 			}
 		}
@@ -992,7 +1095,7 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 					Type:    stripeKEEPALIVE,
 					Session: scc.sessionID,
 				})
-				pkt = stripeAppendAuth(pkt, scc.authKey, scc.sessionID, scc.rekeySecs)
+				pkt = stripeAppendAuthCached(pkt, scc.txKeyCache, scc.rekeySecs)
 				_, _ = pipe.WriteToUDP(pkt, scc.serverAddr)
 			}
 		}
@@ -1030,6 +1133,8 @@ type stripeSession struct {
 	authEnabled bool
 	authKey     []byte
 	rekeySecs   uint32
+	txKeyCache  *epochKeyCache
+	rxKeyCache  *epochKeyCache
 
 	// FEC
 	dataK   int
@@ -1174,7 +1279,7 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 			DataLen:    binary.BigEndian.Uint16(sess.txGroup[i][:2]),
 		})
 		copy(pkt[stripeHdrLen:], shard)
-		pkt = stripeAppendAuth(pkt, sess.authKey, sess.sessionID, sess.rekeySecs)
+		pkt = stripeAppendAuthCached(pkt, sess.txKeyCache, sess.rekeySecs)
 
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		_, _ = sdc.conn.WriteToUDP(pkt, activePipes[pipeIdx])
@@ -1194,7 +1299,7 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 			DataLen:    0,
 		})
 		copy(pkt[stripeHdrLen:], shard)
-		pkt = stripeAppendAuth(pkt, sess.authKey, sess.sessionID, sess.rekeySecs)
+		pkt = stripeAppendAuthCached(pkt, sess.txKeyCache, sess.rekeySecs)
 
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		_, _ = sdc.conn.WriteToUDP(pkt, activePipes[pipeIdx])
@@ -1394,6 +1499,8 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			authEnabled:  ss.authEnabled,
 			authKey:      ss.authKey,
 			rekeySecs:    ss.rekeySecs,
+			txKeyCache:   newEpochKeyCache(ss.authKey, sessionID),
+			rxKeyCache:   newEpochKeyCache(ss.authKey, sessionID),
 			dataK:        ss.dataK,
 			parityM:      ss.parityM,
 			enc:          enc,
@@ -1615,7 +1722,7 @@ func (ss *stripeServer) handleKeepalive(hdr stripeHdr, from *net.UDPAddr) {
 		Type:    stripeKEEPALIVE,
 		Session: hdr.Session,
 	})
-	reply = stripeAppendAuth(reply, ss.authKey, hdr.Session, ss.rekeySecs)
+	reply = stripeAppendAuthCached(reply, sess.txKeyCache, sess.rekeySecs)
 	_, _ = ss.conn.WriteToUDP(reply, from)
 }
 
