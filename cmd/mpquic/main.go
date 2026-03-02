@@ -271,6 +271,12 @@ type connGroup struct {
 	paths      []*pathConn
 	rr         int  // round-robin index for send distribution
 	allFEC     bool // cached: true when all paths are fecCapable
+	// flowPaths assigns each TCP/UDP flow (by hash) to a specific active
+	// path index via round-robin. All packets in the same flow go through
+	// the same path (prevents TCP reordering) but different flows are spread
+	// evenly across paths (prevents load imbalance from hash collisions).
+	flowPaths  map[uint32]int
+	flowRR     int  // round-robin for new flow assignment
 }
 
 // flowHash extracts a lightweight hash from an IP packet's 5-tuple
@@ -579,9 +585,11 @@ func (ct *connectionTable) lookup(dstIP netip.Addr) (datagramConn, bool) {
 // Returns true if the packet was queued, false if no path or buffer full.
 //
 // Path selection strategy:
-//   - FEC-capable groups (stripe): pure round-robin across active paths.
-//     FEC reassembly at the receiver handles any reordering, so per-flow
-//     affinity is unnecessary and would cause load imbalance.
+//   - FEC-capable groups (stripe): per-flow round-robin assignment.
+//     Each new TCP/UDP flow is assigned to the next active path via
+//     round-robin; subsequent packets in the same flow reuse that path.
+//     This prevents TCP reordering (same-flow affinity) while ensuring
+//     even distribution across paths (no hash collisions).
 //   - QUIC groups: flow-hash on the IP 5-tuple so that packets from the
 //     same TCP/UDP connection always traverse the same path, preventing
 //     reordering that would cripple TCP throughput.
@@ -626,12 +634,43 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 
 	var idx int
 	if grp.allFEC {
-		// FEC-capable paths: round-robin. The receiver's FEC decoder
-		// reassembles regardless of arrival order, so we maximise
-		// aggregate bandwidth by spreading evenly.
-		start := grp.rr % len(active)
-		idx = active[start]
-		grp.rr = (start + 1) % len(active)
+		// FEC-capable paths: per-flow affinity with round-robin assignment.
+		// Each unique flow is assigned to the next active path in order;
+		// all packets in the same flow reuse that assignment.
+		// This prevents TCP reordering while distributing flows evenly.
+		if h, ok := flowHash(pkt); ok {
+			if grp.flowPaths == nil {
+				grp.flowPaths = make(map[uint32]int, 8)
+			}
+			assignedIdx, exists := grp.flowPaths[h]
+			// Check if assigned path is still in the active set
+			isActive := false
+			if exists {
+				for _, ai := range active {
+					if ai == assignedIdx {
+						isActive = true
+						break
+					}
+				}
+			}
+			if !exists || !isActive {
+				// New flow or stale assignment → round-robin assign
+				pos := grp.flowRR % len(active)
+				assignedIdx = active[pos]
+				grp.flowRR = pos + 1
+				grp.flowPaths[h] = assignedIdx
+				// Evict stale entries if map grows too large
+				if len(grp.flowPaths) > 1024 {
+					grp.flowPaths = map[uint32]int{h: assignedIdx}
+				}
+			}
+			idx = assignedIdx
+		} else {
+			// Non-TCP/UDP: round-robin
+			start := grp.rr % len(active)
+			idx = active[start]
+			grp.rr = (start + 1) % len(active)
+		}
 	} else {
 		// QUIC paths: flow-hash for TCP reordering avoidance.
 		// Falls back to round-robin for non-TCP/UDP or unparseable packets.
