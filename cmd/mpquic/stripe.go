@@ -827,7 +827,7 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 		if !ok {
 			continue
 		}
-		if isStripeReplayProtectedPacket(hdr) {
+		if scc.authEnabled && isStripeReplayProtectedPacket(hdr) {
 			if !scc.rxReplay.Accept(stripeReplaySeq(hdr)) {
 				atomic.AddUint64(&scc.securityReplayDrop, 1)
 				continue
@@ -1027,6 +1027,7 @@ type stripeSession struct {
 	pipes      []*net.UDPAddr // client pipe addresses, filled by REGISTER
 	totalPipes int
 	registered int
+	authEnabled bool
 
 	// FEC
 	dataK   int
@@ -1386,6 +1387,7 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			peerIP:       peerIP,
 			pipes:        make([]*net.UDPAddr, totalPipes),
 			totalPipes:   totalPipes,
+			authEnabled:  ss.authEnabled,
 			dataK:        ss.dataK,
 			parityM:      ss.parityM,
 			enc:          enc,
@@ -1394,7 +1396,7 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			txGroup:      make([][]byte, 0, ss.dataK),
 			lastActivity: time.Now(),
 			logger:       ss.logger,
-				rxReplay:     newReplayWindow(stripeReplayWindow),
+			rxReplay:     newReplayWindow(stripeReplayWindow),
 		}
 		ss.sessions[sessionID] = sess
 
@@ -1466,7 +1468,7 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 	if sess == nil {
 		return
 	}
-	if !sess.rxReplay.Accept(stripeReplaySeq(hdr)) {
+	if sess.authEnabled && !sess.rxReplay.Accept(stripeReplaySeq(hdr)) {
 		atomic.AddUint64(&sess.securityReplayDrop, 1)
 		atomic.AddUint64(&ss.securityReplayDrop, 1)
 		return
@@ -1506,7 +1508,7 @@ func (ss *stripeServer) handleParityShard(hdr stripeHdr, payload []byte, from *n
 	if sess == nil || sess.enc == nil {
 		return
 	}
-	if !sess.rxReplay.Accept(stripeReplaySeq(hdr)) {
+	if sess.authEnabled && !sess.rxReplay.Accept(stripeReplaySeq(hdr)) {
 		atomic.AddUint64(&sess.securityReplayDrop, 1)
 		atomic.AddUint64(&ss.securityReplayDrop, 1)
 		return
