@@ -3016,6 +3016,15 @@ func stripeNegotiateKey(ctx context.Context, cfg *Config, pathCfg MultipathPathC
 		tr.Close()
 		return nil, fmt.Errorf("stripe KX: write session ID: %w", err)
 	}
+
+	// Wait for server ACK (1 byte) before closing — ensures the server has
+	// accepted the stream and stored the key before we send CONNECTION_CLOSE.
+	var ack [1]byte
+	if _, err := io.ReadFull(stream, ack[:]); err != nil {
+		conn.CloseWithError(1, "ack read failed")
+		tr.Close()
+		return nil, fmt.Errorf("stripe KX: server ack: %w", err)
+	}
 	stream.Close()
 
 	// Export keying material from the TLS 1.3 session
@@ -3076,6 +3085,12 @@ func handleStripeKeyExchange(conn quic.Connection, pendingKeys *stripePendingKey
 	}
 
 	pendingKeys.Store(sessionID, km)
+
+	// Send 1-byte ACK so the client knows we stored the key before it
+	// closes the QUIC connection (prevents AcceptStream race).
+	stream.Write([]byte{0x01})
+	stream.Close()
+
 	logger.Infof("stripe KX: session=%08x key stored for pending REGISTER", sessionID)
 }
 
