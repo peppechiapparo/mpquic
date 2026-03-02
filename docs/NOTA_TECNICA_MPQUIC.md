@@ -1888,7 +1888,7 @@ traffic shaping Starlink con throughput fino a 313 Mbps**.
 ---
 
 *Documento aggiornato il 03/03/2026 — Piattaforma MPQUIC v3.4 (AES-256-GCM stripe security)*  
-*Commit di riferimento: TBD (main)*
+*Commit di riferimento: 885087c (main)*
 
 ---
 
