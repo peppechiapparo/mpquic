@@ -24,27 +24,22 @@
 6. Valutare FEC alternativi a Reed-Solomon con benchmark comparativo
 7. Validare fix su scenario reale e promuovere profilo produzione
 
-#### Fase 1 — Matrice A/B sicurezza Stripe (IN CORSO)
+#### Fase 1 — Matrice A/B sicurezza Stripe ✅ COMPLETATA (esito: MAC/rekey rimosso)
 
 **Scopo**: verificare in modo misurabile se MAC/rekey introducono regressione
 di throughput/stabilità rispetto al baseline storico.
 
-**Test case (stesse condizioni di rete e iperf):**
-- `T1`: `auth=off`, `rekey=off` (baseline riferimento)
-- `T2`: `auth=on`, `rekey=off` (costo MAC puro)
-- `T3`: `auth=on`, `rekey=600s` (config target attuale)
-- `T4`: `auth=on`, `rekey=30s` (stress rekey)
+**Test eseguiti**:
+- `T1`: `auth=off`, `rekey=off` (baseline riferimento) — **115 Mbps** wan6, **59 Mbps** wan4
+- `T2`: `auth=on`, `rekey=off` — **0 Mbps**: bug critico scoperto (server non firmava i pacchetti TX)
 
-**Metriche obbligatorie per ogni test:**
-- Throughput iperf3 (`-R` e upload) + retry/retransmission
-- Telemetria path/class (`tx_pkts`, `rx_pkts`, `tx_err`, `rx_err`, `fails`)
-- Contatori sicurezza (`auth_fail`, `replay_drop`) se disponibili
-- Eventi sessione (`path recovered/down`, reconnect, timeout)
+**Esito**: il sistema MAC/rekey era **fondamentalmente broken** (il server non applicava
+mai la firma HMAC ai pacchetti in uscita). Anche dopo il fix, il throughput crollava da
+123 Mbps a ~3 Mbps con auth abilitata. T3/T4 non eseguiti.
 
-**Criterio decisionale Fase 1:**
-- Se `T2/T3/T4` degradano nettamente vs `T1`, priorità a ottimizzazione path
-  sicurezza (MAC verify/rekey).
-- Se degrado è presente già in `T1`, priorità a scheduler/dispatch/FEC contention.
+**Decisione**: intero sistema MAC/rekey rimosso e sostituito con AES-256-GCM +
+TLS 1.3 Exporter key exchange (vedi Step 4.10/4.11). Rimossi ~340 righe di codice
+MAC/rekey, eliminati i parametri `stripe_auth_key` e `stripe_rekey_seconds`.
 
 ---
 
@@ -580,7 +575,7 @@ multipath_paths:
     # transport: quic (default)
 ```
 
-### Implementazione (stripe.go — 1320 righe)
+| Implementazione (stripe.go + stripe_crypto.go — ~1700 righe)
 
 | Componente | File | Righe | Descrizione |
 |-----------|------|-------|-------------|
@@ -590,8 +585,9 @@ multipath_paths:
 | Server listener | stripe.go | ~400 | UDP listener, session management, GC |
 | Server DC | stripe.go | ~150 | `datagramConn` per return-path server→client |
 | Helpers | stripe.go | ~30 | parseTUNIP, ipToUint32 |
-| Unit tests | stripe_test.go | 188 | Header, FEC group, helpers, 9 test |
-| Main integration | main.go | ~100 | Config, registerStripe, path init, server startup |
+| **AES-GCM crypto** | **stripe_crypto.go** | **186** | **Cipher, key material, pending keys, encrypt/decrypt** |
+| Unit tests | stripe_test.go | 331 | Header, FEC group, helpers, crypto — 13 test |
+| Main integration | main.go | ~280 | Config, registerStripe, path init, server startup, **key exchange** |
 
 ### Steps implementativi
 
@@ -632,51 +628,55 @@ multipath_paths:
 - [x] Session timeout + graceful shutdown (commit `21d6845`, `f401eab`)
 - [x] Bilanciamento TX verificato: ±0.2% su 3 path
 
-### Step 4.10 — Stripe Security Hardening 🔄 IN CORSO (priorità alta)
+### Step 4.10 — Stripe Security: AES-256-GCM + TLS Exporter ✅ COMPLETATO
 
 **Perché ora**: con `transport: stripe` il canale non eredita automaticamente la
-sicurezza TLS di QUIC; il focus diventa autenticazione + confidenzialità + anti-replay
+sicurezza TLS di QUIC; il focus diventa **cifratura + autenticazione + PFS**
 del protocollo UDP stripe.
 
-**Checklist implementativa**:
-1. **Threat model minimale** (spoofing, replay, injection, hijack sessione)
-2. **Auth messaggi stripe** con MAC per-packet (chiave condivisa per sessione) ✅ baseline implementata (`stripe_auth_key`)
-3. **Anti-replay window** su `(session, groupSeq, shardIdx)` con finestra scorrevole ✅ baseline implementata su DATA/PARITY
-4. **Rotazione chiavi** (rekey periodico) + scadenza sessione forzata ✅ baseline rekey per-epoch implementata
-5. **Opzione cifratura payload stripe** (AEAD) senza rompere FEC
-6. **Metriche sicurezza** (drop auth fail, replay drop, rekey count) in Fase 5 ✅ `auth_fail`, `replay_drop` baseline loggate lato stripe server
-7. **Test dedicati**: unit + netem + packet injection test in lab
+**Decisione architetturale**: il precedente sistema MAC/rekey (HMAC-SHA256 + anti-replay
++ rekey per-epoch) è stato **completamente rimosso** perché:
+- Bug critico: il server non firmava mai i pacchetti TX
+- Anche dopo fix, impatto prestazionale inaccettabile (123 → 3 Mbps)
+- Solo autenticazione, nessuna confidenzialità (payload in chiaro)
 
-### Step 4.11 — Stripe Confidentiality (TLS-like target) ⬜ PROPOSTO
+**Nuovo sistema implementato**: AES-256-GCM con key exchange via QUIC TLS 1.3 Exporter.
 
-**Perché lo vogliamo fare**:
-- L'attuale MAC + anti-replay protegge integrità/autenticazione, ma non la
-  **confidenzialità** del payload stripe.
-- Su path QUIC la sicurezza è già TLS 1.3; su path stripe vogliamo un livello
-  il più possibile analogo per ridurre gap di rischio operativo.
+**Architettura key exchange**:
+1. Client apre connessione QUIC temporanea verso server (ALPN `mpquic-stripe-kx`)
+2. Server e client condividono il session ID come contesto TLS
+3. Entrambi chiamano `ExportKeyingMaterial("mpquic-stripe-v1", sessionID_bytes, 64)`
+4. Primi 32 byte = chiave AES-256 client→server, successivi 32 = server→client
+5. Chiavi direzionali: nessun rischio di riuso nonce cross-direction
 
-**Decisione tecnica**:
-- **Opzione A (preferita se fattibile)**: handshake con proprietà TLS 1.3
-  equivalenti (scambio chiavi effimere, key confirmation, PFS) e cifratura AEAD.
-- **Opzione B (baseline realistica)**: AEAD AES-GCM (o ChaCha20-Poly1305) con
-  nonce/sequence robusti, key schedule di sessione e rekey controllato.
+**Wire format cifrato**:
+```
+[stripeHdr 16B — cleartext AAD][8B sequence counter][ciphertext + 16B GCM tag]
+```
 
-**Nota pratica**:
-- Integrare direttamente un handshake TLS 1.3 pieno su protocollo UDP custom
-  stripe non è banale senza introdurre uno stack dedicato; per questo la
-  baseline operativa resta AEAD + key schedule, mantenendo compatibilità FEC.
+**Proprietà di sicurezza**:
+- **Confidenzialità**: AES-256-GCM cifratura payload
+- **Autenticazione**: GCM tag 16 byte su header (AAD) + payload
+- **Anti-replay**: nonce monotono 8 byte (unique per key + direction)
+- **PFS**: chiavi derivate da handshake TLS 1.3 effimero (nuove ad ogni sessione)
+- **Zero config**: nessun segreto condiviso da gestire (le chiavi vengono dal TLS)
 
-**Done criteria Step 4.11**:
-- [ ] Payload stripe cifrato end-to-end (AEAD)
-- [ ] Nonce univoco per shard e protezione riuso nonce
-- [ ] Key schedule di sessione con rekey periodico e key confirmation
-- [ ] Overhead prestazionale entro target (degradazione ≤10% vs stripe attuale)
+**File modificati**:
+- `stripe_crypto.go` (NUOVO, 186 righe): primitivi AES-GCM, key material, pending keys
+- `stripe.go` (−340 righe): rimosso MAC/rekey, integrato encrypt/decrypt
+- `main.go` (+183 righe): key exchange QUIC, ALPN routing, pending keys
+- `stripe_test.go`: 4 test MAC rimossi, 4 test crypto aggiunti (13 totali pass)
+
+**Diff stat**: +392 insertioni, −528 rimozioni (net −136 righe, codice più semplice)
 
 **Done criteria Step 4.10**:
-- [x] Pacchetti stripe non autenticati rifiutati dal server (quando `stripe_auth_key` è configurata)
-- [x] Replay di shard vecchi rifiutato (window su DATA/PARITY)
-- [x] Session rekey baseline per-epoch implementata (chiavi derivate da `stripe_auth_key`)
-- [ ] Benchmark throughput degradazione ≤10% rispetto stripe attuale
+- [x] Payload stripe cifrato end-to-end (AES-256-GCM)
+- [x] Nonce univoco per shard e protezione riuso nonce (monotonic atomic counter)
+- [x] Key exchange via TLS 1.3 Exporter con PFS per sessione
+- [x] Zero configurazione manuale (rimossi `stripe_auth_key` e `stripe_rekey_seconds`)
+- [x] ALPN routing: `mpquic-ip` per tunnel, `mpquic-stripe-kx` per key exchange
+- [x] Build OK, `go vet` clean, 13 test pass
+- [ ] Benchmark throughput degradazione ≤10% rispetto stripe senza cifratura
 
 ---
 

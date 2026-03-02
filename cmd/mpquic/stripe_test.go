@@ -203,108 +203,129 @@ func TestPathSessionID_UniquePerPath(t *testing.T) {
 	}
 }
 
-func TestStripeAuthAppendVerify(t *testing.T) {
-	key := []byte("super-secret-key")
-	sessionID := uint32(0x01020304)
-	rekeySecs := uint32(60)
-	pkt := make([]byte, stripeHdrLen+4)
+// ─── AES-256-GCM Encryption Tests ────────────────────────────────────────
+
+func TestStripeDeriveKeys(t *testing.T) {
+	material := make([]byte, 64)
+	for i := range material {
+		material[i] = byte(i)
+	}
+
+	km, err := stripeDeriveKeys(material)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify keys are different
+	if km.c2sKey == km.s2cKey {
+		t.Fatal("c2s and s2c keys should differ")
+	}
+
+	// Verify deterministic
+	km2, _ := stripeDeriveKeys(material)
+	if km.c2sKey != km2.c2sKey || km.s2cKey != km2.s2cKey {
+		t.Fatal("stripeDeriveKeys should be deterministic")
+	}
+
+	// Too short input
+	_, err = stripeDeriveKeys(make([]byte, 32))
+	if err == nil {
+		t.Fatal("expected error for short input")
+	}
+}
+
+func TestStripeEncryptDecrypt(t *testing.T) {
+	var key [32]byte
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+
+	txCipher, err := newStripeCipher(key)
+	if err != nil {
+		t.Fatalf("newStripeCipher failed: %v", err)
+	}
+	rxCipher, err := newStripeCipher(key)
+	if err != nil {
+		t.Fatalf("newStripeCipher failed: %v", err)
+	}
+
+	// Build a test packet
+	pkt := make([]byte, stripeHdrLen+20)
 	encodeStripeHdr(pkt, &stripeHdr{
 		Magic:      stripeMagic,
 		Version:    stripeVersion,
 		Type:       stripeDATA,
-		Session:    sessionID,
-		GroupSeq:   11,
-		ShardIdx:   1,
-		GroupDataN: 2,
-		DataLen:    2,
+		Session:    0xDEADBEEF,
+		GroupSeq:   42,
+		ShardIdx:   3,
+		GroupDataN: 10,
+		DataLen:    20,
 	})
-	copy(pkt[stripeHdrLen:], []byte{0xAA, 0xBB, 0xCC, 0xDD})
-
-	signed := stripeAppendAuth(pkt, key, sessionID, rekeySecs)
-	if len(signed) != len(pkt)+stripeAuthTrailerLen {
-		t.Fatalf("unexpected signed len: got=%d want=%d", len(signed), len(pkt)+stripeAuthTrailerLen)
+	for i := stripeHdrLen; i < len(pkt); i++ {
+		pkt[i] = byte(i)
 	}
 
-	raw, ok := stripeVerifyAndStripAuth(signed, key, sessionID, rekeySecs)
+	// Encrypt
+	encrypted := stripeEncrypt(txCipher, pkt)
+	if len(encrypted) != len(pkt)+stripeCryptoOverhead {
+		t.Fatalf("encrypted len: got=%d want=%d", len(encrypted), len(pkt)+stripeCryptoOverhead)
+	}
+
+	// Header must be preserved in cleartext
+	hdr, ok := decodeStripeHdr(encrypted)
 	if !ok {
-		t.Fatal("expected auth verification to pass")
+		t.Fatal("cleartext header should be decodable")
 	}
-	if len(raw) != len(pkt) {
-		t.Fatalf("unexpected raw len: got=%d want=%d", len(raw), len(pkt))
+	if hdr.Session != 0xDEADBEEF {
+		t.Errorf("session mismatch: got=0x%08X want=0xDEADBEEF", hdr.Session)
 	}
 
-	// Tamper payload -> must fail
-	signed[len(signed)-1] ^= 0x01
-	_, ok = stripeVerifyAndStripAuth(signed, key, sessionID, rekeySecs)
+	// Decrypt
+	decrypted, ok := stripeDecryptPkt(rxCipher.aead, encrypted)
+	if !ok {
+		t.Fatal("decrypt failed")
+	}
+	if len(decrypted) != len(pkt) {
+		t.Fatalf("decrypted len: got=%d want=%d", len(decrypted), len(pkt))
+	}
+
+	// Payload must match original
+	for i := stripeHdrLen; i < len(pkt); i++ {
+		if decrypted[i] != pkt[i] {
+			t.Fatalf("payload mismatch at byte %d: got=%d want=%d", i, decrypted[i], pkt[i])
+		}
+	}
+
+	// Tamper → must fail
+	encrypted[len(encrypted)-1] ^= 0x01
+	_, ok = stripeDecryptPkt(rxCipher.aead, encrypted)
 	if ok {
-		t.Fatal("expected auth verification to fail after tamper")
+		t.Fatal("expected decrypt to fail after tamper")
 	}
 }
 
-func TestStripeDeriveEpochKeyDeterministicAndDistinct(t *testing.T) {
-	master := []byte("k")
-	k1 := stripeDeriveEpochKey(master, 0xAABBCCDD, 1)
-	k2 := stripeDeriveEpochKey(master, 0xAABBCCDD, 1)
-	k3 := stripeDeriveEpochKey(master, 0xAABBCCDD, 2)
-
-	if string(k1) != string(k2) {
-		t.Fatal("same inputs should produce same key")
-	}
-	if string(k1) == string(k3) {
-		t.Fatal("different epochs should produce different keys")
+func TestStripeEncryptNilCipher(t *testing.T) {
+	pkt := make([]byte, stripeHdrLen+4)
+	encodeStripeHdr(pkt, &stripeHdr{Magic: stripeMagic, Version: stripeVersion, Type: stripeDATA})
+	result := stripeEncrypt(nil, pkt)
+	if len(result) != len(pkt) {
+		t.Fatal("nil cipher should return packet unchanged")
 	}
 }
 
-func TestDecodeStripeAuthKeyFormats(t *testing.T) {
-	tests := []struct {
-		name    string
-		in      string
-		wantLen int
-		wantErr bool
-	}{
-		{name: "empty", in: "", wantLen: 0},
-		{name: "plain", in: "abc", wantLen: 3},
-		{name: "hex", in: "hex:414243", wantLen: 3},
-		{name: "base64", in: "base64:QUJD", wantLen: 3},
-		{name: "badhex", in: "hex:zz", wantErr: true},
-		{name: "badbase64", in: "base64:***", wantErr: true},
-	}
+func TestStripeEncryptSequenceUniqueness(t *testing.T) {
+	var key [32]byte
+	key[0] = 0xFF
+	sc, _ := newStripeCipher(key)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := decodeStripeAuthKey(tt.in)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(got) != tt.wantLen {
-				t.Fatalf("unexpected len: got=%d want=%d", len(got), tt.wantLen)
-			}
-		})
-	}
-}
+	pkt := make([]byte, stripeHdrLen+4)
+	encodeStripeHdr(pkt, &stripeHdr{Magic: stripeMagic, Version: stripeVersion, Type: stripeDATA})
 
-func TestReplayWindowAccept(t *testing.T) {
-	rw := newReplayWindow(8)
+	enc1 := stripeEncrypt(sc, pkt)
+	enc2 := stripeEncrypt(sc, pkt)
 
-	if !rw.Accept(100) {
-		t.Fatal("first packet should be accepted")
-	}
-	if rw.Accept(100) {
-		t.Fatal("duplicate packet should be rejected")
-	}
-	if !rw.Accept(101) {
-		t.Fatal("new packet should be accepted")
-	}
-	if rw.Accept(90) {
-		t.Fatal("too old packet should be rejected")
-	}
-	if !rw.Accept(102) {
-		t.Fatal("newer packet should be accepted")
+	// Same plaintext, different nonces → different ciphertexts
+	if string(enc1) == string(enc2) {
+		t.Fatal("sequential encryptions should produce different ciphertexts")
 	}
 }

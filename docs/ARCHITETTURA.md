@@ -37,8 +37,9 @@ Il POC si inserisce sopra il piano L3: ogni processo `mpquic@i` usa la WAN assoc
 
 ## Struttura file rilevante
 - `cmd/mpquic/main.go`: dataplane TUN <-> QUIC DATAGRAM / stripe dispatch
-- `cmd/mpquic/stripe.go`: trasporto UDP stripe + FEC Reed-Solomon (~1400 LOC)
-- `cmd/mpquic/stripe_test.go`: test unitari stripe (13 test)
+- `cmd/mpquic/stripe.go`: trasporto UDP stripe + FEC Reed-Solomon (~1500 LOC)
+- `cmd/mpquic/stripe_crypto.go`: cifratura AES-256-GCM + key exchange TLS Exporter (186 LOC)
+- `cmd/mpquic/stripe_test.go`: test unitari stripe + crypto (13 test)
 - `deploy/systemd/mpquic@.service`: template servizio
 - `deploy/config/client/{1..6}.yaml`
 - `deploy/config/server/{1..6}.yaml`
@@ -72,8 +73,8 @@ Ogni YAML include:
 - `stripe_port`: porta UDP per protocollo stripe
 - `stripe_data_shards`: K shards dati FEC (default 10)
 - `stripe_parity_shards`: M shards parità FEC (default 2)
-- `stripe_auth_key`: chiave opzionale MAC HMAC per autenticazione pacchetti stripe (`plain`, `hex:...`, `base64:...`)
-- `stripe_rekey_seconds`: intervallo rotazione chiavi MAC per-epoch (default 600s)
+- ~~`stripe_auth_key`~~: **RIMOSSO** — sostituito da AES-256-GCM con chiavi TLS Exporter
+- ~~`stripe_rekey_seconds`~~: **RIMOSSO** — PFS automatico per sessione
 
 ## Architettura a 3 livelli
 
@@ -161,8 +162,8 @@ La sessione multipath parte se almeno un path è up. Se uno o più path sono non
 - `stripe_data_shards`: K — numero shards dati per gruppo FEC (default: 10)
 - `stripe_parity_shards`: M — numero shards parità per gruppo FEC (default: 2)
 - `stripe_enabled`: (solo server) abilita il listener stripe
-- `stripe_auth_key`: abilita MAC per-packet HMAC-SHA256 (tag 16 byte) e verifica lato peer
-- `stripe_rekey_seconds`: rekey automatico MAC per-epoch (derivazione chiave da `stripe_auth_key`)
+- ~~`stripe_auth_key`~~: **RIMOSSO** — cifratura AES-256-GCM automatica via TLS Exporter
+- ~~`stripe_rekey_seconds`~~: **RIMOSSO** — PFS per sessione (nuove chiavi ad ogni connessione)
 
 ### Policy multipath (`multipath_policy`)
 - `priority` (default): bilancia priorità/peso/penalità errori
@@ -311,7 +312,7 @@ multipath **restano valide**, ma con perimetro diverso tra path QUIC e path stri
 | Tema | Path `transport: quic` | Path `transport: stripe` |
 |------|------------------------|--------------------------|
 | Congestion control (`bbr`/`cubic`) | **Sì**: governato da QUIC stack | **No**: stripe non usa CC QUIC per pipe |
-| Cifratura TLS | **Sì**: TLS 1.3 intrinseco QUIC | **No TLS nativo**; MAC opzionale con `stripe_auth_key` |
+| Cifratura TLS | **Sì**: TLS 1.3 intrinseco QUIC | **Sì**: AES-256-GCM con chiavi derivate da TLS 1.3 Exporter |
 | Classi di traffico dataplane | **Sì** | **Sì** (decisione resta a livello scheduler/classifier) |
 | Multipath applicativo | **Sì** | **Sì** (con FEC + pipe multiple per path) |
 
@@ -320,10 +321,10 @@ multipath **restano valide**, ma con perimetro diverso tra path QUIC e path stri
   non dal CC QUIC.
 - Le policy QoS per classe (`preferred_paths`, `excluded_paths`, duplication)
   continuano a funzionare in modo trasversale al tipo trasporto.
-- Baseline sicurezza già implementata in stripe: MAC HMAC + anti-replay su DATA/PARITY;
-  con rekey periodico per-epoch.
-- Metriche sicurezza baseline disponibili lato server: `auth_fail`, `replay_drop`.
-- Area aperta: cifratura payload (AEAD) per confidenzialità equivalente a TLS.
+- **Sicurezza stripe**: AES-256-GCM cifratura + autenticazione per ogni pacchetto UDP.
+  Chiavi direzionali derivate da handshake TLS 1.3 effimero (PFS per sessione).
+  Nonce monotono per anti-replay. Zero configurazione manuale.
+- Metriche sicurezza disponibili lato server: `decrypt_fail` (tentativi decifrazione falliti).
 
 ## Limiti deliberati (fase corrente)
 - Multipath in singola connessione QUIC disponibile in modalità sperimentale (scheduler path-aware con priorità/peso e fail-cooldown)

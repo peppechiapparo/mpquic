@@ -1,7 +1,7 @@
 # Nota Tecnica — Piattaforma MPQUIC: Test e Risultati
 
-**Data**: 1 marzo 2026  
-**Versione**: 3.3  
+**Data**: 3 marzo 2026  
+**Versione**: 3.4  
 **Autori**: Team Engineering SATCOMVAS  
 **Classificazione**: Interna / Clienti
 
@@ -42,11 +42,15 @@
 
 15. [Test 9 — SO_BINDTODEVICE + Deploy Produzione: 303 Mbps](#15-test-9--so_bindtodevice--deploy-produzione-303-mbps)
 
+**Fase 4b.4 — Sicurezza Stripe: AES-256-GCM + TLS Exporter**
+
+16. [Sicurezza Stripe — Da MAC/rekey ad AES-256-GCM](#16-sicurezza-stripe--da-macrekey-ad-aes-256-gcm)
+
 **Conclusioni e Appendice**
 
-16. [Vantaggi per il Cliente](#16-vantaggi-per-il-cliente)
-17. [Conclusioni](#17-conclusioni)
-18. [Appendice — Comandi Completi](#18-appendice--comandi-completi)
+17. [Vantaggi per il Cliente](#17-vantaggi-per-il-cliente)
+18. [Conclusioni](#18-conclusioni)
+19. [Appendice — Comandi Completi](#19-appendice--comandi-completi)
 
 ---
 
@@ -1666,7 +1670,82 @@ L'importante è che il sistema opera stabilmente nell'intervallo 300+ Mbps.
 
 ---
 
-## 16. Vantaggi per il Cliente
+## 16. Sicurezza Stripe — Da MAC/rekey ad AES-256-GCM
+
+### 16.1 Contesto
+
+Il protocollo stripe UDP, pur offrendo throughput fino a 313 Mbps su Starlink,
+non ereditava la sicurezza TLS 1.3 intrinseca del trasporto QUIC. La prima
+implementazione di sicurezza (MAC HMAC-SHA256 + anti-replay + rekey per-epoch)
+si è rivelata **fondamentalmente broken** durante i test della matrice A/B
+(Fase 1 debug regressione):
+
+- **Bug critico**: il server non applicava mai la firma HMAC ai pacchetti TX
+- **Impatto prestazionale**: anche dopo il fix, throughput crollava da 123 Mbps a ~3 Mbps
+- **Limitazione architetturale**: solo autenticazione, nessuna confidenzialità del payload
+
+### 16.2 Decisione architetturale
+
+L'intero sistema MAC/rekey è stato rimosso (~340 righe) e sostituito con un
+approccio **AES-256-GCM + TLS 1.3 Exporter** che fornisce sicurezza equivalente
+a TLS con zero configurazione manuale.
+
+### 16.3 Architettura del key exchange
+
+```
+CLIENT                                           SERVER
+  │                                                │
+  │── QUIC connect (ALPN "mpquic-stripe-kx") ──────│  TLS 1.3 handshake
+  │── Send sessionID via QUIC stream ──────────────│  (chiavi effimere)
+  │                                                │
+  │  ExportKeyingMaterial(                         │  ExportKeyingMaterial(
+  │    "mpquic-stripe-v1",                         │    "mpquic-stripe-v1",
+  │    sessionID_bytes, 64)                        │    sessionID_bytes, 64)
+  │                                                │
+  │  → 64 bytes key material                       │  → 64 bytes key material
+  │  → c2s_key = [0:32]                            │  → c2s_key = [0:32]
+  │  → s2c_key = [32:64]                           │  → s2c_key = [32:64]
+  │                                                │
+  │── QUIC close ──────────────────────────────────│
+  │                                                │
+  │══════════ UDP Stripe con AES-256-GCM ══════════│
+  │                                                │
+  │── [hdr 16B AAD][seq 8B][ciphertext + tag 16B]──│  c2s_key per decrypt
+  │──────────────────────────────────────────────←─│  s2c_key per encrypt
+```
+
+### 16.4 Proprietà di sicurezza
+
+| Proprietà | Implementazione |
+|-----------|-----------------|
+| **Confidenzialità** | AES-256-GCM cifratura payload |
+| **Autenticazione** | GCM tag 16 byte (header AAD + payload) |
+| **Anti-replay** | Nonce monotono atomico 8 byte, unico per (chiave, direzione) |
+| **Perfect Forward Secrecy** | Chiavi derivate da handshake TLS 1.3 effimero |
+| **Zero config** | Nessun segreto condiviso; chiavi dal TLS Exporter |
+| **Overhead per pacchetto** | 24 byte (8 seq + 16 tag) vs 20 byte vecchio MAC |
+
+### 16.5 Modifiche al codice
+
+| File | Modifica | Righe |
+|------|----------|-------|
+| `stripe_crypto.go` | **NUOVO**: primitivi AES-GCM, key material, pending keys | +186 |
+| `stripe.go` | Rimosso MAC/rekey, integrato encrypt/decrypt | −340 |
+| `main.go` | Key exchange QUIC, ALPN routing, pending keys | +183 |
+| `stripe_test.go` | 4 test MAC → 4 test crypto (13 totali pass) | ±0 |
+| **Totale** | | **+392 / −528** |
+
+Parametri di configurazione rimossi: `stripe_auth_key`, `stripe_rekey_seconds`.
+
+### 16.6 Stato e prossimi passi
+
+- **Build**: OK, `go vet` clean, 13 test pass
+- **Benchmark degradazione**: da verificare (target ≤10% vs stripe senza cifratura)
+- **Test infra reale**: in corso
+
+---
+
+## 17. Vantaggi per il Cliente
 
 ### 16.1 Qualità del Servizio Garantita
 
@@ -1717,7 +1796,7 @@ L'architettura è stata progettata per scalare:
 
 ---
 
-## 17. Conclusioni
+## 18. Conclusioni
 
 I test condotti tra il 28 febbraio e il 1 marzo 2026 dimostrano in modo
 **quantitativo e riproducibile** che la piattaforma MPQUIC soddisfa tutti gli
@@ -1808,12 +1887,12 @@ traffic shaping Starlink con throughput fino a 313 Mbps**.
 
 ---
 
-*Documento aggiornato il 01/03/2026 — Piattaforma MPQUIC v3.3*  
-*Commit di riferimento: 560e499 (main)*
+*Documento aggiornato il 03/03/2026 — Piattaforma MPQUIC v3.4 (AES-256-GCM stripe security)*  
+*Commit di riferimento: TBD (main)*
 
 ---
 
-## 18. Appendice — Comandi Completi
+## 19. Appendice — Comandi Completi
 
 ### A.1 Verifica stato tunnel
 

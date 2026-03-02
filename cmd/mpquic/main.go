@@ -60,8 +60,6 @@ type Config struct {
 	StripeDataShards      int                   `yaml:"stripe_data_shards"`
 	StripeParityShards    int                   `yaml:"stripe_parity_shards"`
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
-	StripeAuthKey         string                `yaml:"stripe_auth_key"`
-	StripeRekeySeconds    int                   `yaml:"stripe_rekey_seconds"`
 }
 
 type MultipathPathConfig struct {
@@ -822,7 +820,6 @@ func loadConfig(path string) (*Config, error) {
 	cfg.LogLevel = strings.ToLower(strings.TrimSpace(cfg.LogLevel))
 	cfg.ControlAPIListen = strings.TrimSpace(cfg.ControlAPIListen)
 	cfg.ControlAPIAuthToken = strings.TrimSpace(cfg.ControlAPIAuthToken)
-	cfg.StripeAuthKey = strings.TrimSpace(cfg.StripeAuthKey)
 	if cfg.Role != "client" && cfg.Role != "server" {
 		return nil, fmt.Errorf("role must be client or server")
 	}
@@ -1116,9 +1113,12 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 		return err
 	}
 
+	// Shared pending-keys store for stripe QUIC key exchange
+	pendingKeys := newStripePendingKeys()
+
 	// Start stripe listener if enabled (for Starlink session bypass clients)
 	if cfg.StripeEnabled {
-		ss, err := newStripeServer(cfg, tun, ct, logger)
+		ss, err := newStripeServer(cfg, tun, ct, pendingKeys, logger)
 		if err != nil {
 			logger.Errorf("stripe server init failed: %v (continuing with QUIC only)", err)
 		} else {
@@ -1148,6 +1148,15 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 			}
 			return err
 		}
+
+		// Route by ALPN: stripe key exchange vs regular tunnel
+		alpn := conn.ConnectionState().TLS.NegotiatedProtocol
+		if alpn == stripeKXALPN {
+			logger.Infof("stripe KX accepted remote=%s", conn.RemoteAddr())
+			go handleStripeKeyExchange(conn, pendingKeys, logger)
+			continue
+		}
+
 		logger.Infof("multi-conn accepted remote=%s", conn.RemoteAddr())
 
 		go func(c quic.Connection) {
@@ -1539,7 +1548,19 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 
 		// ── Stripe transport (Starlink-optimized) ─────────────────
 		if effectiveTransport == "stripe" {
-			sc, err := newStripeClientConn(ctx, cfg, p, logger)
+			sessionID, err := stripeComputeSessionID(cfg, p.Name)
+			if err != nil {
+				logger.Errorf("stripe session ID failed name=%s err=%v", p.Name, err)
+				state.reconnecting = true
+				continue
+			}
+			keys, err := stripeNegotiateKey(ctx, cfg, p, sessionID, logger)
+			if err != nil {
+				logger.Errorf("stripe key exchange failed name=%s err=%v", p.Name, err)
+				state.reconnecting = true
+				continue
+			}
+			sc, err := newStripeClientConn(ctx, cfg, p, keys, logger)
 			if err != nil {
 				logger.Errorf("stripe init failed name=%s err=%v", p.Name, err)
 				state.reconnecting = true
@@ -2062,7 +2083,30 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 
 		// ── Stripe reconnect ──────────────────────────────────────
 		if effectiveTransport == "stripe" {
-			sc, err := newStripeClientConn(ctx, m.cfg, pcfg, m.logger)
+			sessionID, err := stripeComputeSessionID(m.cfg, pcfg.Name)
+			if err != nil {
+				m.logger.Errorf("stripe session ID failed name=%s err=%v", pcfg.Name, err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(2 * time.Second):
+				}
+				continue
+			}
+			keys, err := stripeNegotiateKey(ctx, m.cfg, pcfg, sessionID, m.logger)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				m.logger.Errorf("stripe key exchange failed name=%s err=%v", pcfg.Name, err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(2 * time.Second):
+				}
+				continue
+			}
+			sc, err := newStripeClientConn(ctx, m.cfg, pcfg, keys, m.logger)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -2246,9 +2290,8 @@ func (m *multipathConn) logTelemetrySnapshot() {
 
 		// Log stripe security metrics if available
 		if p.stripeConn != nil {
-			af, rd := p.stripeConn.SecurityStats()
-			if af > 0 || rd > 0 {
-				m.logger.Infof("stripe security name=%s auth_fail=%d replay_drop=%d", p.cfg.Name, af, rd)
+			if df := p.stripeConn.SecurityStats(); df > 0 {
+				m.logger.Infof("stripe security name=%s decrypt_fail=%d", p.cfg.Name, df)
 			}
 		}
 
@@ -2869,7 +2912,7 @@ func loadServerTLSConfig(cfg *Config) (*tls.Config, error) {
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{"mpquic-ip"},
+		NextProtos:   []string{"mpquic-ip", stripeKXALPN},
 		MinVersion:   tls.VersionTLS13,
 	}, nil
 }
@@ -2893,6 +2936,147 @@ func loadClientTLSConfig(cfg *Config) (*tls.Config, error) {
 		tlsConf.RootCAs = roots
 	}
 	return tlsConf, nil
+}
+
+// ── Stripe Key Exchange (QUIC TLS Exporter) ───────────────────────────────
+
+// stripeNegotiateKey establishes a temporary QUIC connection to the server's
+// QUIC port using ALPN "mpquic-stripe-kx", exports keying material from the
+// TLS 1.3 session, and derives AES-256-GCM keys for stripe encryption.
+func stripeNegotiateKey(ctx context.Context, cfg *Config, pathCfg MultipathPathConfig, sessionID uint32, logger *Logger) (*stripeKeyMaterial, error) {
+	// Resolve remote address (same logic as newStripeClientConn)
+	remoteHost := pathCfg.RemoteAddr
+	if remoteHost == "" {
+		remoteHost = cfg.RemoteAddr
+	}
+	remotePort := pathCfg.RemotePort
+	if remotePort == 0 {
+		remotePort = cfg.RemotePort
+	}
+
+	bindIP, err := resolveBindIP(pathCfg.BindIP)
+	if err != nil {
+		return nil, fmt.Errorf("stripe KX: bind resolve: %w", err)
+	}
+	var ifName string
+	if strings.HasPrefix(pathCfg.BindIP, "if:") {
+		ifName = strings.TrimPrefix(pathCfg.BindIP, "if:")
+	}
+
+	// Create UDP socket bound to the same interface as stripe pipes
+	laddr := &net.UDPAddr{IP: net.ParseIP(bindIP), Port: 0}
+	udpConn, err := net.ListenUDP("udp4", laddr)
+	if err != nil {
+		return nil, fmt.Errorf("stripe KX: listen: %w", err)
+	}
+	if ifName != "" {
+		if err := bindPipeToDevice(udpConn, ifName); err != nil {
+			logger.Errorf("stripe KX: SO_BINDTODEVICE to %s: %v (continuing)", ifName, err)
+		}
+	}
+
+	// Load client TLS config with stripe KX ALPN
+	tlsCfg, err := loadClientTLSConfig(cfg)
+	if err != nil {
+		udpConn.Close()
+		return nil, fmt.Errorf("stripe KX: TLS config: %w", err)
+	}
+	tlsCfg.NextProtos = []string{stripeKXALPN}
+
+	// Dial QUIC for key exchange
+	tr := &quic.Transport{Conn: udpConn}
+	raddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(remoteHost, fmt.Sprintf("%d", remotePort)))
+	if err != nil {
+		tr.Close()
+		return nil, fmt.Errorf("stripe KX: resolve: %w", err)
+	}
+
+	kxCtx, kxCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer kxCancel()
+
+	conn, err := tr.Dial(kxCtx, raddr, tlsCfg, &quic.Config{
+		MaxIdleTimeout: 10 * time.Second,
+	})
+	if err != nil {
+		tr.Close()
+		return nil, fmt.Errorf("stripe KX: QUIC dial: %w", err)
+	}
+
+	// Send session ID over a stream so server can associate the key
+	stream, err := conn.OpenStreamSync(kxCtx)
+	if err != nil {
+		conn.CloseWithError(1, "stream open failed")
+		tr.Close()
+		return nil, fmt.Errorf("stripe KX: open stream: %w", err)
+	}
+	var sessBytes [4]byte
+	binary.BigEndian.PutUint32(sessBytes[:], sessionID)
+	if _, err := stream.Write(sessBytes[:]); err != nil {
+		conn.CloseWithError(1, "write failed")
+		tr.Close()
+		return nil, fmt.Errorf("stripe KX: write session ID: %w", err)
+	}
+	stream.Close()
+
+	// Export keying material from the TLS 1.3 session
+	state := conn.ConnectionState()
+	material, err := state.TLS.ExportKeyingMaterial(stripeKXLabel, sessBytes[:], 64)
+	if err != nil {
+		conn.CloseWithError(1, "export failed")
+		tr.Close()
+		return nil, fmt.Errorf("stripe KX: export key material: %w", err)
+	}
+
+	conn.CloseWithError(0, "kx done")
+	tr.Close()
+
+	km, err := stripeDeriveKeys(material)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Infof("stripe KX: session=%08x key negotiated via TLS exporter", sessionID)
+	return km, nil
+}
+
+// handleStripeKeyExchange handles a QUIC connection with ALPN "mpquic-stripe-kx".
+// It reads the stripe session ID, exports matching keying material, and stores
+// the derived keys in the pending store for the stripe UDP listener to consume.
+func handleStripeKeyExchange(conn quic.Connection, pendingKeys *stripePendingKeys, logger *Logger) {
+	defer conn.CloseWithError(0, "kx done")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	stream, err := conn.AcceptStream(ctx)
+	if err != nil {
+		logger.Errorf("stripe KX: accept stream: %v", err)
+		return
+	}
+
+	var sessBytes [4]byte
+	if _, err := io.ReadFull(stream, sessBytes[:]); err != nil {
+		logger.Errorf("stripe KX: read session ID: %v", err)
+		return
+	}
+	sessionID := binary.BigEndian.Uint32(sessBytes[:])
+
+	// Export same keying material (TLS session is shared → same output)
+	state := conn.ConnectionState()
+	material, err := state.TLS.ExportKeyingMaterial(stripeKXLabel, sessBytes[:], 64)
+	if err != nil {
+		logger.Errorf("stripe KX: export key material session=%08x: %v", sessionID, err)
+		return
+	}
+
+	km, err := stripeDeriveKeys(material)
+	if err != nil {
+		logger.Errorf("stripe KX: derive keys session=%08x: %v", sessionID, err)
+		return
+	}
+
+	pendingKeys.Store(sessionID, km)
+	logger.Infof("stripe KX: session=%08x key stored for pending REGISTER", sessionID)
 }
 
 func compileDataplaneConfig(dp DataplaneConfig) (compiledDataplane, error) {
