@@ -609,6 +609,31 @@ del protocollo UDP stripe.
 6. **Metriche sicurezza** (drop auth fail, replay drop, rekey count) in Fase 5 ✅ `auth_fail`, `replay_drop` baseline loggate lato stripe server
 7. **Test dedicati**: unit + netem + packet injection test in lab
 
+### Step 4.11 — Stripe Confidentiality (TLS-like target) ⬜ PROPOSTO
+
+**Perché lo vogliamo fare**:
+- L'attuale MAC + anti-replay protegge integrità/autenticazione, ma non la
+  **confidenzialità** del payload stripe.
+- Su path QUIC la sicurezza è già TLS 1.3; su path stripe vogliamo un livello
+  il più possibile analogo per ridurre gap di rischio operativo.
+
+**Decisione tecnica**:
+- **Opzione A (preferita se fattibile)**: handshake con proprietà TLS 1.3
+  equivalenti (scambio chiavi effimere, key confirmation, PFS) e cifratura AEAD.
+- **Opzione B (baseline realistica)**: AEAD AES-GCM (o ChaCha20-Poly1305) con
+  nonce/sequence robusti, key schedule di sessione e rekey controllato.
+
+**Nota pratica**:
+- Integrare direttamente un handshake TLS 1.3 pieno su protocollo UDP custom
+  stripe non è banale senza introdurre uno stack dedicato; per questo la
+  baseline operativa resta AEAD + key schedule, mantenendo compatibilità FEC.
+
+**Done criteria Step 4.11**:
+- [ ] Payload stripe cifrato end-to-end (AEAD)
+- [ ] Nonce univoco per shard e protezione riuso nonce
+- [ ] Key schedule di sessione con rekey periodico e key confirmation
+- [ ] Overhead prestazionale entro target (degradazione ≤10% vs stripe attuale)
+
 **Done criteria Step 4.10**:
 - [x] Pacchetti stripe non autenticati rifiutati dal server (quando `stripe_auth_key` è configurata)
 - [x] Replay di shard vecchi rifiutato (window su DATA/PARITY)
