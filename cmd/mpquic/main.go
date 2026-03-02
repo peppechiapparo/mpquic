@@ -3052,20 +3052,20 @@ func stripeNegotiateKey(ctx context.Context, cfg *Config, pathCfg MultipathPathC
 // It reads the stripe session ID, exports matching keying material, and stores
 // the derived keys in the pending store for the stripe UDP listener to consume.
 func handleStripeKeyExchange(conn quic.Connection, pendingKeys *stripePendingKeys, logger *Logger) {
-	defer conn.CloseWithError(0, "kx done")
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
 		logger.Errorf("stripe KX: accept stream: %v", err)
+		conn.CloseWithError(0, "kx done")
 		return
 	}
 
 	var sessBytes [4]byte
 	if _, err := io.ReadFull(stream, sessBytes[:]); err != nil {
 		logger.Errorf("stripe KX: read session ID: %v", err)
+		conn.CloseWithError(0, "kx done")
 		return
 	}
 	sessionID := binary.BigEndian.Uint32(sessBytes[:])
@@ -3075,23 +3075,29 @@ func handleStripeKeyExchange(conn quic.Connection, pendingKeys *stripePendingKey
 	material, err := state.TLS.ExportKeyingMaterial(stripeKXLabel, sessBytes[:], 64)
 	if err != nil {
 		logger.Errorf("stripe KX: export key material session=%08x: %v", sessionID, err)
+		conn.CloseWithError(0, "kx done")
 		return
 	}
 
 	km, err := stripeDeriveKeys(material)
 	if err != nil {
 		logger.Errorf("stripe KX: derive keys session=%08x: %v", sessionID, err)
+		conn.CloseWithError(0, "kx done")
 		return
 	}
 
 	pendingKeys.Store(sessionID, km)
 
-	// Send 1-byte ACK so the client knows we stored the key before it
-	// closes the QUIC connection (prevents AcceptStream race).
+	// Send 1-byte ACK so the client knows we stored the key.
 	stream.Write([]byte{0x01})
+
+	// Wait for the client to close its stream side (FIN) — this ensures
+	// the ACK byte is delivered before we send CONNECTION_CLOSE.
+	io.ReadAll(stream)
 	stream.Close()
 
 	logger.Infof("stripe KX: session=%08x key stored for pending REGISTER", sessionID)
+	conn.CloseWithError(0, "kx done")
 }
 
 func compileDataplaneConfig(dp DataplaneConfig) (compiledDataplane, error) {
