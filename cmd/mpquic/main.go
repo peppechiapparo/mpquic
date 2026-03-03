@@ -59,6 +59,7 @@ type Config struct {
 	StripePort            int                   `yaml:"stripe_port"`
 	StripeDataShards      int                   `yaml:"stripe_data_shards"`
 	StripeParityShards    int                   `yaml:"stripe_parity_shards"`
+	StripeFECMode         string                `yaml:"stripe_fec_mode"` // "always" (default), "adaptive", "off"
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
 }
 

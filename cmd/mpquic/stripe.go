@@ -62,6 +62,9 @@ const (
 	stripeRegisterRetries     = 3
 	stripeRegisterDelay       = 500 * time.Millisecond
 
+	// Adaptive FEC: loss threshold to enable/disable parity
+	adaptiveFECLossThreshold uint8 = 2   // enable parity when peer loss > 2%
+	adaptiveFECCooldown            = 15 * time.Second // stay at M>0 for at least this long after peer loss
 )
 
 // ─── Wire Protocol ────────────────────────────────────────────────────────
@@ -161,6 +164,10 @@ type stripeClientConn struct {
 	parityM int
 	enc     reedsolomon.Encoder // nil if parityM == 0
 
+	// Adaptive FEC
+	fecMode   string // "always", "adaptive", "off"
+	adaptiveM int32  // atomic: current TX parity M (0..parityM)
+
 	// TX state
 	txSeq    uint32 // atomic: next data sequence number
 	txPipe   uint32 // atomic: round-robin pipe selector
@@ -173,6 +180,22 @@ type stripeClientConn struct {
 	rxCh     chan []byte // decoded IP packets delivered here
 	rxGroups map[uint32]*fecGroup
 	rxMu     sync.Mutex
+
+	// RX loss tracking (measures loss on data FROM server → used to tell server to adjust its TX M)
+	rxSeqHighest   uint64 // atomic: highest GroupSeq seen (M=0 loss detection)
+	rxDirectCount  uint64 // atomic: data shards delivered via deliverDataDirect
+	rxFECGroups    uint64 // atomic: total FEC groups completed (M>0)
+	// fecRecov is also used (existing field)
+
+	// Peer-reported loss (loss on data WE send, reported BY server → we adjust our TX M)
+	peerLossRate uint32 // atomic: 0-100
+	lastPeerLoss int64  // atomic: unix-nano of last nonzero peer loss report
+
+	// Loss computation: previous window values (updated each keepalive cycle)
+	rxLossPrevSeqHigh    uint64
+	rxLossPrevDirectCnt  uint64
+	rxLossPrevFECRecov   uint64
+	rxLossPrevFECGroups  uint64
 
 	// Stats (atomic)
 	txPkts   uint64
@@ -271,12 +294,28 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		parityM = stripeDefaultParityShards
 	}
 
+	fecMode := cfg.StripeFECMode
+	if fecMode == "" {
+		fecMode = "always"
+	}
+
+	// In "off" mode, force M=0 and skip encoder creation.
+	// In "adaptive" mode, create encoder but start with adaptiveM=0.
 	var enc reedsolomon.Encoder
-	if parityM > 0 {
+	if fecMode == "off" {
+		parityM = 0
+	} else if parityM > 0 {
 		enc, err = reedsolomon.New(dataK, parityM)
 		if err != nil {
 			return nil, fmt.Errorf("stripe: FEC encoder: %w", err)
 		}
+	}
+
+	var initialAdaptiveM int32
+	if fecMode == "adaptive" {
+		initialAdaptiveM = 0 // start with no parity
+	} else {
+		initialAdaptiveM = int32(parityM)
 	}
 
 	// Create AES-256-GCM ciphers from TLS-exported key material
@@ -295,6 +334,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		dataK:      dataK,
 		parityM:    parityM,
 		enc:        enc,
+		fecMode:    fecMode,
 		txGroup:    make([][]byte, 0, dataK),
 		rxCh:       make(chan []byte, 512),
 		rxGroups:   make(map[uint32]*fecGroup),
@@ -303,6 +343,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		txCipher:   txCipher,
 		rxCipher:   rxCipher,
 	}
+	atomic.StoreInt32(&scc.adaptiveM, initialAdaptiveM)
 	atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
 
 	// Open N UDP sockets bound to the same interface
@@ -379,8 +420,8 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	// Flush timer for partial FEC groups
 	scc.txTimer = time.AfterFunc(stripeFlushInterval, scc.flushTxGroup)
 
-	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d server=%s encrypted=AES-256-GCM",
-		sessionID, len(scc.pipes), dataK, parityM, serverAddr)
+	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d mode=%s server=%s encrypted=AES-256-GCM",
+		sessionID, len(scc.pipes), dataK, parityM, fecMode, serverAddr)
 
 	return scc, nil
 }
@@ -391,6 +432,36 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 	scc.txMu.Lock()
 	defer scc.txMu.Unlock()
 
+	effectiveM := scc.getEffectiveM()
+
+	// ── M=0 fast path: send each packet directly, no grouping/padding/parity ──
+	if effectiveM == 0 {
+		seq := atomic.AddUint32(&scc.txSeq, 1) - 1
+
+		shardData := make([]byte, 2+len(pkt))
+		binary.BigEndian.PutUint16(shardData[0:2], uint16(len(pkt)))
+		copy(shardData[2:], pkt)
+
+		wirePkt := stripeEncryptShard(scc.txCipher, &stripeHdr{
+			Magic:      stripeMagic,
+			Version:    stripeVersion,
+			Type:       stripeDATA,
+			Session:    scc.sessionID,
+			GroupSeq:   seq,
+			ShardIdx:   0,
+			GroupDataN: 1, // signals RX to deliver directly (< K)
+			DataLen:    uint16(len(pkt)),
+		}, shardData)
+		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
+		pipe := scc.pipes[int(idx)%len(scc.pipes)]
+		_, _ = pipe.WriteToUDP(wirePkt, scc.serverAddr)
+
+		atomic.AddUint64(&scc.txPkts, 1)
+		atomic.AddUint64(&scc.txBytes, uint64(len(pkt)))
+		return nil
+	}
+
+	// ── M>0 path: accumulate in txGroup, FEC encode when full ──
 	seq := atomic.AddUint32(&scc.txSeq, 1) - 1
 	if len(scc.txGroup) == 0 {
 		scc.txGrpSeq = seq
@@ -563,6 +634,31 @@ func (scc *stripeClientConn) resetFlushTimer() {
 	}
 }
 
+// getEffectiveM returns the current parity shard count based on FEC mode.
+func (scc *stripeClientConn) getEffectiveM() int {
+	switch scc.fecMode {
+	case "off":
+		return 0
+	case "adaptive":
+		return int(atomic.LoadInt32(&scc.adaptiveM))
+	default: // "always"
+		return scc.parityM
+	}
+}
+
+// getEffectiveM returns the current parity shard count for a server session.
+func (sdc *stripeServerDC) getEffectiveM() int {
+	sess := sdc.session
+	switch sess.fecMode {
+	case "off":
+		return 0
+	case "adaptive":
+		return int(atomic.LoadInt32(&sess.adaptiveM))
+	default: // "always"
+		return sess.parityM
+	}
+}
+
 // sendToPipe encrypts and sends a pre-built stripe packet to a pipe (round-robin).
 // Used only by low-frequency paths (keepalive, register); the FEC TX hot path
 // calls stripeEncryptShard directly to avoid the intermediate cleartext buffer.
@@ -633,12 +729,34 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 		case stripePARITY:
 			scc.handleRxShard(hdr, payload, true)
 		case stripeKEEPALIVE:
-			// Server keepalive response — NAT mapping is alive
+			// Server keepalive response — read peer loss rate if present
+			if len(payload) >= 1 {
+				peerLoss := uint32(payload[0])
+				atomic.StoreUint32(&scc.peerLossRate, peerLoss)
+				if peerLoss > 0 {
+					atomic.StoreInt64(&scc.lastPeerLoss, time.Now().UnixNano())
+				}
+			}
 		}
 	}
 }
 
 func (scc *stripeClientConn) handleRxShard(hdr stripeHdr, payload []byte, isParity bool) {
+	// ── Adaptive FEC: track RX sequence for loss detection ──
+	if !isParity {
+		// Update highest GroupSeq seen (atomic CAS loop)
+		for {
+			old := atomic.LoadUint64(&scc.rxSeqHighest)
+			newSeq := uint64(hdr.GroupSeq)
+			if newSeq <= old {
+				break
+			}
+			if atomic.CompareAndSwapUint64(&scc.rxSeqHighest, old, newSeq) {
+				break
+			}
+		}
+	}
+
 	// Partial group (fewer than K data shards) — deliver data directly, no FEC
 	if !isParity && int(hdr.GroupDataN) < scc.dataK {
 		scc.deliverDataDirect(hdr, payload)
@@ -675,6 +793,8 @@ func (scc *stripeClientConn) deliverDataDirect(hdr stripeHdr, payload []byte) {
 	pkt := make([]byte, hdr.DataLen)
 	copy(pkt, payload[2:2+hdr.DataLen])
 
+	atomic.AddUint64(&scc.rxDirectCount, 1)
+
 	select {
 	case scc.rxCh <- pkt:
 	case <-scc.closeCh:
@@ -704,6 +824,7 @@ func (scc *stripeClientConn) decodeAndDeliver(groupSeq uint32, grp *fecGroup) {
 		scc.deliverGroupData(grp)
 		delete(scc.rxGroups, groupSeq)
 		scc.rxMu.Unlock()
+		atomic.AddUint64(&scc.rxFECGroups, 1)
 		return
 	}
 
@@ -725,6 +846,7 @@ func (scc *stripeClientConn) decodeAndDeliver(groupSeq uint32, grp *fecGroup) {
 	}
 
 	atomic.AddUint64(&scc.fecRecov, 1)
+	atomic.AddUint64(&scc.rxFECGroups, 1)
 
 	scc.rxMu.Lock()
 	grp.shards = shards
@@ -775,10 +897,16 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 				_ = scc.Close()
 				return
 			}
+
+			// ── Compute RX loss for this window ──
+			rxLoss := scc.computeRxLoss()
+
+			// ── Update our TX M based on peer's loss report ──
+			scc.updateAdaptiveM()
+
 			for i, pipe := range scc.pipes {
-				// Include pipe index byte in payload so server can update
-				// pipe addresses after CGNAT rebind.
-				pkt := make([]byte, stripeHdrLen+1)
+				// Keepalive payload: [pipe_index: 1B][rx_loss_pct: 1B]
+				pkt := make([]byte, stripeHdrLen+2)
 				encodeStripeHdr(pkt, &stripeHdr{
 					Magic:   stripeMagic,
 					Version: stripeVersion,
@@ -786,9 +914,85 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 					Session: scc.sessionID,
 				})
 				pkt[stripeHdrLen] = byte(i)
+				pkt[stripeHdrLen+1] = rxLoss
 				pkt = stripeEncrypt(scc.txCipher, pkt)
 				_, _ = pipe.WriteToUDP(pkt, scc.serverAddr)
 			}
+		}
+	}
+}
+
+// ─── Adaptive FEC: loss computation and M adjustment (client) ─────────────
+
+// computeRxLoss computes the client-side RX loss rate (loss on data FROM server)
+// over the last keepalive window. Returns loss percentage 0-100.
+func (scc *stripeClientConn) computeRxLoss() uint8 {
+	// Snapshot current counters
+	seqHigh := atomic.LoadUint64(&scc.rxSeqHighest)
+	directCnt := atomic.LoadUint64(&scc.rxDirectCount)
+	fecRecov := atomic.LoadUint64(&scc.fecRecov)
+	fecGroups := atomic.LoadUint64(&scc.rxFECGroups)
+
+	// Compute deltas from previous window
+	dSeq := seqHigh - scc.rxLossPrevSeqHigh
+	dDirect := directCnt - scc.rxLossPrevDirectCnt
+	dFECRecov := fecRecov - scc.rxLossPrevFECRecov
+	dFECGroups := fecGroups - scc.rxLossPrevFECGroups
+
+	// Save for next window
+	scc.rxLossPrevSeqHigh = seqHigh
+	scc.rxLossPrevDirectCnt = directCnt
+	scc.rxLossPrevFECRecov = fecRecov
+	scc.rxLossPrevFECGroups = fecGroups
+
+	var lossRate uint8
+
+	if dFECGroups > 10 {
+		// Server is sending with M>0 (FEC groups active)
+		// Loss rate = groups needing reconstruction / total groups
+		rate := dFECRecov * 100 / dFECGroups
+		if rate > 100 {
+			rate = 100
+		}
+		lossRate = uint8(rate)
+	} else if dDirect > 10 && dSeq > 0 {
+		// Server is sending with M=0 (direct delivery, sequential GroupSeq)
+		// Loss rate = missing shards / expected shards
+		if dDirect < dSeq {
+			rate := (dSeq - dDirect) * 100 / dSeq
+			if rate > 100 {
+				rate = 100
+			}
+			lossRate = uint8(rate)
+		}
+	}
+	// If neither has significant activity, report 0 (no data flowing)
+
+	return lossRate
+}
+
+// updateAdaptiveM adjusts our TX parity M based on peer's loss feedback.
+// Called every keepalive interval.
+func (scc *stripeClientConn) updateAdaptiveM() {
+	if scc.fecMode != "adaptive" || scc.parityM == 0 {
+		return
+	}
+
+	peerLoss := atomic.LoadUint32(&scc.peerLossRate)
+	currentM := atomic.LoadInt32(&scc.adaptiveM)
+	lastLoss := time.Unix(0, atomic.LoadInt64(&scc.lastPeerLoss))
+
+	if peerLoss > uint32(adaptiveFECLossThreshold) {
+		// Significant loss reported by peer → enable full parity
+		if currentM == 0 {
+			atomic.StoreInt32(&scc.adaptiveM, int32(scc.parityM))
+			scc.logger.Infof("adaptive FEC: TX M=0→%d (peer reports %d%% loss)", scc.parityM, peerLoss)
+		}
+	} else if peerLoss == 0 && currentM > 0 {
+		// No loss from peer — disable parity after cooldown
+		if time.Since(lastLoss) > adaptiveFECCooldown {
+			atomic.StoreInt32(&scc.adaptiveM, 0)
+			scc.logger.Infof("adaptive FEC: TX M=%d→0 (no peer loss for %v)", currentM, time.Since(lastLoss).Round(time.Second))
 		}
 	}
 }
@@ -829,10 +1033,30 @@ type stripeSession struct {
 	parityM int
 	enc     reedsolomon.Encoder
 
+	// Adaptive FEC
+	fecMode   string // "always", "adaptive", "off"
+	adaptiveM int32  // atomic: current TX parity M (0..parityM)
+
 	// RX (client → server): FEC decode → TUN
 	rxGroups map[uint32]*fecGroup
 	rxMu     sync.Mutex
 	rxCh     chan []byte // decoded IP packets delivered to tunWriter
+
+	// RX loss tracking (measures loss on data FROM client → reported to client so it adjusts TX M)
+	rxSeqHighest   uint64 // atomic
+	rxDirectCount  uint64 // atomic
+	rxFECGroups    uint64 // atomic
+	rxFECRecov     uint64 // atomic
+
+	// Peer-reported loss (loss on data WE send, reported BY client → we adjust our TX M)
+	peerLossRate uint32 // atomic: 0-100
+	lastPeerLoss int64  // atomic: unix-nano of last nonzero peer loss report
+
+	// Loss computation: previous window values
+	rxLossPrevSeqHigh    uint64
+	rxLossPrevDirectCnt  uint64
+	rxLossPrevFECRecov   uint64
+	rxLossPrevFECGroups  uint64
 
 	// TX (server → client): FEC encode + stripe
 	txSeq    uint32 // atomic
@@ -862,6 +1086,43 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 	sess.txMu.Lock()
 	defer sess.txMu.Unlock()
 
+	effectiveM := sdc.getEffectiveM()
+
+	// ── M=0 fast path: send each packet directly, no grouping/padding/parity ──
+	if effectiveM == 0 {
+		// Collect active pipe addresses
+		activePipes := make([]*net.UDPAddr, 0, len(sess.pipes))
+		for _, p := range sess.pipes {
+			if p != nil {
+				activePipes = append(activePipes, p)
+			}
+		}
+		if len(activePipes) == 0 {
+			return nil
+		}
+
+		seq := atomic.AddUint32(&sess.txSeq, 1) - 1
+
+		shardData := make([]byte, 2+len(pkt))
+		binary.BigEndian.PutUint16(shardData[0:2], uint16(len(pkt)))
+		copy(shardData[2:], pkt)
+
+		wirePkt := stripeEncryptShard(sess.txCipher, &stripeHdr{
+			Magic:      stripeMagic,
+			Version:    stripeVersion,
+			Type:       stripeDATA,
+			Session:    sess.sessionID,
+			GroupSeq:   seq,
+			ShardIdx:   0,
+			GroupDataN: 1, // signals RX to deliver directly (< K)
+			DataLen:    uint16(len(pkt)),
+		}, shardData)
+		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
+		_, _ = sdc.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
+		return nil
+	}
+
+	// ── M>0 path: accumulate in txGroup, FEC encode when full ──
 	seq := atomic.AddUint32(&sess.txSeq, 1) - 1
 	if len(sess.txGroup) == 0 {
 		sess.txGrpSeq = seq
@@ -1025,6 +1286,7 @@ type stripeServer struct {
 	ct      *connectionTable
 	dataK   int
 	parityM int
+	fecMode string // "always", "adaptive", "off"
 	logger  *Logger
 	closeCh chan struct{}
 
@@ -1060,6 +1322,14 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 		parityM = stripeDefaultParityShards
 	}
 
+	fecMode := cfg.StripeFECMode
+	if fecMode == "" {
+		fecMode = "always"
+	}
+	if fecMode == "off" {
+		parityM = 0
+	}
+
 	ss := &stripeServer{
 		conn:       conn,
 		sessions:   make(map[uint32]*stripeSession),
@@ -1068,12 +1338,13 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 		ct:         ct,
 		dataK:      dataK,
 		parityM:    parityM,
+		fecMode:    fecMode,
 		logger:     logger,
 		closeCh:    make(chan struct{}),
 		pendingKeys: pendingKeys,
 	}
 
-	logger.Infof("stripe server listening on %s, FEC=%d+%d encrypted=AES-256-GCM", listenAddr, dataK, parityM)
+	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode)
 	return ss, nil
 }
 
@@ -1206,7 +1477,9 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 	sess, exists := ss.sessions[sessionID]
 	if !exists {
 		var enc reedsolomon.Encoder
-		if ss.parityM > 0 {
+		// Create FEC encoder unless mode is "off". In adaptive mode, encoder is needed
+		// when M dynamically switches from 0 to parityM.
+		if ss.fecMode != "off" && ss.parityM > 0 {
 			var err error
 			enc, err = reedsolomon.New(ss.dataK, ss.parityM)
 			if err != nil {
@@ -1243,12 +1516,21 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			rxCipher:     rxCipher,
 			dataK:        ss.dataK,
 			parityM:      ss.parityM,
+			fecMode:      ss.fecMode,
 			enc:          enc,
 			rxGroups:     make(map[uint32]*fecGroup),
 			rxCh:         rxCh,
 			txGroup:      make([][]byte, 0, ss.dataK),
 			lastActivity: time.Now(),
 			logger:       ss.logger,
+		}
+		// Set initial adaptive M
+		if ss.fecMode == "adaptive" {
+			atomic.StoreInt32(&sess.adaptiveM, 0) // start with no parity
+		} else if ss.fecMode == "off" {
+			atomic.StoreInt32(&sess.adaptiveM, 0)
+		} else {
+			atomic.StoreInt32(&sess.adaptiveM, int32(ss.parityM))
 		}
 		ss.sessions[sessionID] = sess
 
@@ -1322,11 +1604,24 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 	}
 	sess.lastActivity = time.Now()
 
+	// ── Adaptive FEC: track RX sequence for loss detection ──
+	for {
+		old := atomic.LoadUint64(&sess.rxSeqHighest)
+		newSeq := uint64(hdr.GroupSeq)
+		if newSeq <= old {
+			break
+		}
+		if atomic.CompareAndSwapUint64(&sess.rxSeqHighest, old, newSeq) {
+			break
+		}
+	}
+
 	// Partial group or no FEC: deliver directly
 	if int(hdr.GroupDataN) < ss.dataK || ss.parityM == 0 || sess.enc == nil {
 		if hdr.DataLen > 0 && len(payload) >= 2+int(hdr.DataLen) {
 			pkt := make([]byte, hdr.DataLen)
 			copy(pkt, payload[2:2+hdr.DataLen])
+			atomic.AddUint64(&sess.rxDirectCount, 1)
 			select {
 			case sess.rxCh <- pkt:
 			default:
@@ -1391,6 +1686,7 @@ func (ss *stripeServer) decodeAndDeliver(sess *stripeSession, groupSeq uint32, g
 		ss.deliverGroupToTUN(sess, grp)
 		delete(sess.rxGroups, groupSeq)
 		sess.rxMu.Unlock()
+		atomic.AddUint64(&sess.rxFECGroups, 1)
 		return
 	}
 
@@ -1410,6 +1706,9 @@ func (ss *stripeServer) decodeAndDeliver(sess *stripeSession, groupSeq uint32, g
 		ss.logger.Debugf("stripe server: FEC reconstruct failed group=%d: %v", groupSeq, err)
 		return
 	}
+
+	atomic.AddUint64(&sess.rxFECRecov, 1)
+	atomic.AddUint64(&sess.rxFECGroups, 1)
 
 	sess.rxMu.Lock()
 	grp.shards = shards
@@ -1434,6 +1733,73 @@ func (ss *stripeServer) deliverGroupToTUN(sess *stripeSession, grp *fecGroup) {
 		case sess.rxCh <- pkt:
 		default:
 			// Drop if buffer full
+		}
+	}
+}
+
+// ─── Adaptive FEC: loss computation and M adjustment (server) ─────────────
+
+// computeSessionRxLoss computes server-side RX loss for a session (loss on data FROM client).
+// Returns loss percentage 0-100.
+func (ss *stripeServer) computeSessionRxLoss(sess *stripeSession) uint8 {
+	seqHigh := atomic.LoadUint64(&sess.rxSeqHighest)
+	directCnt := atomic.LoadUint64(&sess.rxDirectCount)
+	fecRecov := atomic.LoadUint64(&sess.rxFECRecov)
+	fecGroups := atomic.LoadUint64(&sess.rxFECGroups)
+
+	dSeq := seqHigh - sess.rxLossPrevSeqHigh
+	dDirect := directCnt - sess.rxLossPrevDirectCnt
+	dFECRecov := fecRecov - sess.rxLossPrevFECRecov
+	dFECGroups := fecGroups - sess.rxLossPrevFECGroups
+
+	sess.rxLossPrevSeqHigh = seqHigh
+	sess.rxLossPrevDirectCnt = directCnt
+	sess.rxLossPrevFECRecov = fecRecov
+	sess.rxLossPrevFECGroups = fecGroups
+
+	var lossRate uint8
+
+	if dFECGroups > 10 {
+		rate := dFECRecov * 100 / dFECGroups
+		if rate > 100 {
+			rate = 100
+		}
+		lossRate = uint8(rate)
+	} else if dDirect > 10 && dSeq > 0 {
+		if dDirect < dSeq {
+			rate := (dSeq - dDirect) * 100 / dSeq
+			if rate > 100 {
+				rate = 100
+			}
+			lossRate = uint8(rate)
+		}
+	}
+
+	return lossRate
+}
+
+// updateSessionAdaptiveM adjusts server TX parity M for a session based on
+// client-reported loss (which is loss on data WE send TO the client).
+func (ss *stripeServer) updateSessionAdaptiveM(sess *stripeSession) {
+	if sess.fecMode != "adaptive" || sess.parityM == 0 {
+		return
+	}
+
+	peerLoss := atomic.LoadUint32(&sess.peerLossRate)
+	currentM := atomic.LoadInt32(&sess.adaptiveM)
+	lastLoss := time.Unix(0, atomic.LoadInt64(&sess.lastPeerLoss))
+
+	if peerLoss > uint32(adaptiveFECLossThreshold) {
+		if currentM == 0 {
+			atomic.StoreInt32(&sess.adaptiveM, int32(sess.parityM))
+			ss.logger.Infof("adaptive FEC: server TX M=0→%d session=%08x (client reports %d%% loss)",
+				sess.parityM, sess.sessionID, peerLoss)
+		}
+	} else if peerLoss == 0 && currentM > 0 {
+		if time.Since(lastLoss) > adaptiveFECCooldown {
+			atomic.StoreInt32(&sess.adaptiveM, 0)
+			ss.logger.Infof("adaptive FEC: server TX M=%d→0 session=%08x (no client loss for %v)",
+				currentM, sess.sessionID, time.Since(lastLoss).Round(time.Second))
 		}
 	}
 }
@@ -1470,14 +1836,29 @@ func (ss *stripeServer) handleKeepalive(hdr stripeHdr, payload []byte, from *net
 		ss.mu.Unlock()
 	}
 
-	// Reply
-	reply := make([]byte, stripeHdrLen)
+	// Read client's RX loss report (byte 1) — this is loss on data WE sent to client.
+	// We use it to adjust our TX parity M.
+	if len(payload) >= 2 {
+		peerLoss := uint32(payload[1])
+		atomic.StoreUint32(&sess.peerLossRate, peerLoss)
+		if peerLoss > 0 {
+			atomic.StoreInt64(&sess.lastPeerLoss, time.Now().UnixNano())
+		}
+	}
+
+	// Compute server-side RX loss (loss on data FROM client) and update adaptive M
+	rxLoss := ss.computeSessionRxLoss(sess)
+	ss.updateSessionAdaptiveM(sess)
+
+	// Reply with server-measured RX loss (tells client about loss on data CLIENT sent)
+	reply := make([]byte, stripeHdrLen+1)
 	encodeStripeHdr(reply, &stripeHdr{
 		Magic:   stripeMagic,
 		Version: stripeVersion,
 		Type:    stripeKEEPALIVE,
 		Session: hdr.Session,
 	})
+	reply[stripeHdrLen] = rxLoss
 	reply = stripeEncrypt(sess.txCipher, reply)
 	_, _ = ss.conn.WriteToUDP(reply, from)
 }
