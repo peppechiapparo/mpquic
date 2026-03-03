@@ -745,42 +745,47 @@ resta nel binary come opzione disabilitata (`stripe_pacing_rate: 0`).
 **Decisione**: procedere direttamente a Step 4.13 (Hybrid ARQ) che
 risolve il problema con approccio diverso (ritrasmissione selettiva).
 
-### Step 4.13 — Hybrid ARQ con NACK Selettivo ⬜ PIANIFICATO
+### Step 4.13 — Hybrid ARQ con NACK Selettivo ✅ COMPLETATO (commit d158b0a)
 
-**Obiettivo**: sostituire il FEC proattivo con un meccanismo reattivo: il receiver
-rileva gap di sequenza, genera NACK bitmap, il sender ritrasmette solo i pacchetti
-mancanti. Overhead ~0–3% in condizioni normali vs 20% del FEC RS.
+**Obiettivo**: meccanismo reattivo di ritrasmissione: il receiver rileva gap di
+sequenza, genera NACK bitmap, il sender ritrasmette solo i pacchetti mancanti.
+Overhead ~0% in condizioni normali (solo NACK packets quando ci sono gap).
 
-**Architettura**:
-```
-RX (receiver)                                TX (sender)
-  │                                            │
-  │  reorder buffer (jitter window ~50ms)      │  retransmit buffer (ring ~500ms)
-  │  detect gap in sequence                    │
-  │── NACK bitmap [base_seq][missing bits] ───▶│
-  │                                            │  retransmit only missing pkts
-  │◀── retransmitted packets ──────────────────│
-  │                                            │
-  │  deliver in-order after gap filled or      │
-  │  timeout (1.5× RTT)                        │
-```
+**Implementazione** (file `stripe_arq.go` + integrazioni in `stripe.go`):
 
-**Nuovo tipo pacchetto stripe**: `TYPE_NACK = 0x05`
-```
-[stripeHdr 16B][base_seq 4B][bitmap 8B]  →  indica fino a 64 pacchetti mancanti
-```
+1. **Nuovo tipo pacchetto**: `stripeNACK = 0x05`
+   - Payload: `[base_seq 4B][bitmap 8B]` → fino a 64 gap per NACK
+2. **TX retransmit buffer** (`arqTxBuf`): ring buffer 4096 entry (~200ms a 20K pps)
+   - Ogni entry: `{seq, shardData, dataLen}` — plaintext pronto per re-encrypt
+   - Thread-safe via RWMutex separato dal txMu
+3. **RX gap tracker** (`arqRxTracker`): circular bitmap 8192 bit con indirizzamento modulare
+   - `markReceived(seq)`: setta bit, avanza base, rileva duplicati
+   - `getMissing()`: scansiona gap > `arqNackThresh` (48 seqs) dietro highest
+4. **NACK generation loop**: goroutine dedicata, tick ogni 5ms
+   - Client: invia NACK al server via primo pipe
+   - Server: invia NACK al client via primo pipe address noto
+5. **NACK handler**: riceve NACK, lookup in TX buffer, re-encrypt con nonce fresco, retransmit round-robin
+6. **Bidirezionale**: sia client che server hanno TX buf + RX tracker
+7. **Solo M=0**: ARQ attivo solo quando effectiveM = 0 (non compete con FEC)
+8. **Config**: `stripe_arq: true/false` (default: false)
 
-**Componenti**:
-1. **RX reorder buffer**: ring buffer con timer, delivery in-order, gap detection
-2. **NACK generator**: produce bitmap dei gap ogni N ms o su threshold
-3. **TX retransmit buffer**: ring buffer ~500ms di pacchetti inviati
-4. **NACK handler**: riceve NACK, lookup nel buffer, retransmit
-5. **Timer calibration**: gap timeout = 1.5× smoothed RTT (derivato da keepalive)
+**Risultati benchmark** (6 run × 30s, iperf3 -R -P8, dual Starlink):
 
-**Coesistenza con FEC**: Hybrid ARQ è il meccanismo primario, FEC M>0 resta come
-fallback per burst loss (quando il RTT di un NACK è troppo alto).
+| Config              | Throughput medio | Retransmit medi | Note                                    |
+|---------------------|------------------|-----------------|----------------------------------------|
+| Baseline (no ARQ)   | **239 Mbps**     | ~1.000          | Riferimento M=0                        |
+| **Hybrid ARQ on**   | **274 Mbps**     | ~3.199          | +14.6% throughput, picco 315 Mbps      |
 
-**Effort stimato**: 2–3 giorni di implementazione + 1 giorno di tuning/test.
+**Analisi**: il throughput medio migliora del 14.6% (239 → 274) con picco a 315 Mbps.
+I retransmit TCP aumentano perché le ritrasmissioni ARQ producono pacchetti IP
+duplicati al TUN output, interpretati dal QUIC CC come segnali di congestione.
+Nonostante ciò, il recupero rapido dei gap (~30ms: 5ms NACK + 25ms RTT) previene
+i timeout QUIC e consente al sender di mantenere una finestra di invio più ampia.
+
+**Possibili ottimizzazioni future**:
+- Dedup ARQ al receiver: scartare pacchetti con seq già ricevuto prima di scrivere su rxCh
+- Rate limiting NACK: max 1 NACK per gap-range per RTT
+- Aumento nackThresh da 48 a 96 per ridurre false NACK su reorder Starlink
 
 ### Step 4.14 — FEC per Dimensione Pacchetto ⬜ FUTURO
 
@@ -812,7 +817,7 @@ finestra scorrevole dove la parità protegge gli ultimi N shard "in volo".
 - [x] AES-256-GCM + TLS Exporter per sicurezza stripe
 - [x] FEC adattivo (M=0 bypass) con feedback bidirezionale
 - [x] Pacing per pipe (Step 4.12) — **risultato negativo**, time.Sleep inadeguato
-- [ ] Hybrid ARQ con NACK (Step 4.13)
+- [x] Hybrid ARQ con NACK (Step 4.13) — **+14.6% throughput** (239→274 Mbps)
 - [ ] FEC per dimensione pacchetto (Step 4.14)
 - [ ] Sliding window FEC (Step 4.15)
 - [ ] Throughput ≥ 400 Mbps su dual Starlink
