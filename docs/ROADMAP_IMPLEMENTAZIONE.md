@@ -708,29 +708,42 @@ riattivare automaticamente la parità RS quando il canale degrada.
 - [x] Deploy e benchmark su infra reale (dual Starlink, 20 pipe)
 - [x] Risultati documentati in NOTA_TECNICA_MPQUIC.md v3.5
 
-### Step 4.12 — Pacing per Pipe (Token Bucket) ⬜ PROSSIMO
+### Step 4.12 — Pacing per Pipe (Token Bucket) ❌ NEGATIVO (commit 2c2e78b→050870d)
 
 **Obiettivo**: eliminare i retransmit auto-inflitti causati da burst UDP nella
 tight send loop. I 2.628 retransmit osservati nel run 3 (con M=0 e 0% FEC loss)
 dimostrano che la congestione è self-induced.
 
-**Approccio**: token bucket o micro-spreading per-pipe con rate proporzionale
-alla banda stimata del link. Ogni pipe riceve un budget di byte/s che viene
-consumato ad ogni `WriteTo()` e ricaricato a rate costante.
+**Implementazione**: token bucket per sessione (`stripePacer`), rate configurabile
+`stripe_pacing_rate: <Mbps>`, burst = max(2ms × rate, 32KB). `pace()` chiamato
+prima di ogni `WriteToUDP()` sotto txMu. Commit `2c2e78b` + fix deficit `050870d`.
 
-**Implementazione prevista**:
-1. Struttura `pipePacer` con token bucket: `tokens`, `rate`, `lastRefill`
-2. In `SendDatagram()`: prima di `WriteTo()`, attendere token disponibile
-3. Rate iniziale: `link_bandwidth / num_pipes` (es. 200 Mbps / 10 = 20 Mbps/pipe)
-4. Opzionale: rate adattivo basato su throughput osservato per pipe
-5. Config: `stripe_pacing: true/false`, `stripe_pacing_rate: auto|<Mbps>`
+**Risultati benchmark** (6 run × 30s, iperf3 -R -P8, dual Starlink):
 
-**Metriche target**:
-- −50% retransmit rispetto a baseline M=0
-- +15–25% throughput medio
-- Nessuna regressione upload
+| Config            | Throughput medio | Retransmit medi | Note                          |
+|-------------------|------------------|-----------------|-------------------------------|
+| Baseline (no pacing) | **239 Mbps**  | ~1.000          | Riferimento M=0               |
+| Pacing 250 Mbps (bug) | 213 Mbps    | ~1.609          | Pacer raramente attivo        |
+| Pacing 150 Mbps (bug) | ~75 Mbps    | ~615            | Bug cascading deficit         |
+| Pacing 200 Mbps (fix) | **145 Mbps**| ~1.152          | Pacer corretto, time.Sleep overhead |
 
-**Effort stimato**: poche ore di implementazione + benchmark.
+**Root cause del fallimento**: `time.Sleep()` su Linux ha granularità ~1–4 ms
+(scheduler tick). Con burst di 2 ms, i micro-sleep richiesti (2 ms) si allungano
+a 3–4 ms, riducendo il throughput effettivo al 60–70% del rate configurato.
+Anche a 200 Mbps/sessione (totale 400 Mbps > baseline 239), la natura bursty
+del TUN reader genera picchi istantanei che attivano il pacer e subiscono
+l'overshoot del timer.
+
+**Bug corretto** (commit `050870d`): dopo lo sleep compensativo, i token
+restavano negativi causando re-sleep a catena su ogni pacchetto successivo.
+
+**Conclusione**: il pacing via `time.Sleep` non è efficace a queste velocità
+su Linux. Alternative possibili (non implementate): busy-wait spin loop,
+SO_TXTIME/eBPF kernel-level pacing, batch send con sendmmsg. Il codice
+resta nel binary come opzione disabilitata (`stripe_pacing_rate: 0`).
+
+**Decisione**: procedere direttamente a Step 4.13 (Hybrid ARQ) che
+risolve il problema con approccio diverso (ritrasmissione selettiva).
 
 ### Step 4.13 — Hybrid ARQ con NACK Selettivo ⬜ PIANIFICATO
 
@@ -798,7 +811,7 @@ finestra scorrevole dove la parità protegge gli ultimi N shard "in volo".
 - [x] UDP Stripe + FEC transport implementato e deployato
 - [x] AES-256-GCM + TLS Exporter per sicurezza stripe
 - [x] FEC adattivo (M=0 bypass) con feedback bidirezionale
-- [ ] Pacing per pipe (Step 4.12)
+- [x] Pacing per pipe (Step 4.12) — **risultato negativo**, time.Sleep inadeguato
 - [ ] Hybrid ARQ con NACK (Step 4.13)
 - [ ] FEC per dimensione pacchetto (Step 4.14)
 - [ ] Sliding window FEC (Step 4.15)
