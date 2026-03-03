@@ -227,52 +227,6 @@ func acceptStreamConn(ctx context.Context, conn quic.Connection) (*streamConn, e
 
 // connectionTable maps TUN peer IPs to their QUIC connection for multi-conn server.
 // When a packet is read from the shared TUN, the dst IP is looked up to find the
-// ─── Packet Buffer Pool ────────────────────────────────────────────────────
-//
-// pktPool recycles packet buffers to eliminate per-packet heap allocations
-// in the TUN reader hot path. Buffers have capacity pktPoolCap (>= typical
-// MTU 1500). For oversized packets (jumbo frames) we fall back to a fresh
-// allocation that is left for GC.
-//
-// Lifecycle:
-//   pktPoolGet(n)  → acquire buffer of length n
-//   ... pass through sendCh / tunReadCh / SendDatagram ...
-//   pktPoolPut(b)  → return buffer to pool (only if cap == pktPoolCap)
-//
-// All SendDatagram implementations (QUIC, stripe client, stripe server) copy
-// the payload into their own buffers, so the caller-owned slice is safe to
-// recycle immediately after SendDatagram returns.
-
-const pktPoolCap = 1600
-
-var pktPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, 0, pktPoolCap)
-		return b
-	},
-}
-
-// pktPoolGet returns a []byte of length n backed by a pooled buffer when
-// possible (n ≤ pktPoolCap), or a fresh allocation for oversized packets.
-func pktPoolGet(n int) []byte {
-	b := pktPool.Get().([]byte)
-	if cap(b) >= n {
-		return b[:n]
-	}
-	// Oversized: return the small buffer, allocate a one-off.
-	pktPool.Put(b[:0])
-	return make([]byte, n)
-}
-
-// pktPoolPut returns a buffer to the pool. Only buffers originally allocated
-// by the pool (cap == pktPoolCap) are recycled; oversized one-offs are left
-// for GC.
-func pktPoolPut(b []byte) {
-	if cap(b) == pktPoolCap {
-		pktPool.Put(b[:0])
-	}
-}
-
 // right QUIC connection for the return path.
 //
 // In addition to the primary peerIP (the TUN address), the table also learns
@@ -466,7 +420,6 @@ func (pc *pathConn) drainSendCh() {
 	defer close(pc.sendDone)
 	for pkt := range pc.sendCh {
 		_ = pc.dc.SendDatagram(pkt)
-		pktPoolPut(pkt)
 	}
 }
 
@@ -1219,10 +1172,8 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 				continue
 			}
 
-			pktCopy := pktPoolGet(len(pkt))
-			copy(pktCopy, pkt)
+			pktCopy := append([]byte(nil), pkt...)
 			if !ct.dispatch(dstIP, pktCopy) {
-				pktPoolPut(pktCopy)
 				logger.Debugf("dispatch failed for dst=%s (no path or buffer full)", dstIP)
 			}
 		}
@@ -1419,12 +1370,11 @@ func runServerSingleConn(ctx context.Context, cfg *Config, logger *Logger) error
 				logger.Errorf("tun read error: %v", err)
 				return
 			}
-			pkt := pktPoolGet(n)
-			copy(pkt, buf[:n])
+			pkt := append([]byte(nil), buf[:n]...)
 			select {
 			case tunReadCh <- pkt:
 			default:
-				pktPoolPut(pkt) // return to pool on drop
+				// drop if channel full (no active conn or back-pressure)
 			}
 		}
 	}()
@@ -1519,9 +1469,7 @@ func runServerTunnel(ctx context.Context, conn datagramConn, tun *water.Interfac
 				if !ok {
 					return
 				}
-				err := conn.SendDatagram(pkt)
-				pktPoolPut(pkt)
-				if err != nil {
+				if err := conn.SendDatagram(pkt); err != nil {
 					select {
 					case errCh <- err:
 					default:
@@ -2798,11 +2746,8 @@ func runTunnelWithTUN(ctx context.Context, conn datagramConn, tun *water.Interfa
 			if ctx.Err() != nil {
 				return
 			}
-			pkt := pktPoolGet(n)
-			copy(pkt, buf[:n])
-			err = conn.SendDatagram(pkt)
-			pktPoolPut(pkt)
-			if err != nil {
+			pkt := append([]byte(nil), buf[:n]...)
+			if err := conn.SendDatagram(pkt); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
