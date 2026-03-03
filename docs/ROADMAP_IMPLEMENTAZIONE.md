@@ -782,10 +782,36 @@ duplicati al TUN output, interpretati dal QUIC CC come segnali di congestione.
 Nonostante ciò, il recupero rapido dei gap (~30ms: 5ms NACK + 25ms RTT) previene
 i timeout QUIC e consente al sender di mantenere una finestra di invio più ampia.
 
-**Possibili ottimizzazioni future**:
-- Dedup ARQ al receiver: scartare pacchetti con seq già ricevuto prima di scrivere su rxCh
-- Rate limiting NACK: max 1 NACK per gap-range per RTT
-- Aumento nackThresh da 48 a 96 per ridurre false NACK su reorder Starlink
+### Step 4.13b — ARQ Optimizations: Dedup + NACK Rate Limit + nackThresh ✅ COMPLETATO (commit 9478e56)
+
+**Obiettivo**: ridurre i retransmit TCP (~3199) e l'overhead NACK introdotti dal
+Hybrid ARQ iniziale, mantenendo il guadagno di throughput.
+
+**Implementazione** (3 ottimizzazioni in un commit):
+
+1. **ARQ dedup receiver**: il valore di ritorno di `markReceived()` ora viene
+   controllato prima della consegna al TUN. Pacchetti con GroupSeq già ricevuto
+   vengono scartati silenziosamente (sia client che server RX path). Elimina i
+   pacchetti IP duplicati da ritrasmissioni ARQ che entravano nel TUN causando
+   retransmit TCP spuri.
+
+2. **NACK rate limiting**: max 1 NACK per `arqNackCooldown` (30ms ≈ 1 RTT Starlink).
+   `canSendNack()`/`recordNackSent()` tracciano il timestamp atomicamente.
+   Il ticker a 5ms avrebbe altrimenti inviato ~5 NACK per lo stesso gap prima
+   che la ritrasmissione arrivi, sprecando banda e causando retransmit multipli.
+
+3. **Adaptive nackThresh**: aumentato da 48 a 96 sequenze. Starlink presenta
+   reordering naturale di 20-50 pacchetti; la soglia precedente causava false
+   NACK che triggheravano ritrasmissioni non necessarie.
+
+**Nuovo contatore**: `dupFiltered` — pacchetti scartati dal dedup prima del TUN write.
+`stats()` ora restituisce `(nacksSent, retxReceived, dupFiltered)`.
+
+**Risultati attesi** (da benchmarkare):
+- Retransmit TCP: ~3199 → ~1000 (eliminazione duplicati ARQ)
+- NACK overhead: ridotto di ~5x (1 NACK/RTT vs 1 NACK/5ms)
+- False NACK: ridotte significativamente (soglia 96 vs 48)
+- Throughput: mantenuto o migliorato (meno congestione auto-inflitta)
 
 ### Step 4.14 — FEC per Dimensione Pacchetto ⬜ FUTURO
 
@@ -818,6 +844,7 @@ finestra scorrevole dove la parità protegge gli ultimi N shard "in volo".
 - [x] FEC adattivo (M=0 bypass) con feedback bidirezionale
 - [x] Pacing per pipe (Step 4.12) — **risultato negativo**, time.Sleep inadeguato
 - [x] Hybrid ARQ con NACK (Step 4.13) — **+14.6% throughput** (239→274 Mbps)
+- [x] ARQ optimizations (Step 4.13b) — dedup receiver, NACK rate limit 30ms, nackThresh 96
 - [ ] FEC per dimensione pacchetto (Step 4.14)
 - [ ] Sliding window FEC (Step 4.15)
 - [ ] Throughput ≥ 400 Mbps su dual Starlink
