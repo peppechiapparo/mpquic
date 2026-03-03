@@ -37,9 +37,10 @@ Il POC si inserisce sopra il piano L3: ogni processo `mpquic@i` usa la WAN assoc
 
 ## Struttura file rilevante
 - `cmd/mpquic/main.go`: dataplane TUN <-> QUIC DATAGRAM / stripe dispatch
-- `cmd/mpquic/stripe.go`: trasporto UDP stripe + FEC Reed-Solomon (~1500 LOC)
-- `cmd/mpquic/stripe_crypto.go`: cifratura AES-256-GCM + key exchange TLS Exporter (186 LOC)
-- `cmd/mpquic/stripe_test.go`: test unitari stripe + crypto (13 test)
+- `cmd/mpquic/stripe.go`: trasporto UDP stripe + FEC Reed-Solomon + Hybrid ARQ (~2300 LOC)
+- `cmd/mpquic/stripe_crypto.go`: cifratura AES-256-GCM + key exchange TLS Exporter (224 LOC)
+- `cmd/mpquic/stripe_arq.go`: Hybrid ARQ con NACK selettivo — TX ring buffer, RX gap tracker, NACK encode/decode (269 LOC)
+- `cmd/mpquic/stripe_test.go`: test unitari stripe + crypto + ARQ (14 test)
 - `deploy/systemd/mpquic@.service`: template servizio
 - `deploy/config/client/{1..6}.yaml`
 - `deploy/config/server/{1..6}.yaml`
@@ -159,8 +160,11 @@ La sessione multipath parte se almeno un path è up. Se uno o più path sono non
 
 ### Campi stripe (globali, livello root YAML)
 - `stripe_port`: porta UDP del server per il protocollo stripe (default: `remote_port` + 1000)
-- `stripe_data_shards`: K — numero shards dati per gruppo FEC (default: 10)
-- `stripe_parity_shards`: M — numero shards parità per gruppo FEC (default: 2)
+- `stripe_data_shards`: K — numero shards dati per gruppo FEC (default: 10). Anche con M=0, K è usato come soglia nel protocollo RX (`GroupDataN < K` → consegna diretta). **Deve essere coerente tra client e server.**
+- `stripe_parity_shards`: M — numero shards parità per gruppo FEC (default: 2). In modalità `adaptive`, l'encoder RS viene pre-creato con questo valore anche se M effettivo parte da 0.
+- `stripe_fec_mode`: modalità FEC — `always` (default, M fisso), `adaptive` (M=0 iniziale, sale a M su loss), `off` (M=0 permanente, nessun encoder RS)
+- `stripe_arq`: `true/false` (default: `false`) — abilita Hybrid ARQ con NACK selettivo. Il receiver rileva gap di sequenza e invia NACK bitmap, il sender ritrasmette solo i pacchetti mancanti. Attivo solo quando effectiveM=0.
+- `stripe_pacing_rate`: rate limiter in Mbps per sessione (default: `0` = disabilitato). **Sconsigliato** per granularità timer Linux.
 - `stripe_enabled`: (solo server) abilita il listener stripe
 - ~~`stripe_auth_key`~~: **RIMOSSO** — cifratura AES-256-GCM automatica via TLS Exporter
 - ~~`stripe_rekey_seconds`~~: **RIMOSSO** — PFS per sessione (nuove chiavi ad ogni connessione)
@@ -264,7 +268,9 @@ il throughput è limitato a ~50 Mbps. Il trasporto stripe apre N socket UDP
 ```
 CLIENT                                                           SERVER
                                                                 
-TUN read ──→ FEC encoder (K=10 data + M=2 parity) ──→ stripe TX  │ stripe RX ──→ FEC decode ──→ TUN write
+TUN read ──→ FEC encoder (K data + M parity, adaptive) ──→ stripe TX  │ stripe RX ──→ FEC decode ──→ TUN write
+                 │                                                        │
+                 └─→ ARQ TX buf (ring 4096)                  ARQ RX tracker ──→ NACK gen (5ms) ─⇢ retransmit
                                                                   │
   Pipe 0 (UDP :rand, SO_BINDTODEVICE=enp7s6) ────────────────────┤
   Pipe 1 (UDP :rand, SO_BINDTODEVICE=enp7s6) ────────────────────┤
@@ -284,7 +290,11 @@ Pacchetto stripe:
 Header: magic(2) + ver(1) + type(1) + session(4) + groupSeq(4) +
         shardIdx(1) + groupDataN(1) + dataLen(2) = 16 bytes
 
-Tipi: DATA (0x01), PARITY (0x02), REGISTER (0x03), KEEPALIVE (0x04)
+Tipi: DATA (0x01), PARITY (0x02), REGISTER (0x03), KEEPALIVE (0x04), NACK (0x05)
+
+Pacchetto NACK (type 0x05):
+  [stripeHdr 16B][base_seq 4B][bitmap 8B]
+  bitmap: 64 bit, bit i=1 → base_seq+i mancante
 ```
 
 ### FEC Reed-Solomon
@@ -292,6 +302,25 @@ Tipi: DATA (0x01), PARITY (0x02), REGISTER (0x03), KEEPALIVE (0x04)
 - M=2 shards parità (calcolati da Reed-Solomon)
 - Tolleranza: fino al 16.7% di loss per gruppo FEC senza retransmit
 - Dipendenza: `github.com/klauspost/reedsolomon`
+- Modalità adattiva (`stripe_fec_mode: adaptive`): M effettivo parte da 0 (nessuna parità),
+  sale a M configurato se rilevata perdita significativa via feedback keepalive bidirezionale
+
+### Hybrid ARQ (NACK selettivo)
+Meccanismo reattivo di ritrasmissione complementare a FEC adattivo:
+
+1. **TX retransmit buffer** (`arqTxBuf`): ring buffer 4096 entry (~200ms a 20K pps).
+   Ogni entry conserva il plaintext pronto per re-encrypt + retransmit.
+2. **RX gap tracker** (`arqRxTracker`): bitmap circolare 8192 bit.
+   `markReceived(seq)` setta il bit; `getMissing()` scansiona gap > 48 seqs dietro highest.
+3. **NACK generation loop**: goroutine dedicata, tick ogni 5ms.
+   Invia NACK bitmap (fino a 64 gap per pacchetto) al peer.
+4. **NACK handler**: riceve NACK, lookup in TX buffer, re-encrypt con nonce fresco,
+   retransmit round-robin sulle pipe.
+5. **Bidirezionale**: sia client che server hanno TX buf + RX tracker.
+6. **Solo M=0**: ARQ attivo solo quando effectiveM = 0 (non compete con FEC grouping).
+
+**Benchmark**: +14.6% throughput su dual Starlink (239 → 274 Mbps, picco 315 Mbps).
+Overhead ~0% in condizioni normali (solo pacchetti NACK quando ci sono gap).
 
 ### Flow-hash dispatch (server → client)
 Il server usa hash FNV-1a sulla 5-tupla IP (srcIP, dstIP, proto, srcPort, dstPort)

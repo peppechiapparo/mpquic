@@ -444,18 +444,27 @@ Array di path, ciascuno con:
 | `pipes` | intero ≥ 1 | `1` | Numero di socket UDP paralleli per il path. Con `transport: stripe`, ogni pipe è una sessione Starlink indipendente |
 | `transport` | `quic` / `stripe` | `quic` | Tipo di trasporto per il path. `stripe` usa UDP raw + FEC, `quic` usa connessione QUIC standard |
 
-### 11.8 Attributi stripe (trasporto UDP + FEC)
+### 11.8 Attributi stripe (trasporto UDP + FEC + ARQ)
 
 | Attributo | Valori | Default | Descrizione |
 |-----------|--------|---------|-------------|
 | `stripe_port` | intero (es. `46017`) | `remote_port + 1000` | Porta UDP del listener stripe sul server |
-| `stripe_data_shards` | intero (es. `10`) | `10` | K — numero shards dati per gruppo FEC. Il pacchetto TUN viene copiato in uno shard |
-| `stripe_parity_shards` | intero (es. `2`) | `2` | M — numero shards parità Reed-Solomon. Con K=10, M=2: tolleranza 16.7% loss |
+| `stripe_data_shards` | intero (es. `10`) | `10` | K — numero shards dati per gruppo FEC. Anche con FEC disabilitato (M=0), K è usato come soglia nel protocollo RX per distinguere pacchetti diretti (GroupDataN < K) da gruppi FEC completi. **Deve essere coerente tra client e server.** |
+| `stripe_parity_shards` | intero (es. `2`) | `2` | M — numero shards parità Reed-Solomon. Con K=10, M=2: tolleranza 16.7% loss. In modalità `adaptive`, l'encoder RS viene pre-creato con questo valore anche se M effettivo parte da 0 |
+| `stripe_fec_mode` | `always` / `adaptive` / `off` | `always` | Modalità FEC: `always` = M fisso, ogni gruppo ha K+M shards; `adaptive` = parte da M=0 (nessuna parità, invio diretto), sale a M configurato se rilevata perdita; `off` = M=0 permanente, nessun encoder RS creato |
+| `stripe_arq` | `true` / `false` | `false` | Abilita Hybrid ARQ con NACK selettivo. Il receiver rileva gap di sequenza e invia NACK bitmap al sender, che ritrasmette solo i pacchetti mancanti. Attivo solo quando effectiveM=0. Overhead ~0% in assenza di loss |
+| `stripe_pacing_rate` | intero (Mbps) | `0` (disabilitato) | Rate limiter token bucket per sessione. **Sconsigliato**: `time.Sleep()` su Linux ha granularità ~1-4ms, causando regressione del throughput fino al 40%. Lasciare a 0 |
 | `stripe_enabled` | `true` / `false` | `false` | Solo server: abilita il listener UDP stripe |
 
 **Formula FEC**: può recuperare fino a M shards persi su K+M totali.
 Con K=10, M=2: gruppo di 12 shards, tolleranza 2 shards persi (16.7%).
 Aumentando M si migliora la resilienza al costo di più overhead di rete.
+
+**Configurazione raccomandata per Starlink**: `stripe_fec_mode: adaptive` + `stripe_arq: true`.
+In condizioni normali (loss < 1%), FEC adattivo opera con M=0 (zero overhead) e ARQ
+ritrasmette selettivamente i rari pacchetti persi. Se la perdita aumenta significativamente,
+FEC adattivo può passare automaticamente a M=2 come fallback.
+Benchmark dual Starlink 20 pipe: **274 Mbps** (+14.6% vs baseline 239 Mbps senza ARQ).
 
 ### 11.9 Attributi dataplane e QoS (avanzati)
 
@@ -582,6 +591,8 @@ transport_mode: reliable
 stripe_port: 46017
 stripe_data_shards: 10
 stripe_parity_shards: 2
+stripe_fec_mode: adaptive
+stripe_arq: true
 multipath_paths:
 - name: wan4
   bind_ip: if:enp7s6
@@ -619,7 +630,10 @@ remote_port: 45017
 multi_conn_enabled: true
 stripe_enabled: true
 stripe_port: 46017
+stripe_data_shards: 10
 stripe_parity_shards: 2
+stripe_fec_mode: adaptive
+stripe_arq: true
 tun_name: mp1
 tun_cidr: 10.200.17.254/24
 log_level: info
