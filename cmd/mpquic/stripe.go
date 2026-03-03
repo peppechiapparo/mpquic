@@ -67,6 +67,71 @@ const (
 	adaptiveFECCooldown            = 15 * time.Second // stay at M>0 for at least this long after peer loss
 )
 
+// ─── Pacing (Token Bucket) ────────────────────────────────────────────────
+// stripePacer is a token-bucket rate limiter that prevents burst-induced
+// retransmits by spreading UDP writes over time. NOT thread-safe — must be
+// called under the caller's TX mutex (txMu).
+
+const (
+	stripePacerBurstMs  = 2     // burst window in milliseconds
+	stripePacerMinBurst = 32768 // 32 KB minimum burst
+)
+
+type stripePacer struct {
+	rateBPS    float64   // target rate in bytes/second
+	burstBytes float64   // max token accumulation
+	tokens     float64   // current available bytes (may go negative)
+	lastRefill time.Time // last refill timestamp
+}
+
+func newStripePacer(rateMbps int) *stripePacer {
+	if rateMbps <= 0 {
+		return nil
+	}
+	rateBPS := float64(rateMbps) * 1e6 / 8.0
+	burst := rateBPS * float64(stripePacerBurstMs) / 1000.0
+	if burst < stripePacerMinBurst {
+		burst = stripePacerMinBurst
+	}
+	return &stripePacer{
+		rateBPS:    rateBPS,
+		burstBytes: burst,
+		tokens:     burst,
+		lastRefill: time.Now(),
+	}
+}
+
+// pace blocks until sufficient tokens are available to send `bytes` bytes.
+// Must be called under the session/connection TX mutex.
+func (p *stripePacer) pace(bytes int) {
+	if p == nil {
+		return
+	}
+	now := time.Now()
+	elapsed := now.Sub(p.lastRefill).Seconds()
+	p.lastRefill = now
+
+	// Refill tokens based on elapsed time.
+	p.tokens += elapsed * p.rateBPS
+	if p.tokens > p.burstBytes {
+		p.tokens = p.burstBytes
+	}
+
+	// Consume tokens.
+	p.tokens -= float64(bytes)
+
+	// If in deficit, sleep until tokens would be replenished.
+	if p.tokens < 0 {
+		deficit := -p.tokens
+		sleepDur := time.Duration(deficit / p.rateBPS * float64(time.Second))
+		if sleepDur > time.Microsecond {
+			time.Sleep(sleepDur)
+			p.lastRefill = time.Now()
+		}
+		p.tokens = 0
+	}
+}
+
 // ─── Wire Protocol ────────────────────────────────────────────────────────
 
 // stripeHdr is the 16-byte wire-format header for all stripe packets.
@@ -167,6 +232,9 @@ type stripeClientConn struct {
 	// Adaptive FEC
 	fecMode   string // "always", "adaptive", "off"
 	adaptiveM int32  // atomic: current TX parity M (0..parityM)
+
+	// Pacing
+	pacer *stripePacer // TX rate limiter (nil = disabled)
 
 	// TX state
 	txSeq    uint32 // atomic: next data sequence number
@@ -345,6 +413,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	}
 	atomic.StoreInt32(&scc.adaptiveM, initialAdaptiveM)
 	atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
+	scc.pacer = newStripePacer(cfg.StripePacingRate)
 
 	// Open N UDP sockets bound to the same interface
 	for i := 0; i < pipes; i++ {
@@ -420,8 +489,12 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	// Flush timer for partial FEC groups
 	scc.txTimer = time.AfterFunc(stripeFlushInterval, scc.flushTxGroup)
 
-	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d mode=%s server=%s encrypted=AES-256-GCM",
-		sessionID, len(scc.pipes), dataK, parityM, fecMode, serverAddr)
+	pacingStr := "off"
+	if cfg.StripePacingRate > 0 {
+		pacingStr = fmt.Sprintf("%dMbps", cfg.StripePacingRate)
+	}
+	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d mode=%s pacing=%s server=%s encrypted=AES-256-GCM",
+		sessionID, len(scc.pipes), dataK, parityM, fecMode, pacingStr, serverAddr)
 
 	return scc, nil
 }
@@ -452,6 +525,7 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 			GroupDataN: 1, // signals RX to deliver directly (< K)
 			DataLen:    uint16(len(pkt)),
 		}, shardData)
+		scc.pacer.pace(len(wirePkt))
 		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 		pipe := scc.pipes[int(idx)%len(scc.pipes)]
 		_, _ = pipe.WriteToUDP(wirePkt, scc.serverAddr)
@@ -588,6 +662,7 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 			GroupDataN: groupDataN,
 			DataLen:    binary.BigEndian.Uint16(scc.txGroup[i][:2]),
 		}, shard)
+		scc.pacer.pace(len(wirePkt))
 		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 		pipe := scc.pipes[int(idx)%len(scc.pipes)]
 		_, _ = pipe.WriteToUDP(wirePkt, scc.serverAddr)
@@ -605,6 +680,7 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 			GroupDataN: groupDataN,
 			DataLen:    0,
 		}, shard)
+		scc.pacer.pace(len(wirePkt))
 		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 		pipe := scc.pipes[int(idx)%len(scc.pipes)]
 		_, _ = pipe.WriteToUDP(wirePkt, scc.serverAddr)
@@ -1019,6 +1095,9 @@ type stripeSession struct {
 	fecMode   string // "always", "adaptive", "off"
 	adaptiveM int32  // atomic: current TX parity M (0..parityM)
 
+	// Pacing
+	pacer *stripePacer // TX rate limiter (nil = disabled)
+
 	// RX (client → server): FEC decode → TUN
 	rxGroups map[uint32]*fecGroup
 	rxMu     sync.Mutex
@@ -1099,6 +1178,7 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 			GroupDataN: 1, // signals RX to deliver directly (< K)
 			DataLen:    uint16(len(pkt)),
 		}, shardData)
+		sess.pacer.pace(len(wirePkt))
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		_, _ = sdc.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
 		return nil
@@ -1223,6 +1303,7 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 			DataLen:    binary.BigEndian.Uint16(sess.txGroup[i][:2]),
 		}, shard)
 
+		sess.pacer.pace(len(wirePkt))
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		_, _ = sdc.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
 	}
@@ -1240,6 +1321,7 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 			DataLen:    0,
 		}, shard)
 
+		sess.pacer.pace(len(wirePkt))
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		_, _ = sdc.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
 	}
@@ -1268,9 +1350,10 @@ type stripeServer struct {
 	ct      *connectionTable
 	dataK   int
 	parityM int
-	fecMode string // "always", "adaptive", "off"
-	logger  *Logger
-	closeCh chan struct{}
+	fecMode    string // "always", "adaptive", "off"
+	pacingRate int    // Mbps per session (0 = disabled)
+	logger     *Logger
+	closeCh    chan struct{}
 
 	pendingKeys *stripePendingKeys
 
@@ -1321,12 +1404,17 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 		dataK:      dataK,
 		parityM:    parityM,
 		fecMode:    fecMode,
+		pacingRate: cfg.StripePacingRate,
 		logger:     logger,
 		closeCh:    make(chan struct{}),
 		pendingKeys: pendingKeys,
 	}
 
-	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode)
+	pacingStr := "off"
+	if cfg.StripePacingRate > 0 {
+		pacingStr = fmt.Sprintf("%dMbps", cfg.StripePacingRate)
+	}
+	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s pacing=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode, pacingStr)
 	return ss, nil
 }
 
@@ -1514,6 +1602,7 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 		} else {
 			atomic.StoreInt32(&sess.adaptiveM, int32(ss.parityM))
 		}
+		sess.pacer = newStripePacer(ss.pacingRate)
 		ss.sessions[sessionID] = sess
 
 		// Create server-to-client datagramConn and register in connectionTable
