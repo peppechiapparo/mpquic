@@ -744,9 +744,9 @@ RX (receiver)                                TX (sender)
   │                                            │
   │  reorder buffer (jitter window ~50ms)      │  retransmit buffer (ring ~500ms)
   │  detect gap in sequence                    │
-  │── NACK bitmap [base_seq][missing bits] ──▶│
+  │── NACK bitmap [base_seq][missing bits] ───▶│
   │                                            │  retransmit only missing pkts
-  │◀── retransmitted packets ─────────────────│
+  │◀── retransmitted packets ──────────────────│
   │                                            │
   │  deliver in-order after gap filled or      │
   │  timeout (1.5× RTT)                        │

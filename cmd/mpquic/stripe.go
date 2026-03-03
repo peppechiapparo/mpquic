@@ -126,6 +126,9 @@ func (p *stripePacer) pace(bytes int) {
 		sleepDur := time.Duration(deficit / p.rateBPS * float64(time.Second))
 		if sleepDur > time.Microsecond {
 			time.Sleep(sleepDur)
+			// The sleep covered the deficit — reset tokens to zero so
+			// subsequent calls don't re-sleep for the same debt.
+			p.tokens = 0
 			p.lastRefill = time.Now()
 		}
 		p.tokens = 0
