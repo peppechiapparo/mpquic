@@ -1127,16 +1127,39 @@ func (ss *stripeServer) Run(ctx context.Context) {
 		if sess != nil && sess.rxCipher != nil {
 			decrypted, decOK := stripeDecryptPkt(sess.rxCipher.aead, raw)
 			if !decOK {
+				// Decrypt failed with current key. Check if client re-keyed
+				// (new KX stored in pendingKeys). If so, update ciphers in-place.
+				km := ss.pendingKeys.Get(hdr.Session)
+				if km != nil {
+					tmpCipher, err := newStripeCipher(km.c2sKey)
+					if err == nil {
+						decrypted2, decOK2 := stripeDecryptPkt(tmpCipher.aead, raw)
+						if decOK2 {
+							// Re-key succeeded — update session ciphers
+							newTx, errTx := newStripeCipher(km.s2cKey)
+							if errTx == nil {
+								sess.rxCipher = tmpCipher
+								sess.txCipher = newTx
+								ss.logger.Infof("stripe: session %08x re-keyed in-place", hdr.Session)
+								payload = decrypted2[stripeHdrLen:]
+								goto dispatched
+							}
+						}
+					}
+				}
 				atomic.AddUint64(&sess.securityDecryptFail, 1)
 				atomic.AddUint64(&ss.securityDecryptFail, 1)
 				continue
 			}
 			payload = decrypted[stripeHdrLen:]
-		} else if hdr.Type == stripeREGISTER {
+		} else if sess == nil {
 			// Unknown session — try pre-negotiated key from QUIC KX
 			km := ss.pendingKeys.Get(hdr.Session)
 			if km == nil {
 				continue // no key yet; client will retry
+			}
+			if hdr.Type != stripeREGISTER {
+				continue // only REGISTER can create sessions
 			}
 			tmpCipher, err := newStripeCipher(km.c2sKey)
 			if err != nil {
@@ -1149,10 +1172,11 @@ func (ss *stripeServer) Run(ctx context.Context) {
 			}
 			payload = decrypted[stripeHdrLen:]
 		} else {
-			// Unknown session + not REGISTER → drop
+			// Session exists but no cipher (shouldn't happen)
 			continue
 		}
 
+	dispatched:
 		switch hdr.Type {
 		case stripeREGISTER:
 			ss.handleRegister(hdr, payload, from)
