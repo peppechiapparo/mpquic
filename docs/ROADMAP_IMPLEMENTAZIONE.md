@@ -1,6 +1,6 @@
 # Roadmap implementazione MPQUIC
 
-*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-01*
+*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-03*
 
 ### Nota manutenzione (2026-03-01)
 - Cleanup diagnostico completato in `cmd/mpquic/main.go` (commit `c15b235`):
@@ -677,6 +677,132 @@ del protocollo UDP stripe.
 - [x] ALPN routing: `mpquic-ip` per tunnel, `mpquic-stripe-kx` per key exchange
 - [x] Build OK, `go vet` clean, 13 test pass
 - [ ] Benchmark throughput degradazione ≤10% rispetto stripe senza cifratura
+
+### Step 4.11 — FEC Adattivo (M=0 bypass) ✅ COMPLETATO (a54b717, 3867aae)
+
+**Obiettivo**: eliminare l'overhead FEC (20%) quando il canale è pulito (loss=0%),
+riattivare automaticamente la parità RS quando il canale degrada.
+
+**Implementazione**:
+1. Nuovo parametro `stripe_fec_mode`: `always` | `adaptive` | `off`
+2. Fast path M=0: ogni pacchetto IP → shard indipendente (GroupDataN=1), no padding, no parità
+3. Feedback bidirezionale: keepalive esteso a [pipe_idx][rx_loss_pct], server risponde [rx_loss_pct]
+4. Soglia: peer loss >2% → M=parityM; 0% per 15s → M=0
+5. Loss detection: solo FEC-group-based (sequence-based rimosso — falsi positivi al 65%)
+
+**Bug risolti**:
+- `a54b717`: implementazione completa adaptive FEC
+- `3867aae`: fix falsa rilevazione loss (txSeq condiviso tra M=0 e M>0 creava gap artificiali)
+
+**Benchmark (dual Starlink, 20 pipe, adaptive M=0)**:
+- Media: 239 Mbps (range 190–294), ~1.000 retransmit
+- Upload: 49.9 Mbps
+- Overhead M=0: 2.8% (solo crypto) vs 20% con M=2
+- Nessuna transizione falsa dopo fix 3867aae
+
+**Done criteria Step 4.11**:
+- [x] Tre modalità FEC (always/adaptive/off) configurabili via YAML
+- [x] Fast path M=0 senza accumulo, padding, parità
+- [x] Feedback loss bidirezionale via keepalive
+- [x] Falsa rilevazione loss corretta (sequence-based rimosso)
+- [x] Deploy e benchmark su infra reale (dual Starlink, 20 pipe)
+- [x] Risultati documentati in NOTA_TECNICA_MPQUIC.md v3.5
+
+### Step 4.12 — Pacing per Pipe (Token Bucket) ⬜ PROSSIMO
+
+**Obiettivo**: eliminare i retransmit auto-inflitti causati da burst UDP nella
+tight send loop. I 2.628 retransmit osservati nel run 3 (con M=0 e 0% FEC loss)
+dimostrano che la congestione è self-induced.
+
+**Approccio**: token bucket o micro-spreading per-pipe con rate proporzionale
+alla banda stimata del link. Ogni pipe riceve un budget di byte/s che viene
+consumato ad ogni `WriteTo()` e ricaricato a rate costante.
+
+**Implementazione prevista**:
+1. Struttura `pipePacer` con token bucket: `tokens`, `rate`, `lastRefill`
+2. In `SendDatagram()`: prima di `WriteTo()`, attendere token disponibile
+3. Rate iniziale: `link_bandwidth / num_pipes` (es. 200 Mbps / 10 = 20 Mbps/pipe)
+4. Opzionale: rate adattivo basato su throughput osservato per pipe
+5. Config: `stripe_pacing: true/false`, `stripe_pacing_rate: auto|<Mbps>`
+
+**Metriche target**:
+- −50% retransmit rispetto a baseline M=0
+- +15–25% throughput medio
+- Nessuna regressione upload
+
+**Effort stimato**: poche ore di implementazione + benchmark.
+
+### Step 4.13 — Hybrid ARQ con NACK Selettivo ⬜ PIANIFICATO
+
+**Obiettivo**: sostituire il FEC proattivo con un meccanismo reattivo: il receiver
+rileva gap di sequenza, genera NACK bitmap, il sender ritrasmette solo i pacchetti
+mancanti. Overhead ~0–3% in condizioni normali vs 20% del FEC RS.
+
+**Architettura**:
+```
+RX (receiver)                                TX (sender)
+  │                                            │
+  │  reorder buffer (jitter window ~50ms)      │  retransmit buffer (ring ~500ms)
+  │  detect gap in sequence                    │
+  │── NACK bitmap [base_seq][missing bits] ──▶│
+  │                                            │  retransmit only missing pkts
+  │◀── retransmitted packets ─────────────────│
+  │                                            │
+  │  deliver in-order after gap filled or      │
+  │  timeout (1.5× RTT)                        │
+```
+
+**Nuovo tipo pacchetto stripe**: `TYPE_NACK = 0x05`
+```
+[stripeHdr 16B][base_seq 4B][bitmap 8B]  →  indica fino a 64 pacchetti mancanti
+```
+
+**Componenti**:
+1. **RX reorder buffer**: ring buffer con timer, delivery in-order, gap detection
+2. **NACK generator**: produce bitmap dei gap ogni N ms o su threshold
+3. **TX retransmit buffer**: ring buffer ~500ms di pacchetti inviati
+4. **NACK handler**: riceve NACK, lookup nel buffer, retransmit
+5. **Timer calibration**: gap timeout = 1.5× smoothed RTT (derivato da keepalive)
+
+**Coesistenza con FEC**: Hybrid ARQ è il meccanismo primario, FEC M>0 resta come
+fallback per burst loss (quando il RTT di un NACK è troppo alto).
+
+**Effort stimato**: 2–3 giorni di implementazione + 1 giorno di tuning/test.
+
+### Step 4.14 — FEC per Dimensione Pacchetto ⬜ FUTURO
+
+**Obiettivo**: quando M>0 è attivo, pacchetti piccoli (<300B: ACK TCP, DNS, keepalive)
+vengono padded a ~1402B sprecando >90% dello shard. Skip FEC per questi pacchetti.
+
+**Implementazione**:
+1. Soglia `fecMinSize = 300` (configurabile)
+2. In `SendDatagram()`: se `len(pkt) < fecMinSize && M > 0` → invio diretto (senza FEC)
+3. Header: `GroupDataN = 1` per pacchetti non-FEC (come M=0 fast path)
+4. Risparmio: ~70% dei pacchetti in una sessione web sono ACK/piccoli
+
+**Effort stimato**: poche ore.
+
+### Step 4.15 — Sliding Window FEC ⬜ FUTURO
+
+**Obiettivo**: evoluzione dei gruppi FEC fissi (K blocchi → K+M shard) verso una
+finestra scorrevole dove la parità protegge gli ultimi N shard "in volo".
+
+**Vantaggi rispetto a gruppi fissi**:
+- Nessuna attesa per completare un gruppo → latenza minore
+- Parità calcolata su finestra scorrevole → protezione continua
+- Migliore granularità nel recovery (non serve ricevere K shard dello stesso gruppo)
+
+**Effort stimato**: giorni — complessità significativa nel tracking della finestra.
+
+### Done criteria Fase 4b (aggiornati)
+- [x] UDP Stripe + FEC transport implementato e deployato
+- [x] AES-256-GCM + TLS Exporter per sicurezza stripe
+- [x] FEC adattivo (M=0 bypass) con feedback bidirezionale
+- [ ] Pacing per pipe (Step 4.12)
+- [ ] Hybrid ARQ con NACK (Step 4.13)
+- [ ] FEC per dimensione pacchetto (Step 4.14)
+- [ ] Sliding window FEC (Step 4.15)
+- [ ] Throughput ≥ 400 Mbps su dual Starlink
 
 ---
 

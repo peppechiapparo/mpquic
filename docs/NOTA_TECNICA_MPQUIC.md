@@ -1,7 +1,7 @@
 # Nota Tecnica — Piattaforma MPQUIC: Test e Risultati
 
 **Data**: 3 marzo 2026  
-**Versione**: 3.4  
+**Versione**: 3.5  
 **Autori**: Team Engineering SATCOMVAS  
 **Classificazione**: Interna / Clienti
 
@@ -46,11 +46,15 @@
 
 16. [Sicurezza Stripe — Da MAC/rekey ad AES-256-GCM](#16-sicurezza-stripe--da-macrekey-ad-aes-256-gcm)
 
+**Fase 4b.5 — Dual Starlink + FEC Adattivo (POC 500 Mbps)**
+
+17. [POC Dual Starlink — FEC Adattivo e Analisi Prestazionale](#17-poc-dual-starlink--fec-adattivo-e-analisi-prestazionale)
+
 **Conclusioni e Appendice**
 
-17. [Vantaggi per il Cliente](#17-vantaggi-per-il-cliente)
-18. [Conclusioni](#18-conclusioni)
-19. [Appendice — Comandi Completi](#19-appendice--comandi-completi)
+18. [Vantaggi per il Cliente](#18-vantaggi-per-il-cliente)
+19. [Conclusioni](#19-conclusioni)
+20. [Appendice — Comandi Completi](#20-appendice--comandi-completi)
 
 ---
 
@@ -117,6 +121,22 @@ il 1 marzo 2026, organizzati per fase di sviluppo.
 | **TX balance** | wan4: 37.345, wan5: 37.379, wan6: 37.226 pkts (±0.2%) |
 | **Retransmit** | 1.437 |
 | **Fix critici** | SO_BINDTODEVICE, session timeout 30s, graceful shutdown |
+
+### Fase 4b.5 — POC Dual Starlink + FEC Adattivo (2-3 marzo 2026)
+
+> **FEC adattivo: bypass parità quando loss=0 (overhead 20% → 2.8%).
+> Dual Starlink 20 pipe: media 239 Mbps (range 190–294).
+> Analisi 7 proposte di ottimizzazione, roadmap verso 500 Mbps.**
+
+| Metrica | Valore |
+|---------|--------|
+| **FEC mode** | Adattivo: M=0 (loss=0) → M=2 (loss >2%) |
+| **Overhead M=0** | 2.8% (solo crypto AES-GCM) |
+| **Throughput medio (6 run)** | **239 Mbps** (range 190–294) |
+| **Throughput picco** | **294 Mbps** |
+| **Retransmit medio** | ~1.000 |
+| **Upload** | 49.9 Mbps (invariato) |
+| **Prossimo step** | Pacing per pipe → Hybrid ARQ NACK |
 
 ---
 
@@ -1745,9 +1765,216 @@ Parametri di configurazione rimossi: `stripe_auth_key`, `stripe_rekey_seconds`.
 
 ---
 
-## 17. Vantaggi per il Cliente
+## 17. POC Dual Starlink — FEC Adattivo e Analisi Prestazionale
 
-### 16.1 Qualità del Servizio Garantita
+### 17.1 Contesto: obiettivo 500 Mbps
+
+Con il deploy di produzione su 3 link Starlink (303 Mbps, §15), il passo successivo
+è stato l'attivazione di un setup **dual Starlink dedicato** (WAN5 + WAN6) con
+**10 pipe UDP per path** (20 pipe totali) per verificare la fattibilità di un
+throughput aggregato di **500 Mbps**.
+
+**Configurazione POC:**
+
+| Parametro | Valore |
+|-----------|--------|
+| **Link attivi** | WAN5 (enp7s7, Starlink #1) + WAN6 (enp7s8, Starlink #2) |
+| **Pipe per path** | 10 (totale 20 pipe UDP) |
+| **FEC** | Reed-Solomon K=10, M=2 (20% ridondanza) |
+| **Cifratura** | AES-256-GCM con TLS 1.3 Exporter |
+| **Policy** | balanced (round-robin per-flow) |
+| **Dispatch** | Per-flow round-robin (commit `4ae19a9`) |
+
+**Bandwidth raw parallelo** (iperf3 diretto, senza tunnel):
+- WAN5: ~210 Mbps
+- WAN6: ~211 Mbps
+- **Totale grezzo: ~421 Mbps**
+
+**Baseline tunnel** (prima dell'ottimizzazione FEC): **~290 Mbps** download, **49.5 Mbps** upload.
+
+### 17.2 Analisi overhead FEC
+
+L'analisi dell'overhead ha evidenziato un divario significativo tra la banda grezza
+(421 Mbps) e il throughput tunnel (290 Mbps), pari al **~31% di overhead**:
+
+| Componente overhead | Byte per shard | % su 1400B payload |
+|---------------------|---------------|-------------------|
+| Stripe header (AAD) | 16 | 1.1% |
+| Sequence counter | 8 | 0.6% |
+| GCM authentication tag | 16 | 1.1% |
+| **Subtotale crypto** | **40** | **2.8%** |
+| FEC parity (M=2, K=10) | +20% shards aggiuntivi | **16.7%** |
+| **Totale con M=2** | | **~20%** |
+
+Il gap residuo (31% − 20%) è attribuibile a:
+- Varianza intrinseca Starlink (handover satellitari, beam switching)
+- Burst-induced retransmit nella tight send loop UDP
+- Overhead IP/UDP headers (28B per datagram)
+
+### 17.3 FEC Adattivo — Implementazione
+
+**Motivazione**: quando il canale è pulito (loss = 0%), i shard di parità sono
+puro spreco di banda. L'idea è **eliminare la parità quando non serve** e
+riattivarla solo quando il canale degrada.
+
+**Implementazione** (commit `a54b717`):
+
+Nuovo parametro di configurazione `stripe_fec_mode` con tre modalità:
+
+| Modalità | Comportamento | Caso d'uso |
+|----------|--------------|------------|
+| `always` | FEC K+M fisso (comportamento precedente) | Link ad alta perdita |
+| `adaptive` | M=0 normalmente, M=parityM quando loss >2% | **Starlink (default)** |
+| `off` | FEC disabilitato, parityM=0 | Debug / link affidabili |
+
+**Fast path M=0**: quando l'FEC adattivo determina M=0, ogni pacchetto IP viene
+inviato come shard indipendente (`GroupDataN=1`), senza accumulo in gruppi,
+senza padding, senza shard di parità. Overhead ridotto al solo crypto (2.8%).
+
+**Meccanismo di feedback bidirezionale**:
+
+```
+CLIENT (TX)                                    SERVER (RX)
+    │                                              │
+    │── keepalive [pipe_idx][rx_loss_pct] ────────▶│  ogni 2s per pipe
+    │                                              │  server calcola propria RX loss
+    │◀── keepalive reply [rx_loss_pct] ────────────│  invia loss al client
+    │                                              │
+    │  if peerLoss > 2% → M = parityM              │  if peerLoss > 2% → M = parityM
+    │  if peerLoss = 0% per 15s → M = 0            │  if peerLoss = 0% per 15s → M = 0
+```
+
+**Rilevamento perdita**: basato esclusivamente su gruppi FEC (conteggio ricostruzioni
+/ gruppi totali). Il rilevamento basato su gap sequenziali è stato rimosso (commit
+`3867aae`) perché produceva falsi positivi: `txSeq` è condiviso tra path M=0 e M>0,
+e M>0 consuma K numeri di sequenza per gruppo ma produce un solo `GroupSeq`, creando
+gap artificiali interpretati erroneamente come 65% di perdita.
+
+### 17.4 Benchmark Dual Starlink — FEC Adattivo M=0
+
+**Setup**: dual Starlink, 10 pipe per path, `stripe_fec_mode: adaptive`, M=0 attivo
+(nessuna transizione a M=2 durante i test — canale pulito).
+
+**Comando**: `iperf3 -c 10.200.17.254 -p 5201 -R -t 30 -P 8`
+
+| Run | Download (Mbps) | Retransmit | Note |
+|-----|----------------|------------|------|
+| 1 | 259 | 626 | — |
+| 2 | 190 | 609 | Starlink dip |
+| 3 | 248 | 2.628 | Picchi 310–361 Mbps, poi calo a 160 |
+| 4 | 195 | 1.022 | Starlink dip |
+| 5 | 246 | 1.020 | — |
+| 6 | 294 | 849 | Miglior run |
+| **Media** | **239** | **~1.000** | Range 190–294 Mbps |
+
+**Upload**: 49.9 Mbps (invariato rispetto a baseline 49.5 Mbps).
+
+**Osservazioni chiave**:
+1. **Enorme varianza Starlink**: 190–294 Mbps nella stessa sessione di test,
+   attribuibile a handover satellitari e variabilità del beam
+2. **Il baseline 290 Mbps era un campione fortunato**: la media reale è ~240 Mbps
+3. **I retransmit con M=0 sono auto-inflitti**: 2.628 retransmit nel run 3
+   con 0% FEC loss indicano burst-induced congestion nella tight send loop
+4. **Nessuna transizione adattiva falsa**: dopo il fix `3867aae`, il sistema
+   resta correttamente in M=0 per tutta la durata dei test
+5. **Upload non impattato**: conferma che il bottleneck è sul download (server→client)
+
+### 17.5 Analisi delle Proposte di Ottimizzazione
+
+A fronte dei risultati, sono state valutate 7 proposte di ottimizzazione avanzate
+per superare il plateau di ~300 Mbps e avvicinarsi all'obiettivo 500 Mbps.
+
+#### Proposta A — FEC Convoluzionale (Sliding Window)
+
+**Concetto**: sostituire i gruppi FEC fissi (K blocchi → K+M shard) con una finestra
+scorrevole dove la parità protegge gli ultimi N pacchetti "in volo".
+
+**Valutazione**: già risolta dal fast path M=0. Quando loss=0 l'overhead è azzerato,
+quando loss>0 si attiva M=2 con gruppi fissi. Il vantaggio teorico della finestra
+scorrevole si manifesterebbe solo con loss >0, e il guadagno marginale non giustifica
+la complessità implementativa (richiede buffer di ritrasmissione, tracking per-shard).
+
+**Priorità**: ⬜ Bassa — implementabile come evoluzione della modalità M>0 in futuro.
+
+#### Proposta B — FEC per Dimensione Pacchetto
+
+**Concetto**: saltare la codifica FEC per pacchetti piccoli (ACK TCP ~60B, DNS ~100B)
+che vengono padded a `shard_size ≈ 1402B`, sprecando >90% dello shard.
+
+**Valutazione**: sensata per il path M>0. Con M=0 il padding è già eliminato
+(`GroupDataN=1`, shard = dimensione reale). Implementazione: soglia a ~300B,
+sotto la quale il pacchetto viene inviato diretto (senza FEC) anche quando M>0.
+
+**Priorità**: 🟡 Media — utile quando il canale è degradato (M>0 attivo).
+
+#### Proposta C — Hybrid ARQ con NACK Selettivo
+
+**Concetto**: sostituire il FEC proattivo con un meccanismo reattivo: il receiver
+mantiene un reorder buffer, rileva gap nelle sequenze, genera NACK bitmap,
+il sender ritrasmette solo i pacchetti mancanti.
+
+**Valutazione**: **la soluzione architetturalmente corretta** per il lungo termine.
+Overhead ~0–3% in condizioni normali (solo header sequenza + NACK occasionali),
+recupero selettivo con latenza 1×RTT (~25ms su Starlink). Richiede:
+- Buffer di riordino RX con timer per delivery
+- Protocollo NACK bitmap (nuovo tipo pacchetto stripe)
+- Buffer di ritrasmissione TX (ring buffer ~500ms di traffico)
+- Calibrazione timer gap vs RTT
+
+**Priorità**: 🔴 Alta — salto architetturale, effort 2–3 giorni.
+
+#### Proposta D — Thin Parity (XOR Semplice)
+
+**Concetto**: sostituire Reed-Solomon con XOR a singola parità per minor overhead CPU.
+
+**Valutazione**: **non applicabile**. Starlink perde interi datagram UDP, non singoli
+byte. XOR su un solo shard di parità recupera solo 1 perdita per gruppo — RS M=2
+ne recupera 2. Il collo di bottiglia non è la CPU (`reedsolomon` usa SIMD AVX2)
+ma la banda occupata dai shard di parità.
+
+**Priorità**: ⬜ Nessuna — non risolve il problema reale.
+
+#### Proposta E — Pacing per Pipe (Token Bucket)
+
+**Concetto**: introdurre rate limiting per-pipe nella send loop per evitare burst
+UDP che causano retransmit auto-inflitti.
+
+**Valutazione**: **miglior rapporto costo/beneficio immediato**. L'evidenza empirica
+(2.628 retransmit nel run 3 con M=0 e 0% FEC loss) dimostra che la tight send loop
+genera burst che saturano i buffer intermedi (Starlink modem, router, NIC ring buffer).
+Un token bucket o micro-spreading (`time.Sleep(50µs)` tra write) livellerebbe il
+traffico riducendo i retransmit del 50% o più.
+
+**Priorità**: 🔴 Immediata — poche ore di implementazione, test rapido.
+
+#### Proposta F — Approccio Combinato (Architettura Target)
+
+**Concetto**: combinare pacing + NACK ARQ + FEC adattivo in una pipeline integrata.
+
+**Valutazione**: questa è l'architettura target per raggiungere 500 Mbps:
+1. **Pacing** elimina i retransmit auto-inflitti (guadagno stimato: +15–25%)
+2. **NACK ARQ** fornisce recovery selettivo con overhead ~0–3%
+3. **FEC M>0** resta come fallback per burst loss (quando NACK non basta)
+
+### 17.6 Roadmap Ottimizzazione Stripe
+
+In base all'analisi, il piano di sviluppo procede in fasi ordinate per rischio/beneficio:
+
+| Fase | Intervento | Effort | Guadagno atteso | Stato |
+|------|-----------|--------|-----------------|-------|
+| **4b.5** | Pacing per pipe (token bucket) | Ore | −50% retransmit, +15–25% throughput | ⬜ Prossimo |
+| **4b.6** | Hybrid ARQ con NACK selettivo | 2–3 giorni | Overhead 0–3%, recovery in 1×RTT | ⬜ Pianificato |
+| **4b.7** | FEC per dimensione pacchetto | Ore | −90% spreco su ACK/DNS quando M>0 | ⬜ Futuro |
+| **4b.8** | Sliding window FEC (M>0 evoluto) | Giorni | Migliore granularità recovery | ⬜ Futuro |
+
+**Strategia**: prima Fase 4b.5 (pacing) con benchmark rapido per quantificare il
+guadagno reale, poi Fase 4b.6 (Hybrid ARQ) come salto architetturale definitivo.
+
+---
+
+## 18. Vantaggi per il Cliente
+
+### 18.1 Qualità del Servizio Garantita
 
 La piattaforma MPQUIC garantisce che le applicazioni critiche del cliente mantengano
 prestazioni ottimali **indipendentemente dallo stato delle altre applicazioni**:
@@ -1759,7 +1986,7 @@ prestazioni ottimali **indipendentemente dallo stato delle altre applicazioni**:
 - **Backup e sincronizzazione**: possono saturare la loro quota di banda senza
   impattare le altre classi di traffico
 
-### 16.2 Resilienza alle Condizioni del Link
+### 18.2 Resilienza alle Condizioni del Link
 
 Le connessioni satellitari LEO (Starlink) sono soggette a variabilità naturale:
 handover tra satelliti, condizioni meteo, congestione del beam. Grazie
@@ -1769,14 +1996,14 @@ all'isolamento per classe:
 - Le **applicazioni critiche** continuano a funzionare normalmente
 - Non è necessario **interrompere il backup** per fare una telefonata
 
-### 16.3 Monitorabilità e Trasparenza
+### 18.3 Monitorabilità e Trasparenza
 
 Ogni tunnel è separato e monitorabile individualmente:
 - **RTT per classe**: è possibile misurare la latenza di ogni tipo di traffico
 - **Throughput per classe**: visibilità sulla banda effettivamente utilizzata
 - **Loss per classe**: identificazione immediata di quale tipo di traffico è affetto
 
-### 16.4 Scalabilità
+### 18.4 Scalabilità
 
 L'architettura è stata progettata per scalare:
 - **3 link × 3 classi = 9 tunnel** già operativi
@@ -1785,7 +2012,7 @@ L'architettura è stata progettata per scalare:
 - Classificazione flessibile tramite VLAN: l'apparato di rete del cliente decide
   quale traffico va in quale classe
 
-### 16.5 Confronto sintetico: prima e dopo
+### 18.5 Confronto sintetico: prima e dopo
 
 | Scenario | Prima (tunnel singolo) | Dopo (MPQUIC multi-tunnel) |
 |----------|------------------------|----------------------------|
@@ -1796,13 +2023,14 @@ L'architettura è stata progettata per scalare:
 
 ---
 
-## 18. Conclusioni
+## 19. Conclusioni
 
-I test condotti tra il 28 febbraio e il 1 marzo 2026 dimostrano in modo
+I test condotti tra il 28 febbraio e il 3 marzo 2026 dimostrano in modo
 **quantitativo e riproducibile** che la piattaforma MPQUIC soddisfa tutti gli
-obbiettivi delle quattro fasi di sviluppo: isolamento multi-tunnel, resilienza
-BBR su satellite, failover automatico, aggregazione multi-link e **bypass del
-traffic shaping Starlink con throughput fino a 313 Mbps**.
+obbiettivi delle cinque fasi di sviluppo: isolamento multi-tunnel, resilienza
+BBR su satellite, failover automatico, aggregazione multi-link, **bypass del
+traffic shaping Starlink con throughput fino a 313 Mbps**, e ottimizzazione
+del protocollo FEC con modalità adattiva.
 
 **Risultati chiave per fase:**
 
@@ -1873,26 +2101,39 @@ traffic shaping Starlink con throughput fino a 313 Mbps**.
     restart server (timeout 30s) e riconnette automaticamente. Lo stop dei tunnel
     avviene in modo pulito senza richiedere reboot.
 
-**Prossimi sviluppi (Fase 5 — Ingegnerizzazione):**
+**Fase 4b.5 — Dual Starlink + FEC Adattivo:**
 
-- **Speedtest end-to-end con stripe**: misura Ookla da LAN attraverso tunnel stripe 3-WAN
-- **Monitoring e telemetria stripe**: statistiche FEC (recovery rate, loss rate),
-  throughput per pipe, stato sessioni
-- **Auto-detection Starlink migliorata**: attivazione automatica stripe quando
-  il link è Starlink (rDNS + CGNAT detection)
-- **BBRv2/v3**: implementazione completa con reazione proporzionale alla loss
-- **QoS attivo** (DSCP, traffic shaping): allocazione di banda garantita per classe
+17. **FEC Adattivo M=0**: eliminazione dell'overhead FEC (20% → 2.8%) quando il canale
+    è pulito, con riattivazione automatica della parità Reed-Solomon al superamento
+    del 2% di loss. Feedback bidirezionale via keepalive esteso.
+
+18. **Benchmark dual Starlink**: media 239 Mbps (range 190–294) su 6 run con
+    varianza Starlink dominante. Evidenza che i retransmit sono in gran parte
+    auto-inflitti dalla tight send loop (burst-induced congestion).
+
+19. **Analisi ottimizzazione**: 7 proposte valutate, piano strutturato in 4 fasi
+    (pacing → NACK ARQ → FEC per size → sliding window FEC) per raggiungere
+    l'obiettivo 500 Mbps.
+
+**Prossimi sviluppi:**
+
+- **Fase 4b.5 — Pacing per pipe**: token bucket per eliminare burst-induced retransmit
+  (guadagno atteso: −50% retransmit, +15–25% throughput)
+- **Fase 4b.6 — Hybrid ARQ con NACK selettivo**: recovery reattivo con overhead 0–3%,
+  latenza 1×RTT (~25ms) — salto architetturale dal FEC proattivo al recupero selettivo
+- **Fase 4b.7 — FEC per dimensione pacchetto**: skip FEC per pacchetti <300B quando M>0
+- **Fase 4b.8 — Sliding Window FEC**: evoluzione dei gruppi fissi verso finestra scorrevole
+- **Monitoring e telemetria stripe**: statistiche FEC, throughput per pipe, stato sessioni
 - **Monitoring dashboard**: interfaccia web per tutti i tunnel e metriche real-time
-- **Cleanup logging diagnostico**: rimozione log `[DIAG]` temporanei da main.go
 
 ---
 
-*Documento aggiornato il 03/03/2026 — Piattaforma MPQUIC v3.4 (AES-256-GCM stripe security)*  
-*Commit di riferimento: 885087c (main)*
+*Documento aggiornato il 03/03/2026 — Piattaforma MPQUIC v3.5 (FEC adattivo + analisi ottimizzazione)*  
+*Commit di riferimento: 3867aae (main)*
 
 ---
 
-## 19. Appendice — Comandi Completi
+## 20. Appendice — Comandi Completi
 
 ### A.1 Verifica stato tunnel
 
