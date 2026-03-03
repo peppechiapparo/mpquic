@@ -775,14 +775,17 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 				_ = scc.Close()
 				return
 			}
-			for _, pipe := range scc.pipes {
-				pkt := make([]byte, stripeHdrLen)
+			for i, pipe := range scc.pipes {
+				// Include pipe index byte in payload so server can update
+				// pipe addresses after CGNAT rebind.
+				pkt := make([]byte, stripeHdrLen+1)
 				encodeStripeHdr(pkt, &stripeHdr{
 					Magic:   stripeMagic,
 					Version: stripeVersion,
 					Type:    stripeKEEPALIVE,
 					Session: scc.sessionID,
 				})
+				pkt[stripeHdrLen] = byte(i)
 				pkt = stripeEncrypt(scc.txCipher, pkt)
 				_, _ = pipe.WriteToUDP(pkt, scc.serverAddr)
 			}
@@ -1158,7 +1161,7 @@ func (ss *stripeServer) Run(ctx context.Context) {
 		case stripePARITY:
 			ss.handleParityShard(hdr, payload, from)
 		case stripeKEEPALIVE:
-			ss.handleKeepalive(hdr, from)
+			ss.handleKeepalive(hdr, payload, from)
 		}
 	}
 }
@@ -1411,13 +1414,38 @@ func (ss *stripeServer) deliverGroupToTUN(sess *stripeSession, grp *fecGroup) {
 	}
 }
 
-func (ss *stripeServer) handleKeepalive(hdr stripeHdr, from *net.UDPAddr) {
+func (ss *stripeServer) handleKeepalive(hdr stripeHdr, payload []byte, from *net.UDPAddr) {
 	sess := ss.lookupSession(hdr.Session, from)
 	if sess == nil {
 		// Unknown session — don't reply so client detects timeout and reconnects
 		return
 	}
 	sess.lastActivity = time.Now()
+
+	// Update pipe address if the client included a pipe index byte.
+	// This handles CGNAT rebind: the client's public IP:port changed,
+	// so we update sess.pipes and addrToSess to the new source address.
+	if len(payload) >= 1 {
+		pipeIdx := int(payload[0])
+		ss.mu.Lock()
+		if pipeIdx >= 0 && pipeIdx < len(sess.pipes) {
+			old := sess.pipes[pipeIdx]
+			if old == nil || old.String() != from.String() {
+				// Remove old addrToSess entry
+				if old != nil {
+					delete(ss.addrToSess, old.String())
+				}
+				sess.pipes[pipeIdx] = from
+				ss.addrToSess[from.String()] = hdr.Session
+				if old != nil {
+					ss.logger.Infof("stripe: pipe %d/%d address updated %s → %s (session=%08x)",
+						pipeIdx, len(sess.pipes), old, from, hdr.Session)
+				}
+			}
+		}
+		ss.mu.Unlock()
+	}
+
 	// Reply
 	reply := make([]byte, stripeHdrLen)
 	encodeStripeHdr(reply, &stripeHdr{
