@@ -61,6 +61,7 @@ type Config struct {
 	StripeParityShards    int                   `yaml:"stripe_parity_shards"`
 	StripeFECMode         string                `yaml:"stripe_fec_mode"` // "always" (default), "adaptive", "off"
 	StripePacingRate      int                   `yaml:"stripe_pacing_rate"` // Mbps per session (0 = disabled)
+	StripeARQ             bool                  `yaml:"stripe_arq"`         // Hybrid ARQ with NACK retransmission
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
 }
 

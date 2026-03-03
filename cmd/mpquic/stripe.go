@@ -47,6 +47,7 @@ const (
 	stripePARITY    uint8 = 0x02
 	stripeREGISTER  uint8 = 0x03
 	stripeKEEPALIVE uint8 = 0x04
+	stripeNACK      uint8 = 0x05
 
 	// Header: magic(2) + ver(1) + type(1) + session(4) + groupSeq(4) + shardIdx(1) + groupDataN(1) + dataLen(2) = 16
 	stripeHdrLen = 16
@@ -239,6 +240,10 @@ type stripeClientConn struct {
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
 
+	// Hybrid ARQ
+	arqTx *arqTxBuf     // TX retransmit buffer (nil = ARQ disabled)
+	arqRx *arqRxTracker // RX gap detector + NACK generator
+
 	// TX state
 	txSeq    uint32 // atomic: next data sequence number
 	txPipe   uint32 // atomic: round-robin pipe selector
@@ -417,6 +422,10 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	atomic.StoreInt32(&scc.adaptiveM, initialAdaptiveM)
 	atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
 	scc.pacer = newStripePacer(cfg.StripePacingRate)
+	if cfg.StripeARQ {
+		scc.arqTx = &arqTxBuf{}
+		scc.arqRx = newArqRxTracker()
+	}
 
 	// Open N UDP sockets bound to the same interface
 	for i := 0; i < pipes; i++ {
@@ -489,6 +498,11 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	// Start keepalive
 	go scc.keepaliveLoop(ctx)
 
+	// Start ARQ NACK generation loop if enabled
+	if scc.arqRx != nil {
+		go scc.arqNackLoop(ctx)
+	}
+
 	// Flush timer for partial FEC groups
 	scc.txTimer = time.AfterFunc(stripeFlushInterval, scc.flushTxGroup)
 
@@ -496,8 +510,12 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	if cfg.StripePacingRate > 0 {
 		pacingStr = fmt.Sprintf("%dMbps", cfg.StripePacingRate)
 	}
-	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d mode=%s pacing=%s server=%s encrypted=AES-256-GCM",
-		sessionID, len(scc.pipes), dataK, parityM, fecMode, pacingStr, serverAddr)
+	arqStr := "off"
+	if cfg.StripeARQ {
+		arqStr = "on"
+	}
+	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d mode=%s pacing=%s arq=%s server=%s encrypted=AES-256-GCM",
+		sessionID, len(scc.pipes), dataK, parityM, fecMode, pacingStr, arqStr, serverAddr)
 
 	return scc, nil
 }
@@ -528,6 +546,12 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 			GroupDataN: 1, // signals RX to deliver directly (< K)
 			DataLen:    uint16(len(pkt)),
 		}, shardData)
+
+		// ARQ: store plaintext in retransmit buffer before sending
+		if scc.arqTx != nil {
+			scc.arqTx.store(seq, shardData, uint16(len(pkt)))
+		}
+
 		scc.pacer.pace(len(wirePkt))
 		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 		pipe := scc.pipes[int(idx)%len(scc.pipes)]
@@ -816,6 +840,8 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 					atomic.StoreInt64(&scc.lastPeerLoss, time.Now().UnixNano())
 				}
 			}
+		case stripeNACK:
+			scc.handleNack(hdr, payload)
 		}
 	}
 }
@@ -838,6 +864,10 @@ func (scc *stripeClientConn) handleRxShard(hdr stripeHdr, payload []byte, isPari
 
 	// Partial group (fewer than K data shards) — deliver data directly, no FEC
 	if !isParity && int(hdr.GroupDataN) < scc.dataK {
+		// ARQ: mark this sequence as received for gap detection
+		if scc.arqRx != nil {
+			scc.arqRx.markReceived(hdr.GroupSeq)
+		}
 		scc.deliverDataDirect(hdr, payload)
 		return
 	}
@@ -1077,6 +1107,91 @@ func (scc *stripeClientConn) gcRxGroups() {
 	}
 }
 
+// ─── Client ARQ: NACK handler + generation loop ──────────────────────────
+
+// handleNack processes a NACK from the server requesting retransmission of
+// packets the server sent to us. This happens when the *server* detects gaps
+// in what *we* sent. We look up our TX ring buffer and retransmit.
+func (scc *stripeClientConn) handleNack(hdr stripeHdr, payload []byte) {
+	if scc.arqTx == nil {
+		return
+	}
+	baseSeq, bitmap, ok := decodeNackPayload(payload)
+	if !ok || bitmap == 0 {
+		return
+	}
+
+	var retxCount int
+	for bit := uint32(0); bit < 64; bit++ {
+		if bitmap&(1<<bit) == 0 {
+			continue
+		}
+		seq := baseSeq + bit
+		shardData, dataLen, found := scc.arqTx.lookup(seq)
+		if !found {
+			continue
+		}
+		// Re-encrypt with fresh nonce and send on round-robin pipe
+		wirePkt := stripeEncryptShard(scc.txCipher, &stripeHdr{
+			Magic:      stripeMagic,
+			Version:    stripeVersion,
+			Type:       stripeDATA,
+			Session:    scc.sessionID,
+			GroupSeq:   seq,
+			ShardIdx:   0,
+			GroupDataN: 1,
+			DataLen:    dataLen,
+		}, shardData)
+		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
+		pipe := scc.pipes[int(idx)%len(scc.pipes)]
+		_, _ = pipe.WriteToUDP(wirePkt, scc.serverAddr)
+		retxCount++
+	}
+
+	if retxCount > 0 {
+		scc.logger.Debugf("stripe ARQ: retransmitted %d packets (base=%d)", retxCount, baseSeq)
+	}
+}
+
+// arqNackLoop periodically checks for gaps in received sequences and sends
+// NACK packets to the server requesting retransmission.
+func (scc *stripeClientConn) arqNackLoop(ctx context.Context) {
+	ticker := time.NewTicker(arqNackInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-scc.closeCh:
+			return
+		case <-ticker.C:
+			if scc.arqRx == nil {
+				continue
+			}
+			baseSeq, bitmap, count := scc.arqRx.getMissing()
+			if count == 0 {
+				continue
+			}
+			// Build and send NACK packet
+			pkt := make([]byte, stripeHdrLen+arqNackPayloadLen)
+			encodeStripeHdr(pkt, &stripeHdr{
+				Magic:   stripeMagic,
+				Version: stripeVersion,
+				Type:    stripeNACK,
+				Session: scc.sessionID,
+			})
+			encodeNackPayload(pkt[stripeHdrLen:], baseSeq, bitmap)
+			pkt = stripeEncrypt(scc.txCipher, pkt)
+			// Send on first active pipe
+			if len(scc.pipes) > 0 {
+				_, _ = scc.pipes[0].WriteToUDP(pkt, scc.serverAddr)
+			}
+			scc.arqRx.addNacksSent(1)
+			scc.logger.Debugf("stripe ARQ: NACK sent base=%d count=%d", baseSeq, count)
+		}
+	}
+}
+
 // ─── Stripe Server ────────────────────────────────────────────────────────
 
 // stripeSession holds per-client state on the server side.
@@ -1100,6 +1215,10 @@ type stripeSession struct {
 
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
+
+	// Hybrid ARQ
+	arqTx *arqTxBuf     // TX retransmit buffer (nil = ARQ disabled)
+	arqRx *arqRxTracker // RX gap detector + NACK generator
 
 	// RX (client → server): FEC decode → TUN
 	rxGroups map[uint32]*fecGroup
@@ -1181,6 +1300,12 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 			GroupDataN: 1, // signals RX to deliver directly (< K)
 			DataLen:    uint16(len(pkt)),
 		}, shardData)
+
+		// ARQ: store plaintext in retransmit buffer before sending
+		if sess.arqTx != nil {
+			sess.arqTx.store(seq, shardData, uint16(len(pkt)))
+		}
+
 		sess.pacer.pace(len(wirePkt))
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		_, _ = sdc.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
@@ -1355,6 +1480,7 @@ type stripeServer struct {
 	parityM int
 	fecMode    string // "always", "adaptive", "off"
 	pacingRate int    // Mbps per session (0 = disabled)
+	arqEnabled bool   // Hybrid ARQ enabled
 	logger     *Logger
 	closeCh    chan struct{}
 
@@ -1408,6 +1534,7 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 		parityM:    parityM,
 		fecMode:    fecMode,
 		pacingRate: cfg.StripePacingRate,
+		arqEnabled: cfg.StripeARQ,
 		logger:     logger,
 		closeCh:    make(chan struct{}),
 		pendingKeys: pendingKeys,
@@ -1417,7 +1544,11 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 	if cfg.StripePacingRate > 0 {
 		pacingStr = fmt.Sprintf("%dMbps", cfg.StripePacingRate)
 	}
-	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s pacing=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode, pacingStr)
+	arqStr := "off"
+	if cfg.StripeARQ {
+		arqStr = "on"
+	}
+	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s pacing=%s arq=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode, pacingStr, arqStr)
 	return ss, nil
 }
 
@@ -1530,6 +1661,8 @@ func (ss *stripeServer) Run(ctx context.Context) {
 			ss.handleParityShard(hdr, payload, from)
 		case stripeKEEPALIVE:
 			ss.handleKeepalive(hdr, payload, from)
+		case stripeNACK:
+			ss.handleNack(hdr, payload, from)
 		}
 	}
 }
@@ -1606,6 +1739,10 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			atomic.StoreInt32(&sess.adaptiveM, int32(ss.parityM))
 		}
 		sess.pacer = newStripePacer(ss.pacingRate)
+		if ss.arqEnabled {
+			sess.arqTx = &arqTxBuf{}
+			sess.arqRx = newArqRxTracker()
+		}
 		ss.sessions[sessionID] = sess
 
 		// Create server-to-client datagramConn and register in connectionTable
@@ -1625,6 +1762,11 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 
 		// Start goroutine writing decoded packets to TUN
 		go ss.tunWriter(sess)
+
+		// Start ARQ NACK generation loop if enabled
+		if sess.arqRx != nil {
+			go ss.startArqNackLoop(context.Background(), sess)
+		}
 	}
 
 	if pipeIdx >= 0 && pipeIdx < len(sess.pipes) {
@@ -1692,6 +1834,10 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 
 	// Partial group or no FEC: deliver directly
 	if int(hdr.GroupDataN) < ss.dataK || ss.parityM == 0 || sess.enc == nil {
+		// ARQ: mark this sequence as received for gap detection
+		if sess.arqRx != nil {
+			sess.arqRx.markReceived(hdr.GroupSeq)
+		}
 		if hdr.DataLen > 0 && len(payload) >= 2+int(hdr.DataLen) {
 			pkt := make([]byte, hdr.DataLen)
 			copy(pkt, payload[2:2+hdr.DataLen])
@@ -1922,6 +2068,110 @@ func (ss *stripeServer) handleKeepalive(hdr stripeHdr, payload []byte, from *net
 	reply[stripeHdrLen] = rxLoss
 	reply = stripeEncrypt(sess.txCipher, reply)
 	_, _ = ss.conn.WriteToUDP(reply, from)
+}
+
+// ─── Server ARQ: NACK handler + generation ─────────────────────────────
+
+// handleNack processes a NACK from a client requesting retransmission of
+// packets we sent to that client. Look up our TX ring buffer and retransmit.
+func (ss *stripeServer) handleNack(hdr stripeHdr, payload []byte, from *net.UDPAddr) {
+	sess := ss.lookupSession(hdr.Session, from)
+	if sess == nil || sess.arqTx == nil {
+		return
+	}
+	baseSeq, bitmap, ok := decodeNackPayload(payload)
+	if !ok || bitmap == 0 {
+		return
+	}
+	sess.lastActivity = time.Now()
+
+	// Collect active pipes for round-robin retransmission
+	var activePipes []*net.UDPAddr
+	for _, p := range sess.pipes {
+		if p != nil {
+			activePipes = append(activePipes, p)
+		}
+	}
+	if len(activePipes) == 0 {
+		return
+	}
+
+	var retxCount int
+	for bit := uint32(0); bit < 64; bit++ {
+		if bitmap&(1<<bit) == 0 {
+			continue
+		}
+		seq := baseSeq + bit
+		shardData, dataLen, found := sess.arqTx.lookup(seq)
+		if !found {
+			continue
+		}
+		// Re-encrypt with fresh nonce and send on round-robin pipe
+		wirePkt := stripeEncryptShard(sess.txCipher, &stripeHdr{
+			Magic:      stripeMagic,
+			Version:    stripeVersion,
+			Type:       stripeDATA,
+			Session:    sess.sessionID,
+			GroupSeq:   seq,
+			ShardIdx:   0,
+			GroupDataN: 1,
+			DataLen:    dataLen,
+		}, shardData)
+		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
+		_, _ = ss.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
+		retxCount++
+	}
+
+	if retxCount > 0 {
+		ss.logger.Debugf("stripe ARQ: retransmitted %d packets for session %08x (base=%d)", retxCount, sess.sessionID, baseSeq)
+	}
+}
+
+// startArqNackLoop starts the NACK generation loop for a session.
+// Called when a new session is created with ARQ enabled.
+func (ss *stripeServer) startArqNackLoop(ctx context.Context, sess *stripeSession) {
+	ticker := time.NewTicker(arqNackInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ss.closeCh:
+			return
+		case <-ticker.C:
+			if sess.arqRx == nil {
+				continue
+			}
+			baseSeq, bitmap, count := sess.arqRx.getMissing()
+			if count == 0 {
+				continue
+			}
+			// Collect an active pipe address to send the NACK to the client
+			var peerAddr *net.UDPAddr
+			for _, p := range sess.pipes {
+				if p != nil {
+					peerAddr = p
+					break
+				}
+			}
+			if peerAddr == nil {
+				continue
+			}
+			// Build and send NACK packet
+			pkt := make([]byte, stripeHdrLen+arqNackPayloadLen)
+			encodeStripeHdr(pkt, &stripeHdr{
+				Magic:   stripeMagic,
+				Version: stripeVersion,
+				Type:    stripeNACK,
+				Session: sess.sessionID,
+			})
+			encodeNackPayload(pkt[stripeHdrLen:], baseSeq, bitmap)
+			pkt = stripeEncrypt(sess.txCipher, pkt)
+			_, _ = ss.conn.WriteToUDP(pkt, peerAddr)
+			sess.arqRx.addNacksSent(1)
+			ss.logger.Debugf("stripe ARQ: NACK sent to %s base=%d count=%d session=%08x", peerAddr, baseSeq, count, sess.sessionID)
+		}
+	}
 }
 
 // lookupSession finds a session by header session ID or source address.
