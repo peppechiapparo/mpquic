@@ -926,49 +926,31 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 
 // computeRxLoss computes the client-side RX loss rate (loss on data FROM server)
 // over the last keepalive window. Returns loss percentage 0-100.
+//
+// Loss is measured only when the peer sends with M>0 (FEC groups), using the
+// ratio of groups that needed reconstruction vs total groups. When the peer
+// sends with M=0 (no FEC), we cannot reliably detect loss from sequence numbers
+// because txSeq is shared between M=0/M>0 modes and creates false gaps after
+// mode transitions. In that case we report 0% (safe: no parity to add).
 func (scc *stripeClientConn) computeRxLoss() uint8 {
-	// Snapshot current counters
-	seqHigh := atomic.LoadUint64(&scc.rxSeqHighest)
-	directCnt := atomic.LoadUint64(&scc.rxDirectCount)
 	fecRecov := atomic.LoadUint64(&scc.fecRecov)
 	fecGroups := atomic.LoadUint64(&scc.rxFECGroups)
 
-	// Compute deltas from previous window
-	dSeq := seqHigh - scc.rxLossPrevSeqHigh
-	dDirect := directCnt - scc.rxLossPrevDirectCnt
 	dFECRecov := fecRecov - scc.rxLossPrevFECRecov
 	dFECGroups := fecGroups - scc.rxLossPrevFECGroups
 
-	// Save for next window
-	scc.rxLossPrevSeqHigh = seqHigh
-	scc.rxLossPrevDirectCnt = directCnt
 	scc.rxLossPrevFECRecov = fecRecov
 	scc.rxLossPrevFECGroups = fecGroups
 
-	var lossRate uint8
-
 	if dFECGroups > 10 {
-		// Server is sending with M>0 (FEC groups active)
-		// Loss rate = groups needing reconstruction / total groups
 		rate := dFECRecov * 100 / dFECGroups
 		if rate > 100 {
 			rate = 100
 		}
-		lossRate = uint8(rate)
-	} else if dDirect > 10 && dSeq > 0 {
-		// Server is sending with M=0 (direct delivery, sequential GroupSeq)
-		// Loss rate = missing shards / expected shards
-		if dDirect < dSeq {
-			rate := (dSeq - dDirect) * 100 / dSeq
-			if rate > 100 {
-				rate = 100
-			}
-			lossRate = uint8(rate)
-		}
+		return uint8(rate)
 	}
-	// If neither has significant activity, report 0 (no data flowing)
 
-	return lossRate
+	return 0
 }
 
 // updateAdaptiveM adjusts our TX parity M based on peer's loss feedback.
@@ -1741,41 +1723,28 @@ func (ss *stripeServer) deliverGroupToTUN(sess *stripeSession, grp *fecGroup) {
 
 // computeSessionRxLoss computes server-side RX loss for a session (loss on data FROM client).
 // Returns loss percentage 0-100.
+//
+// Only measurable when client sends with M>0 (FEC groups). When M=0, we report 0%
+// (sequence-based detection is unreliable due to shared txSeq across M modes).
 func (ss *stripeServer) computeSessionRxLoss(sess *stripeSession) uint8 {
-	seqHigh := atomic.LoadUint64(&sess.rxSeqHighest)
-	directCnt := atomic.LoadUint64(&sess.rxDirectCount)
 	fecRecov := atomic.LoadUint64(&sess.rxFECRecov)
 	fecGroups := atomic.LoadUint64(&sess.rxFECGroups)
 
-	dSeq := seqHigh - sess.rxLossPrevSeqHigh
-	dDirect := directCnt - sess.rxLossPrevDirectCnt
 	dFECRecov := fecRecov - sess.rxLossPrevFECRecov
 	dFECGroups := fecGroups - sess.rxLossPrevFECGroups
 
-	sess.rxLossPrevSeqHigh = seqHigh
-	sess.rxLossPrevDirectCnt = directCnt
 	sess.rxLossPrevFECRecov = fecRecov
 	sess.rxLossPrevFECGroups = fecGroups
-
-	var lossRate uint8
 
 	if dFECGroups > 10 {
 		rate := dFECRecov * 100 / dFECGroups
 		if rate > 100 {
 			rate = 100
 		}
-		lossRate = uint8(rate)
-	} else if dDirect > 10 && dSeq > 0 {
-		if dDirect < dSeq {
-			rate := (dSeq - dDirect) * 100 / dSeq
-			if rate > 100 {
-				rate = 100
-			}
-			lossRate = uint8(rate)
-		}
+		return uint8(rate)
 	}
 
-	return lossRate
+	return 0
 }
 
 // updateSessionAdaptiveM adjusts server TX parity M for a session based on
