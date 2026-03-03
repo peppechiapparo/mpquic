@@ -864,9 +864,13 @@ func (scc *stripeClientConn) handleRxShard(hdr stripeHdr, payload []byte, isPari
 
 	// Partial group (fewer than K data shards) — deliver data directly, no FEC
 	if !isParity && int(hdr.GroupDataN) < scc.dataK {
-		// ARQ: mark this sequence as received for gap detection
+		// ARQ: mark this sequence as received for gap detection;
+		// if already received (duplicate from ARQ retransmit), skip TUN delivery.
 		if scc.arqRx != nil {
-			scc.arqRx.markReceived(hdr.GroupSeq)
+			if !scc.arqRx.markReceived(hdr.GroupSeq) {
+				scc.arqRx.addDupFiltered(1)
+				return // dedup: already delivered
+			}
 		}
 		scc.deliverDataDirect(hdr, payload)
 		return
@@ -1168,6 +1172,10 @@ func (scc *stripeClientConn) arqNackLoop(ctx context.Context) {
 			if scc.arqRx == nil {
 				continue
 			}
+			// Rate limit: max 1 NACK per RTT (~30ms) to avoid flooding
+			if !scc.arqRx.canSendNack() {
+				continue
+			}
 			baseSeq, bitmap, count := scc.arqRx.getMissing()
 			if count == 0 {
 				continue
@@ -1187,6 +1195,7 @@ func (scc *stripeClientConn) arqNackLoop(ctx context.Context) {
 				_, _ = scc.pipes[0].WriteToUDP(pkt, scc.serverAddr)
 			}
 			scc.arqRx.addNacksSent(1)
+			scc.arqRx.recordNackSent()
 			scc.logger.Debugf("stripe ARQ: NACK sent base=%d count=%d", baseSeq, count)
 		}
 	}
@@ -1834,9 +1843,13 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 
 	// Partial group or no FEC: deliver directly
 	if int(hdr.GroupDataN) < ss.dataK || ss.parityM == 0 || sess.enc == nil {
-		// ARQ: mark this sequence as received for gap detection
+		// ARQ: mark this sequence as received for gap detection;
+		// if already received (duplicate from ARQ retransmit), skip TUN delivery.
 		if sess.arqRx != nil {
-			sess.arqRx.markReceived(hdr.GroupSeq)
+			if !sess.arqRx.markReceived(hdr.GroupSeq) {
+				sess.arqRx.addDupFiltered(1)
+				return // dedup: already delivered
+			}
 		}
 		if hdr.DataLen > 0 && len(payload) >= 2+int(hdr.DataLen) {
 			pkt := make([]byte, hdr.DataLen)
@@ -2142,6 +2155,10 @@ func (ss *stripeServer) startArqNackLoop(ctx context.Context, sess *stripeSessio
 			if sess.arqRx == nil {
 				continue
 			}
+			// Rate limit: max 1 NACK per RTT (~30ms) to avoid flooding
+			if !sess.arqRx.canSendNack() {
+				continue
+			}
 			baseSeq, bitmap, count := sess.arqRx.getMissing()
 			if count == 0 {
 				continue
@@ -2169,6 +2186,7 @@ func (ss *stripeServer) startArqNackLoop(ctx context.Context, sess *stripeSessio
 			pkt = stripeEncrypt(sess.txCipher, pkt)
 			_, _ = ss.conn.WriteToUDP(pkt, peerAddr)
 			sess.arqRx.addNacksSent(1)
+			sess.arqRx.recordNackSent()
 			ss.logger.Debugf("stripe ARQ: NACK sent to %s base=%d count=%d session=%08x", peerAddr, baseSeq, count, sess.sessionID)
 		}
 	}

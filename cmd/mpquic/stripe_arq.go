@@ -32,8 +32,9 @@ const (
 	arqWinMask  = arqWinSize - 1
 	arqWinWords = arqWinSize / 64 // 128 uint64 words
 
-	arqNackThresh     uint32        = 48                  // wait this many newer seqs before NACKing a gap
-	arqNackInterval   time.Duration = 5 * time.Millisecond // NACK check/send interval
+	arqNackThresh     uint32        = 96                   // wait this many newer seqs before NACKing a gap (96 reduces false NACKs on Starlink reorder)
+	arqNackInterval   time.Duration = 5 * time.Millisecond  // NACK check/send interval
+	arqNackCooldown   time.Duration = 30 * time.Millisecond // min time between NACKs (~1 Starlink RTT)
 	arqNackMaxBits                  = 64                   // max missing seqs per NACK packet
 	arqNackPayloadLen               = 12                   // [base_seq 4B][bitmap 8B]
 )
@@ -95,6 +96,10 @@ type arqRxTracker struct {
 	// Stats (atomic, read outside lock)
 	nacksSent    uint64
 	retxReceived uint64
+	dupFiltered  uint64 // packets dropped by dedup before TUN write
+
+	// NACK rate limiting (atomic)
+	lastNackSendTime int64 // UnixNano of last NACK sent
 }
 
 func newArqRxTracker() *arqRxTracker {
@@ -264,6 +269,22 @@ func (t *arqRxTracker) addRetxReceived(n uint64) {
 	atomic.AddUint64(&t.retxReceived, n)
 }
 
-func (t *arqRxTracker) stats() (nacksSent, retxReceived uint64) {
-	return atomic.LoadUint64(&t.nacksSent), atomic.LoadUint64(&t.retxReceived)
+func (t *arqRxTracker) addDupFiltered(n uint64) {
+	atomic.AddUint64(&t.dupFiltered, n)
+}
+
+func (t *arqRxTracker) stats() (nacksSent, retxReceived, dupFiltered uint64) {
+	return atomic.LoadUint64(&t.nacksSent), atomic.LoadUint64(&t.retxReceived), atomic.LoadUint64(&t.dupFiltered)
+}
+
+// canSendNack returns true if enough time has elapsed since the last NACK.
+// This limits NACK rate to ~1 per RTT (arqNackCooldown) to avoid flooding.
+func (t *arqRxTracker) canSendNack() bool {
+	last := atomic.LoadInt64(&t.lastNackSendTime)
+	return time.Since(time.Unix(0, last)) >= arqNackCooldown
+}
+
+// recordNackSent marks the current time as last NACK send time.
+func (t *arqRxTracker) recordNackSent() {
+	atomic.StoreInt64(&t.lastNackSendTime, time.Now().UnixNano())
 }
