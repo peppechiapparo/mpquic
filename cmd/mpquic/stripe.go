@@ -34,6 +34,7 @@ import (
 
 	"github.com/klauspost/reedsolomon"
 	"github.com/songgao/water"
+	"golang.org/x/net/ipv4"
 )
 
 // ─── Constants ────────────────────────────────────────────────────────────
@@ -59,6 +60,7 @@ const (
 	stripeFlushInterval       = 5 * time.Millisecond
 	stripeKeepaliveInterval   = 5 * time.Second
 	stripeSessionTimeout      = 30 * time.Second
+	stripeBatchSize           = 8 // recvmmsg batch size (matches quic-go)
 	stripeGCInterval          = 10 * time.Second
 	stripeRegisterRetries     = 3
 	stripeRegisterDelay       = 500 * time.Millisecond
@@ -775,7 +777,14 @@ func (scc *stripeClientConn) sendToPipe(pkt []byte) {
 // ─── Client RX internals ──────────────────────────────────────────────────
 
 func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn *net.UDPConn) {
-	buf := make([]byte, 65535)
+	// ── Batch RX: use recvmmsg to read up to stripeBatchSize packets per syscall ──
+	pc := ipv4.NewPacketConn(conn)
+	msgs := make([]ipv4.Message, stripeBatchSize)
+	for i := range msgs {
+		msgs[i].Buffers = make([][]byte, 1)
+		msgs[i].Buffers[0] = make([]byte, 65535)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -786,7 +795,7 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 		}
 
 		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-		n, _, err := conn.ReadFromUDP(buf)
+		numMsgs, err := pc.ReadBatch(msgs, 0)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
@@ -800,48 +809,51 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 			continue
 		}
 
-		if n < stripeHdrLen {
-			continue
-		}
-
-		raw := buf[:n]
-		if scc.rxCipher != nil {
-			decrypted, decOK := stripeDecryptPkt(scc.rxCipher.aead, raw)
-			if !decOK {
-				count := atomic.AddUint64(&scc.securityDecryptFail, 1)
-				if count <= 3 || count%1000 == 0 {
-					scc.logger.Errorf("stripe: pipe %d decrypt FAILED (total=%d pktLen=%d)", pipeIdx, count, n)
-				}
+		for mi := 0; mi < numMsgs; mi++ {
+			n := msgs[mi].N
+			if n < stripeHdrLen {
 				continue
 			}
-			raw = decrypted
-		}
 
-		hdr, ok := decodeStripeHdr(raw)
-		if !ok {
-			continue
-		}
-
-		payload := raw[stripeHdrLen:]
-
-		atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
-
-		switch hdr.Type {
-		case stripeDATA:
-			scc.handleRxShard(hdr, payload, false)
-		case stripePARITY:
-			scc.handleRxShard(hdr, payload, true)
-		case stripeKEEPALIVE:
-			// Server keepalive response — read peer loss rate if present
-			if len(payload) >= 1 {
-				peerLoss := uint32(payload[0])
-				atomic.StoreUint32(&scc.peerLossRate, peerLoss)
-				if peerLoss > 0 {
-					atomic.StoreInt64(&scc.lastPeerLoss, time.Now().UnixNano())
+			raw := msgs[mi].Buffers[0][:n]
+			if scc.rxCipher != nil {
+				decrypted, decOK := stripeDecryptPkt(scc.rxCipher.aead, raw)
+				if !decOK {
+					count := atomic.AddUint64(&scc.securityDecryptFail, 1)
+					if count <= 3 || count%1000 == 0 {
+						scc.logger.Errorf("stripe: pipe %d decrypt FAILED (total=%d pktLen=%d)", pipeIdx, count, n)
+					}
+					continue
 				}
+				raw = decrypted
 			}
-		case stripeNACK:
-			scc.handleNack(hdr, payload)
+
+			hdr, ok := decodeStripeHdr(raw)
+			if !ok {
+				continue
+			}
+
+			payload := raw[stripeHdrLen:]
+
+			atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
+
+			switch hdr.Type {
+			case stripeDATA:
+				scc.handleRxShard(hdr, payload, false)
+			case stripePARITY:
+				scc.handleRxShard(hdr, payload, true)
+			case stripeKEEPALIVE:
+				// Server keepalive response — read peer loss rate if present
+				if len(payload) >= 1 {
+					peerLoss := uint32(payload[0])
+					atomic.StoreUint32(&scc.peerLossRate, peerLoss)
+					if peerLoss > 0 {
+						atomic.StoreInt64(&scc.lastPeerLoss, time.Now().UnixNano())
+					}
+				}
+			case stripeNACK:
+				scc.handleNack(hdr, payload)
+			}
 		}
 	}
 }
@@ -1562,11 +1574,20 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 }
 
 // Run is the main receive loop of the stripe server. Call in a goroutine.
+// Uses recvmmsg (via ipv4.PacketConn.ReadBatch) to read up to stripeBatchSize
+// UDP datagrams per syscall, reducing per-packet overhead on the hot path.
 func (ss *stripeServer) Run(ctx context.Context) {
 	// Periodic GC for stale sessions and incomplete FEC groups
 	go ss.gcLoop(ctx)
 
-	buf := make([]byte, 65535)
+	// ── Batch RX: use recvmmsg to read multiple packets per syscall ──
+	pc := ipv4.NewPacketConn(ss.conn)
+	msgs := make([]ipv4.Message, stripeBatchSize)
+	for i := range msgs {
+		msgs[i].Buffers = make([][]byte, 1)
+		msgs[i].Buffers[0] = make([]byte, 65535)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1577,7 +1598,7 @@ func (ss *stripeServer) Run(ctx context.Context) {
 		}
 
 		ss.conn.SetReadDeadline(time.Now().Add(1 * time.Second))
-		n, from, err := ss.conn.ReadFromUDP(buf)
+		numMsgs, err := pc.ReadBatch(msgs, 0)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
@@ -1591,88 +1612,98 @@ func (ss *stripeServer) Run(ctx context.Context) {
 			continue
 		}
 
-		if n < stripeHdrLen {
-			continue
+		for mi := 0; mi < numMsgs; mi++ {
+			from, ok := msgs[mi].Addr.(*net.UDPAddr)
+			if !ok {
+				continue
+			}
+			ss.processIncomingPacket(msgs[mi].Buffers[0][:msgs[mi].N], from)
 		}
+	}
+}
 
-		// Parse header (always cleartext — used as AAD in GCM)
-		hdr, ok := decodeStripeHdr(buf[:n])
-		if !ok {
-			continue
-		}
+// processIncomingPacket handles decrypt and dispatch of a single raw packet
+// received from the batch-read loop. raw must not be retained after return
+// (batch buffers are reused across ReadBatch calls).
+func (ss *stripeServer) processIncomingPacket(raw []byte, from *net.UDPAddr) {
+	n := len(raw)
+	if n < stripeHdrLen {
+		return
+	}
 
-		// Copy raw packet (buf is reused)
-		raw := make([]byte, n)
-		copy(raw, buf[:n])
+	// Parse header (always cleartext — used as AAD in GCM)
+	hdr, ok := decodeStripeHdr(raw)
+	if !ok {
+		return
+	}
 
-		// Decrypt: look up session or pending key
-		var payload []byte
-		sess := ss.lookupSession(hdr.Session, from)
-		if sess != nil && sess.rxCipher != nil {
-			decrypted, decOK := stripeDecryptPkt(sess.rxCipher.aead, raw)
-			if !decOK {
-				// Decrypt failed with current key. Check if client re-keyed
-				// (new KX stored in pendingKeys). If so, update ciphers in-place.
-				km := ss.pendingKeys.Get(hdr.Session)
-				if km != nil {
-					tmpCipher, err := newStripeCipher(km.c2sKey)
-					if err == nil {
-						decrypted2, decOK2 := stripeDecryptPkt(tmpCipher.aead, raw)
-						if decOK2 {
-							// Re-key succeeded — update session ciphers
-							newTx, errTx := newStripeCipher(km.s2cKey)
-							if errTx == nil {
-								sess.rxCipher = tmpCipher
-								sess.txCipher = newTx
-								ss.logger.Infof("stripe: session %08x re-keyed in-place", hdr.Session)
-								payload = decrypted2[stripeHdrLen:]
-								goto dispatched
-							}
+	// Decrypt: look up session or pending key
+	var payload []byte
+	sess := ss.lookupSession(hdr.Session, from)
+	if sess != nil && sess.rxCipher != nil {
+		decrypted, decOK := stripeDecryptPkt(sess.rxCipher.aead, raw)
+		if !decOK {
+			// Decrypt failed with current key. Check if client re-keyed
+			// (new KX stored in pendingKeys). If so, update ciphers in-place.
+			km := ss.pendingKeys.Get(hdr.Session)
+			if km != nil {
+				tmpCipher, err := newStripeCipher(km.c2sKey)
+				if err == nil {
+					decrypted2, decOK2 := stripeDecryptPkt(tmpCipher.aead, raw)
+					if decOK2 {
+						// Re-key succeeded — update session ciphers
+						newTx, errTx := newStripeCipher(km.s2cKey)
+						if errTx == nil {
+							sess.rxCipher = tmpCipher
+							sess.txCipher = newTx
+							ss.logger.Infof("stripe: session %08x re-keyed in-place", hdr.Session)
+							payload = decrypted2[stripeHdrLen:]
+							goto dispatch
 						}
 					}
 				}
-				atomic.AddUint64(&sess.securityDecryptFail, 1)
-				atomic.AddUint64(&ss.securityDecryptFail, 1)
-				continue
 			}
-			payload = decrypted[stripeHdrLen:]
-		} else if sess == nil {
-			// Unknown session — try pre-negotiated key from QUIC KX
-			km := ss.pendingKeys.Get(hdr.Session)
-			if km == nil {
-				continue // no key yet; client will retry
-			}
-			if hdr.Type != stripeREGISTER {
-				continue // only REGISTER can create sessions
-			}
-			tmpCipher, err := newStripeCipher(km.c2sKey)
-			if err != nil {
-				continue
-			}
-			decrypted, decOK := stripeDecryptPkt(tmpCipher.aead, raw)
-			if !decOK {
-				atomic.AddUint64(&ss.securityDecryptFail, 1)
-				continue
-			}
-			payload = decrypted[stripeHdrLen:]
-		} else {
-			// Session exists but no cipher (shouldn't happen)
-			continue
+			atomic.AddUint64(&sess.securityDecryptFail, 1)
+			atomic.AddUint64(&ss.securityDecryptFail, 1)
+			return
 		}
+		payload = decrypted[stripeHdrLen:]
+	} else if sess == nil {
+		// Unknown session — try pre-negotiated key from QUIC KX
+		km := ss.pendingKeys.Get(hdr.Session)
+		if km == nil {
+			return // no key yet; client will retry
+		}
+		if hdr.Type != stripeREGISTER {
+			return // only REGISTER can create sessions
+		}
+		tmpCipher, err := newStripeCipher(km.c2sKey)
+		if err != nil {
+			return
+		}
+		decrypted, decOK := stripeDecryptPkt(tmpCipher.aead, raw)
+		if !decOK {
+			atomic.AddUint64(&ss.securityDecryptFail, 1)
+			return
+		}
+		payload = decrypted[stripeHdrLen:]
+	} else {
+		// Session exists but no cipher (shouldn't happen)
+		return
+	}
 
-	dispatched:
-		switch hdr.Type {
-		case stripeREGISTER:
-			ss.handleRegister(hdr, payload, from)
-		case stripeDATA:
-			ss.handleDataShard(hdr, payload, from)
-		case stripePARITY:
-			ss.handleParityShard(hdr, payload, from)
-		case stripeKEEPALIVE:
-			ss.handleKeepalive(hdr, payload, from)
-		case stripeNACK:
-			ss.handleNack(hdr, payload, from)
-		}
+dispatch:
+	switch hdr.Type {
+	case stripeREGISTER:
+		ss.handleRegister(hdr, payload, from)
+	case stripeDATA:
+		ss.handleDataShard(hdr, payload, from)
+	case stripePARITY:
+		ss.handleParityShard(hdr, payload, from)
+	case stripeKEEPALIVE:
+		ss.handleKeepalive(hdr, payload, from)
+	case stripeNACK:
+		ss.handleNack(hdr, payload, from)
 	}
 }
 

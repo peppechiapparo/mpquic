@@ -837,6 +837,31 @@ rispetto ad ARQ v1 (+20%) è dovuto a tre fattori combinati:
 - nackThresh 96 previene false NACK su reorder naturale
 - 12 pipe/path (vs 10) e P20 (vs P8) sfruttano meglio il parallelismo Starlink
 
+### Step 4.16 — Batch I/O (recvmmsg) ✅ COMPLETATO
+
+**Motivazione**: benchmark con P20 (422 Mbps) vs P8 (274 Mbps) mostra che
+"più flussi paralleli = più throughput". L'analisi identifica come bottleneck
+l'overhead per-packet delle syscall: ogni pacchetto paga ReadFromUDP (recvfrom)
++ WriteToUDP (sendto). Con più flussi applicativi la pipeline resta piena
+mascherando l'overhead; con pochi flussi ci sono "bolle" di inattività.
+
+**Soluzione**: recvmmsg (Linux) via `ipv4.PacketConn.ReadBatch()` — legge fino
+a 8 datagrammi per syscall, riducendo l'overhead RX di ~8×.
+
+**Modifiche implementate**:
+1. **Server RX** (`Run()`): refactored con `ipv4.NewPacketConn(ss.conn)` +
+   `ReadBatch(msgs, 0)`. Logica decrypt/dispatch estratta in
+   `processIncomingPacket()`. Eliminata la copia per-packet `make+copy`
+   (i buffer batch sono indipendenti).
+2. **Client RX** (`recvPipeLoop()`): stesso pattern per-pipe con
+   `ipv4.NewPacketConn(conn)` + `ReadBatch()`.
+3. Costante `stripeBatchSize = 8` (stessa di quic-go).
+4. Import `golang.org/x/net/ipv4` (già dependency indiretta via quic-go).
+
+**Sicurezza buffer**: `stripeDecryptPkt()` alloca un output proprio e non
+ritiene il buffer input; tutti gli handler copiano i dati necessari prima
+del return. I buffer batch possono essere riusati tra chiamate ReadBatch.
+
 ### Step 4.14 — FEC per Dimensione Pacchetto ⬜ FUTURO
 
 **Obiettivo**: quando M>0 è attivo, pacchetti piccoli (<300B: ACK TCP, DNS, keepalive)
@@ -869,6 +894,7 @@ finestra scorrevole dove la parità protegge gli ultimi N shard "in volo".
 - [x] Pacing per pipe (Step 4.12) — **risultato negativo**, time.Sleep inadeguato
 - [x] Hybrid ARQ con NACK (Step 4.13) — **+14.6% throughput** (239→274 Mbps)
 - [x] ARQ optimizations (Step 4.13b) — dedup receiver, NACK rate limit 30ms, nackThresh 96
+- [x] Batch I/O recvmmsg (Step 4.16) — server + client RX, ~8× fewer syscalls
 - [ ] FEC per dimensione pacchetto (Step 4.14)
 - [ ] Sliding window FEC (Step 4.15)
 - [ ] Throughput ≥ 400 Mbps su dual Starlink
