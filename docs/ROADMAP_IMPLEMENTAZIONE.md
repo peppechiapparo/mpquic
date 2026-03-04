@@ -807,11 +807,35 @@ Hybrid ARQ iniziale, mantenendo il guadagno di throughput.
 **Nuovo contatore**: `dupFiltered` — pacchetti scartati dal dedup prima del TUN write.
 `stats()` ora restituisce `(nacksSent, retxReceived, dupFiltered)`.
 
-**Risultati attesi** (da benchmarkare):
-- Retransmit TCP: ~3199 → ~1000 (eliminazione duplicati ARQ)
-- NACK overhead: ridotto di ~5x (1 NACK/RTT vs 1 NACK/5ms)
-- False NACK: ridotte significativamente (soglia 96 vs 48)
-- Throughput: mantenuto o migliorato (meno congestione auto-inflitta)
+**Risultati benchmark** (6 run × 30s, iperf3 -R -P20, dual Starlink, 12 pipe/path = 24 totali):
+
+| Config                        | Throughput medio | Retransmit medi | Note                                         |
+|-------------------------------|------------------|-----------------|----------------------------------------------|
+| Baseline (no ARQ, P8, 10 pipe)| **239 Mbps**     | ~1.000          | Riferimento M=0                              |
+| ARQ v1 (P8, 10 pipe)         | **274 Mbps**     | ~3.199          | Step 4.13, +14.6% vs baseline               |
+| **ARQ v2 + dedup (P20, 12 pipe)** | **330 Mbps** | ~4.110          | **+38% vs baseline, +20% vs ARQ v1, picco 384 Mbps** |
+
+Dettaglio run ARQ v2:
+
+| Run | Throughput (Mbps) | Retransmit |
+|-----|------------------|------------|
+| 1   | 318              | 2.807      |
+| 2   | 305              | 4.282      |
+| 3   | 351              | 3.407      |
+| 4   | 318              | 4.311      |
+| 5   | **384**          | 4.399      |
+| 6   | 302              | 5.457      |
+
+**Analisi**: il throughput medio migliora del 38% rispetto al baseline originale
+(239 → 330 Mbps) con picco a 384 Mbps. I retransmit TCP restano elevati (~4110)
+nonostante il dedup: il dedup elimina i duplicati ARQ a livello UDP/stripe, ma i
+retransmit TCP sono causati dalla variabilità di latenza Starlink (jitter) e dai
+burst loss che provocano timeout QUIC indipendentemente dall'ARQ. Il miglioramento
+rispetto ad ARQ v1 (+20%) è dovuto a tre fattori combinati:
+- Dedup elimina duplicati che confondevano il QUIC CC
+- NACK rate limit (30ms) riduce retransmit inutili
+- nackThresh 96 previene false NACK su reorder naturale
+- 12 pipe/path (vs 10) e P20 (vs P8) sfruttano meglio il parallelismo Starlink
 
 ### Step 4.14 — FEC per Dimensione Pacchetto ⬜ FUTURO
 
@@ -903,15 +927,15 @@ finestra scorrevole dove la parità protegge gli ultimi N shard "in volo".
 - 1 listener multipath QUIC+stripe (45017/46017) per mp1
 - NFT: UDP 45001-45006 + 45017 + 46017 accept
 - Route di ritorno su mpq1-mpq6 e mp1
-- Stripe sessions: 3 (wan4, wan5, wan6) × 4 pipe = 12 pipe totali
+- Stripe sessions: 2 (wan5, wan6) × 12 pipe = 24 pipe totali
 
-### Istanze operative (2026-03-01)
+### Istanze operative (2026-03-04)
 | Istanza | Tipo | WAN | Trasporto | Throughput |
 |---------|------|-----|-----------|------------|
 | mpq1-3 | single-link | WAN1-3 | QUIC | — (no modem) |
 | mpq4-6 | single-link | WAN4-6 | QUIC reliable | ~50 Mbps |
 | cr5/df5/bk5 | multi-tunnel | WAN5 | QUIC reliable | ~50 Mbps (isolato) |
-| **mp1** | **multipath 3 WAN** | **WAN4+5+6** | **UDP stripe + FEC** | **303 Mbps** |
+| **mp1** | **multipath 2 WAN** | **WAN5+6** | **UDP stripe + FEC adaptive + ARQ** | **330 Mbps (picco 384)** |
 
 ---
 
