@@ -892,6 +892,42 @@ non di overhead syscall:
 Il codice batch resta nel codebase (è pulito e non ha downsides) ma la
 prossima ottimizzazione deve targettare il layer TCP/CC o il TX path.
 
+### Step 4.17 — UDP Socket Buffers 7MB + TX ActivePipes Cache ✅ COMPLETATO (commit bef0894)
+
+**Obiettivo**: eliminare due sorgenti di inefficienza nel hot path:
+1. Socket buffer kernel insufficienti (default ~208 KB) che causano drop
+   durante burst Starlink (jitter 50+ ms → centinaia di pacchetti in coda)
+2. Allocazione per-pacchetto `make([]*net.UDPAddr, ...)` nel server TX path
+   per filtrare pipe attive ad ogni `SendDatagram()`
+
+**Implementazione**:
+
+1. **`setStripeSocketBuffers()`**: applica `SetReadBuffer(7MB)` + `SetWriteBuffer(7MB)`
+   su ogni socket UDP. 7 MB corrisponde al valore usato da quic-go
+   (`protocol.DesiredReceiveBufferSize`). Applicato a:
+   - Client: ogni pipe UDP in `newStripeClientConn()`
+   - Server: socket listener in `newStripeServer()`
+
+2. **`txActivePipes` cache**: campo `[]*net.UDPAddr` su `stripeSession`,
+   ricostruito solo su REGISTER e keepalive address update (sotto `txMu`).
+   Sostituisce la creazione + filter `make+append` ripetuta su ogni pacchetto
+   nei 3 hot path TX:
+   - `SendDatagram()` M=0 fast path (~30K pkt/s a 341 Mbps)
+   - `sendFECGroupLocked()` M>0 path
+   - `handleNack()` ARQ retransmission
+
+**Nota sysctl**: il kernel Linux limita il buffer massimo a `net.core.rmem_max`
+e `net.core.wmem_max`. Se questi sono inferiori a 7 MB, il `SetReadBuffer`/
+`SetWriteBuffer` viene silenziosamente troncato. Per ottenere il beneficio
+completo, configurare:
+
+```bash
+net.core.rmem_max = 7340032
+net.core.wmem_max = 7340032
+```
+
+**Effort**: 50 righe di codice, 0 nuove dipendenze.
+
 ### Step 4.14 — FEC per Dimensione Pacchetto ⬜ FUTURO
 
 **Obiettivo**: quando M>0 è attivo, pacchetti piccoli (<300B: ACK TCP, DNS, keepalive)
@@ -925,6 +961,7 @@ finestra scorrevole dove la parità protegge gli ultimi N shard "in volo".
 - [x] Hybrid ARQ con NACK (Step 4.13) — **+14.6% throughput** (239→274 Mbps)
 - [x] ARQ optimizations (Step 4.13b) — dedup receiver, NACK rate limit 30ms, nackThresh 96
 - [x] Batch I/O recvmmsg (Step 4.16) — **risultato neutro** (+1%), ipotesi syscall falsificata
+- [x] Socket buffers 7MB + TX cache (Step 4.17) — kernel drop prevention + zero-alloc TX dispatch
 - [ ] FEC per dimensione pacchetto (Step 4.14)
 - [ ] Sliding window FEC (Step 4.15)
 - [ ] Throughput ≥ 400 Mbps su dual Starlink

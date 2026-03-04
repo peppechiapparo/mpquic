@@ -37,7 +37,7 @@ Il POC si inserisce sopra il piano L3: ogni processo `mpquic@i` usa la WAN assoc
 
 ## Struttura file rilevante
 - `cmd/mpquic/main.go`: dataplane TUN <-> QUIC DATAGRAM / stripe dispatch
-- `cmd/mpquic/stripe.go`: trasporto UDP stripe + FEC Reed-Solomon + Hybrid ARQ (~2300 LOC)
+- `cmd/mpquic/stripe.go`: trasporto UDP stripe + FEC Reed-Solomon + Hybrid ARQ + batch I/O + socket tuning (~2370 LOC)
 - `cmd/mpquic/stripe_crypto.go`: cifratura AES-256-GCM + key exchange TLS Exporter (224 LOC)
 - `cmd/mpquic/stripe_arq.go`: Hybrid ARQ con NACK selettivo — TX ring buffer, RX gap tracker, NACK encode/decode (269 LOC)
 - `cmd/mpquic/stripe_test.go`: test unitari stripe + crypto + ARQ (14 test)
@@ -256,6 +256,41 @@ più interfacce WAN sulla stessa macchina.
 3. Il nome interfaccia viene passato a `bindPipeToDevice()` che applica `SO_BINDTODEVICE`
 4. Il socket usa `udp4` (non `udp`) per forzare IPv4
 
+## UDP Socket Buffer Tuning (7 MB)
+
+Ogni socket UDP stripe (client pipe e server listener) viene configurato con
+buffer di lettura e scrittura da 7 MB tramite `setStripeSocketBuffers()`.
+Questo valore corrisponde a quello usato da quic-go (`DesiredReceiveBufferSize`).
+
+**Perché**: su Starlink, i jitter spike (20-50 ms) provocano burst di centinaia
+di pacchetti in arrivo nello stesso momento. Con il buffer default Linux (~208 KB),
+~140 pacchetti da 1500B saturano il buffer causando drop kernel invisibili
+all'applicazione. Con 7 MB si possono bufferizzare ~4700 pacchetti,
+coprendo burst fino a 100ms a 500 Mbps.
+
+**Requisito sysctl**: il kernel limita il buffer massimo a `net.core.rmem_max` /
+`net.core.wmem_max`. Per ottenere il beneficio completo, entrambi i nodi devono
+avere:
+
+```
+net.core.rmem_max = 7340032
+net.core.wmem_max = 7340032
+```
+
+Vedere sezione *Installazione* per i comandi di configurazione.
+
+## TX ActivePipes Cache (Zero-Alloc Dispatch)
+
+Il server stripe mantiene una slice `txActivePipes []*net.UDPAddr` pre-calcolata
+per ogni sessione (`stripeSession`). Questa cache viene ricostruita solo quando:
+- Un nuovo client pipe si registra (REGISTER)
+- Un indirizzo pipe cambia per CGNAT rebind (keepalive)
+
+La ricostruzione avviene sotto `txMu` per thread-safety. Tutti i path TX
+(`SendDatagram` M=0, `sendFECGroupLocked` M>0, `handleNack` retransmit)
+leggono la slice cached senza allocazioni, eliminando ~30K `make+append`/s
+a 341 Mbps.
+
 ## Architettura UDP Stripe + FEC Transport
 
 ### Motivazione: bypass traffic shaping Starlink
@@ -311,16 +346,25 @@ Meccanismo reattivo di ritrasmissione complementare a FEC adattivo:
 1. **TX retransmit buffer** (`arqTxBuf`): ring buffer 4096 entry (~200ms a 20K pps).
    Ogni entry conserva il plaintext pronto per re-encrypt + retransmit.
 2. **RX gap tracker** (`arqRxTracker`): bitmap circolare 8192 bit.
-   `markReceived(seq)` setta il bit; `getMissing()` scansiona gap > 48 seqs dietro highest.
-3. **NACK generation loop**: goroutine dedicata, tick ogni 5ms.
+   `markReceived(seq)` setta il bit; `getMissing()` scansiona gap > 96 seqs dietro highest.
+3. **NACK generation loop**: goroutine dedicata, tick ogni 5ms, rate limit 1 NACK / 30ms.
    Invia NACK bitmap (fino a 64 gap per pacchetto) al peer.
 4. **NACK handler**: riceve NACK, lookup in TX buffer, re-encrypt con nonce fresco,
-   retransmit round-robin sulle pipe.
-5. **Bidirezionale**: sia client che server hanno TX buf + RX tracker.
-6. **Solo M=0**: ARQ attivo solo quando effectiveM = 0 (non compete con FEC grouping).
+   retransmit round-robin sulle pipe (via `txActivePipes` cache, zero-alloc).
+5. **Dedup receiver**: `markReceived()` verificato prima della consegna al TUN.
+   Duplicati da retransmit ARQ scartati silenziosamente.
+6. **Bidirezionale**: sia client che server hanno TX buf + RX tracker.
+7. **Solo M=0**: ARQ attivo solo quando effectiveM = 0 (non compete con FEC grouping).
 
-**Benchmark**: +14.6% throughput su dual Starlink (239 → 274 Mbps, picco 315 Mbps).
+**Benchmark ARQ v2**: +43% throughput su dual Starlink (239 → 341 Mbps sostenuto, picco 390 Mbps).
 Overhead ~0% in condizioni normali (solo pacchetti NACK quando ci sono gap).
+
+### Batch I/O (recvmmsg)
+Sostituzione di `ReadFromUDP()` (1 syscall per pacchetto) con
+`ipv4.PacketConn.ReadBatch()` che legge fino a 8 datagrammi per syscall
+(recvmmsg su Linux). Applicato sia al server RX che al client RX per-pipe.
+Risultato benchmark: neutro (+1%), ma il codice resta perché è pulito e
+riduce il carico syscall.
 
 ### Flow-hash dispatch (server → client)
 Il server usa hash FNV-1a sulla 5-tupla IP (srcIP, dstIP, proto, srcPort, dstPort)

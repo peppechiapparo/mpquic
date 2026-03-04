@@ -1045,6 +1045,42 @@ sysctl net.ipv4.ip_forward
 
 ---
 
+## 16.1) Tuning UDP Socket Buffers (entrambi i nodi)
+
+MPQUIC configura automaticamente buffer da 7 MB per ogni socket UDP stripe
+tramite `SetReadBuffer()` / `SetWriteBuffer()`. Tuttavia il kernel Linux
+limita il buffer massimo ai valori di `net.core.rmem_max` e `net.core.wmem_max`
+(default ~208 KB). Senza questo tuning, la chiamata viene silenziosamente
+troncata e le burst Starlink possono causare drop a livello kernel.
+
+```bash
+# Imposta buffer max 7 MB (= 7340032 bytes, valore usato anche da quic-go)
+cat <<'EOF' | sudo tee /etc/sysctl.d/99-mpquic-buffers.conf
+# MPQUIC stripe: socket buffer 7 MB per prevenire drop durante burst Starlink
+net.core.rmem_max = 7340032
+net.core.wmem_max = 7340032
+# Opzionale: aumenta anche il default (per tutti i socket, non solo mpquic)
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+EOF
+
+sudo sysctl --system
+```
+
+**Verifica**:
+```bash
+sysctl net.core.rmem_max net.core.wmem_max
+# Atteso:
+# net.core.rmem_max = 7340032
+# net.core.wmem_max = 7340032
+```
+
+**Nota**: questa configurazione è necessaria sia sul client che sul server VPS.
+Senza di essa, i buffer effettivi restano a ~208 KB nonostante il codice
+richieda 7 MB. Il tuning è persistente (sopravvive al reboot).
+
+---
+
 ## 17) Certificati TLS
 
 ### 17.1 Generazione CA e certificati (una tantum)
