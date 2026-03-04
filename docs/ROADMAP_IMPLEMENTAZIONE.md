@@ -814,6 +814,7 @@ Hybrid ARQ iniziale, mantenendo il guadagno di throughput.
 | Baseline (no ARQ, P8, 10 pipe)| **239 Mbps**     | ~1.000          | Riferimento M=0                              |
 | ARQ v1 (P8, 10 pipe)         | **274 Mbps**     | ~3.199          | Step 4.13, +14.6% vs baseline               |
 | **ARQ v2 + dedup (P20, 12 pipe)** | **330 Mbps** | ~4.110          | **+38% vs baseline, +20% vs ARQ v1, picco 384 Mbps** |
+| ARQ v2 + batch I/O (P20, 12 pipe) | **333 Mbps** | n/d             | Step 4.16, **neutro** (+1%, entro rumore), picco 390 |
 
 Dettaglio run ARQ v2:
 
@@ -837,13 +838,11 @@ rispetto ad ARQ v1 (+20%) è dovuto a tre fattori combinati:
 - nackThresh 96 previene false NACK su reorder naturale
 - 12 pipe/path (vs 10) e P20 (vs P8) sfruttano meglio il parallelismo Starlink
 
-### Step 4.16 — Batch I/O (recvmmsg) ✅ COMPLETATO
+### Step 4.16 — Batch I/O (recvmmsg) ✅ COMPLETATO — RISULTATO NEUTRO
 
 **Motivazione**: benchmark con P20 (422 Mbps) vs P8 (274 Mbps) mostra che
-"più flussi paralleli = più throughput". L'analisi identifica come bottleneck
-l'overhead per-packet delle syscall: ogni pacchetto paga ReadFromUDP (recvfrom)
-+ WriteToUDP (sendto). Con più flussi applicativi la pipeline resta piena
-mascherando l'overhead; con pochi flussi ci sono "bolle" di inattività.
+"più flussi paralleli = più throughput". L'ipotesi iniziale identificava come
+bottleneck l'overhead per-packet delle syscall RX.
 
 **Soluzione**: recvmmsg (Linux) via `ipv4.PacketConn.ReadBatch()` — legge fino
 a 8 datagrammi per syscall, riducendo l'overhead RX di ~8×.
@@ -861,6 +860,37 @@ a 8 datagrammi per syscall, riducendo l'overhead RX di ~8×.
 **Sicurezza buffer**: `stripeDecryptPkt()` alloca un output proprio e non
 ritiene il buffer input; tutti gli handler copiano i dati necessari prima
 del return. I buffer batch possono essere riusati tra chiamate ReadBatch.
+
+**Risultati benchmark** (8 run × 30s, iperf3 -R -P20 --bind-dev mp1, commit 1e9a8b3):
+
+| Run | Throughput (Mbps) |
+|-----|------------------|
+| 1   | 298              |
+| 2   | 345              |
+| 3   | 293              |
+| 4   | 351              |
+| 5   | **390**          |
+| 6   | 363              |
+| 7   | 339              |
+| 8   | 286              |
+| **Media** | **333**    |
+
+**Verdetto: NEUTRO** (+1% vs pre-batch 330 Mbps, entro margine di errore).
+Il batching RX non muove l'ago perché il kernel già bufferizza i pacchetti
+in arrivo; `recvmmsg` risparmia context switch ma il collo di bottiglia reale
+non è nella syscall RX.
+
+**Analisi post-mortem — perché più flussi = più throughput**:
+Il pattern P20 >> P8 >> P1 è un fenomeno di **congestion control aggregato**,
+non di overhead syscall:
+- Ogni flusso TCP ha il proprio CC (Cubic/BBR) indipendente
+- Con N flussi, una loss/timeout su 1 flusso rallenta solo 1/N del throughput
+- Starlink ha jitter 15-50ms e burst-loss: più flussi assorbono meglio queste
+  perturbazioni → throughput aggregato più stabile e alto
+- Il singolo flusso TCP non riesce a saturare il link per limiti di window/RTT
+
+Il codice batch resta nel codebase (è pulito e non ha downsides) ma la
+prossima ottimizzazione deve targettare il layer TCP/CC o il TX path.
 
 ### Step 4.14 — FEC per Dimensione Pacchetto ⬜ FUTURO
 
@@ -894,7 +924,7 @@ finestra scorrevole dove la parità protegge gli ultimi N shard "in volo".
 - [x] Pacing per pipe (Step 4.12) — **risultato negativo**, time.Sleep inadeguato
 - [x] Hybrid ARQ con NACK (Step 4.13) — **+14.6% throughput** (239→274 Mbps)
 - [x] ARQ optimizations (Step 4.13b) — dedup receiver, NACK rate limit 30ms, nackThresh 96
-- [x] Batch I/O recvmmsg (Step 4.16) — server + client RX, ~8× fewer syscalls
+- [x] Batch I/O recvmmsg (Step 4.16) — **risultato neutro** (+1%), ipotesi syscall falsificata
 - [ ] FEC per dimensione pacchetto (Step 4.14)
 - [ ] Sliding window FEC (Step 4.15)
 - [ ] Throughput ≥ 400 Mbps su dual Starlink
