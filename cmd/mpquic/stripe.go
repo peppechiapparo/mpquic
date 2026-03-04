@@ -61,6 +61,7 @@ const (
 	stripeKeepaliveInterval   = 5 * time.Second
 	stripeSessionTimeout      = 30 * time.Second
 	stripeBatchSize           = 8 // recvmmsg batch size (matches quic-go)
+	stripeSocketBufSize       = 7 << 20 // 7 MB per socket (matches quic-go)
 	stripeGCInterval          = 10 * time.Second
 	stripeRegisterRetries     = 3
 	stripeRegisterDelay       = 500 * time.Millisecond
@@ -304,6 +305,19 @@ func (scc *stripeClientConn) SecurityStats() uint64 {
 // stripe port. Each socket = one Starlink session = one ~80 Mbps allocation.
 // Each path gets a unique session ID so FEC groups stay within a single path's
 // pipes, while the server connectionTable balances TX across multiple sessions.
+// setStripeSocketBuffers sets OS-level read and write buffer sizes on a
+// UDP socket to 7 MB (matching quic-go). Large buffers prevent kernel-level
+// packet drops during burst arrivals on Starlink (where jitter spikes can
+// pause delivery for 50+ ms, then deliver a burst of hundreds of packets).
+func setStripeSocketBuffers(conn *net.UDPConn, logger *Logger) {
+	if err := conn.SetReadBuffer(stripeSocketBufSize); err != nil {
+		logger.Errorf("stripe: SetReadBuffer(%d): %v", stripeSocketBufSize, err)
+	}
+	if err := conn.SetWriteBuffer(stripeSocketBufSize); err != nil {
+		logger.Errorf("stripe: SetWriteBuffer(%d): %v", stripeSocketBufSize, err)
+	}
+}
+
 // bindPipeToDevice sets SO_BINDTODEVICE on a UDP socket so that all
 // outgoing packets are forced through the named interface, bypassing
 // source-based policy routing. Requires CAP_NET_RAW or root.
@@ -437,6 +451,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 			scc.Close()
 			return nil, fmt.Errorf("stripe: listen pipe %d: %w", i, err)
 		}
+		setStripeSocketBuffers(conn, logger)
 		if ifName != "" {
 			if err := bindPipeToDevice(conn, ifName); err != nil {
 				logger.Errorf("stripe: SO_BINDTODEVICE pipe %d to %s: %v", i, ifName, err)
@@ -1265,10 +1280,11 @@ type stripeSession struct {
 	// TX (server → client): FEC encode + stripe
 	txSeq    uint32 // atomic
 	txPipe   uint32 // atomic
-	txGroup  [][]byte
-	txGrpSeq uint32
-	txMu     sync.Mutex
-	txTimer  *time.Timer
+	txGroup       [][]byte
+	txGrpSeq      uint32
+	txActivePipes []*net.UDPAddr // cached non-nil pipes, rebuilt on REGISTER (under txMu)
+	txMu          sync.Mutex
+	txTimer       *time.Timer
 
 	lastActivity time.Time
 	logger       *Logger
@@ -1294,13 +1310,7 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 
 	// ── M=0 fast path: send each packet directly, no grouping/padding/parity ──
 	if effectiveM == 0 {
-		// Collect active pipe addresses
-		activePipes := make([]*net.UDPAddr, 0, len(sess.pipes))
-		for _, p := range sess.pipes {
-			if p != nil {
-				activePipes = append(activePipes, p)
-			}
-		}
+		activePipes := sess.txActivePipes
 		if len(activePipes) == 0 {
 			return nil
 		}
@@ -1378,13 +1388,7 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 		return
 	}
 
-	// Collect active pipe addresses
-	activePipes := make([]*net.UDPAddr, 0, len(sess.pipes))
-	for _, p := range sess.pipes {
-		if p != nil {
-			activePipes = append(activePipes, p)
-		}
-	}
+	activePipes := sess.txActivePipes
 	if len(activePipes) == 0 {
 		sess.txGroup = sess.txGroup[:0]
 		return
@@ -1527,6 +1531,7 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 	if err != nil {
 		return nil, fmt.Errorf("stripe server: listen %s: %w", listenAddr, err)
 	}
+	setStripeSocketBuffers(conn, logger)
 
 	dataK := cfg.StripeDataShards
 	if dataK <= 0 {
@@ -1813,6 +1818,18 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 		sess.pipes[pipeIdx] = from
 		sess.registered++
 		ss.addrToSess[from.String()] = sessionID
+
+		// Rebuild cached active pipes under txMu for thread-safe TX access
+		sess.txMu.Lock()
+		ap := make([]*net.UDPAddr, 0, len(sess.pipes))
+		for _, p := range sess.pipes {
+			if p != nil {
+				ap = append(ap, p)
+			}
+		}
+		sess.txActivePipes = ap
+		sess.txMu.Unlock()
+
 		ss.logger.Infof("stripe pipe registered: session=%08x pipe=%d/%d from=%s",
 			sessionID, pipeIdx, totalPipes, from)
 	}
@@ -2082,6 +2099,17 @@ func (ss *stripeServer) handleKeepalive(hdr stripeHdr, payload []byte, from *net
 					ss.logger.Infof("stripe: pipe %d/%d address updated %s → %s (session=%08x)",
 						pipeIdx, len(sess.pipes), old, from, hdr.Session)
 				}
+
+				// Rebuild cached active pipes
+				sess.txMu.Lock()
+				ap := make([]*net.UDPAddr, 0, len(sess.pipes))
+				for _, p := range sess.pipes {
+					if p != nil {
+						ap = append(ap, p)
+					}
+				}
+				sess.txActivePipes = ap
+				sess.txMu.Unlock()
 			}
 		}
 		ss.mu.Unlock()
@@ -2129,13 +2157,10 @@ func (ss *stripeServer) handleNack(hdr stripeHdr, payload []byte, from *net.UDPA
 	}
 	sess.lastActivity = time.Now()
 
-	// Collect active pipes for round-robin retransmission
-	var activePipes []*net.UDPAddr
-	for _, p := range sess.pipes {
-		if p != nil {
-			activePipes = append(activePipes, p)
-		}
-	}
+	// Use cached active pipes for round-robin retransmission
+	sess.txMu.Lock()
+	activePipes := sess.txActivePipes
+	sess.txMu.Unlock()
 	if len(activePipes) == 0 {
 		return
 	}
