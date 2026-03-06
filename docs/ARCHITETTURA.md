@@ -298,24 +298,140 @@ Starlink applica un cap di ~80 Mbps per sessione UDP. Con un singolo tunnel QUIC
 il throughput è limitato a ~50 Mbps. Il trasporto stripe apre N socket UDP
 ("pipe") per path, ciascuno trattato da Starlink come sessione indipendente.
 
-### Schema complessivo
+### Schema complessivo dettagliato
+
+Il diagramma seguente mostra il flusso dati completo del trasporto UDP Stripe
+con tutte le ottimizzazioni implementate (FEC adattivo, Hybrid ARQ v2,
+cifratura AES-256-GCM, batch I/O, socket buffer tuning, TX cache).
 
 ```
-CLIENT                                                           SERVER
-                                                                
-TUN read ──→ FEC encoder (K data + M parity, adaptive) ──→ stripe TX  │ stripe RX ──→ FEC decode ──→ TUN write
-                 │                                                        │
-                 └─→ ARQ TX buf (ring 4096)                  ARQ RX tracker ──→ NACK gen (5ms) ─⇢ retransmit
-                                                                  │
-  Pipe 0 (UDP :rand, SO_BINDTODEVICE=enp7s6) ────────────────────┤
-  Pipe 1 (UDP :rand, SO_BINDTODEVICE=enp7s6) ────────────────────┤
-  Pipe 2 (UDP :rand, SO_BINDTODEVICE=enp7s6) ────────────────────┤  UDP listener :46017
-  Pipe 3 (UDP :rand, SO_BINDTODEVICE=enp7s6) ────────────────────┤
-                                                                  │
-   ↑ round-robin distribuzione shards FEC                         │
-                                                                  
-                       (ripetuto per wan5/enp7s7 e wan6/enp7s8)   
+╔══════════════════════════════════════════════════════════════════════════════════╗
+║                          CLIENT (VM MPQUIC)                                     ║
+╠══════════════════════════════════════════════════════════════════════════════════╣
+║                                                                                 ║
+║  ┌──────────┐     ┌───────────────────────────────────────────────────┐         ║
+║  │ TUN mp1  │     │            Stripe Engine (stripe.go)              │         ║
+║  │ 10.200.  │     │                                                   │         ║
+║  │ 17.1/24  │     │  ┌─────────────────┐   ┌──────────────────────┐  │         ║
+║  │          │◄───▶│  │  FEC Encoder     │   │   FEC Decoder        │  │         ║
+║  │ TUN read │────▶│  │  (Reed-Solomon)  │   │   (Reed-Solomon)    │──┼──▶TUN   ║
+║  │          │     │  │                  │   │                     │  │   write  ║
+║  │          │     │  │  Mode: adaptive  │   │  Reconstruct if     │  │         ║
+║  │          │     │  │  M=0: passthrough│   │  shards missing     │  │         ║
+║  │          │     │  │  M>0: K+M shards │   │  (up to M losses)   │  │         ║
+║  │          │     │  └────────┬─────────┘   └──────────▲──────────┘  │         ║
+║  └──────────┘     │           │                        │              │         ║
+║                   │           ▼                        │              │         ║
+║                   │  ┌─────────────────┐   ┌──────────┴──────────┐  │         ║
+║                   │  │  AES-256-GCM    │   │   AES-256-GCM      │  │         ║
+║                   │  │  Encrypt        │   │   Decrypt          │  │         ║
+║                   │  │                 │   │                    │  │         ║
+║                   │  │  Key: TLS 1.3   │   │  Nonce monotono   │  │         ║
+║                   │  │  Exporter (PFS) │   │  (anti-replay)    │  │         ║
+║                   │  └────────┬────────┘   └──────────▲────────┘  │         ║
+║                   │           │                        │           │         ║
+║                   │           ▼                        │           │         ║
+║                   │  ┌─────────────────┐   ┌──────────┴────────┐  │         ║
+║                   │  │  ARQ TX Buffer  │   │  ARQ RX Tracker   │  │         ║
+║                   │  │  (ring 4096)    │   │  (bitmap 8192)    │  │         ║
+║                   │  │                 │   │                   │  │         ║
+║                   │  │  Stores plain-  │   │  Detects gaps,    │  │         ║
+║                   │  │  text for re-   │   │  sends NACK every │  │         ║
+║                   │  │  encrypt+resend │   │  5ms (rate limit  │  │         ║
+║                   │  │  on NACK recv   │   │  30ms, thresh 96) │  │         ║
+║                   │  └────────┬────────┘   └──────────▲────────┘  │         ║
+║                   │           │                        │           │         ║
+║                   │           ▼              Dedup     │           │         ║
+║                   │  ┌────────────────────────────────────────┐   │         ║
+║                   │  │        Wire Format (16B header)        │   │         ║
+║                   │  │  magic(2)+ver(1)+type(1)+session(4)    │   │         ║
+║                   │  │  +groupSeq(4)+shardIdx(1)+dataN(1)     │   │         ║
+║                   │  │  +dataLen(2) + [encrypted payload]     │   │         ║
+║                   │  └────────────────┬───────────────────────┘   │         ║
+║                   └───────────────────┼───────────────────────────┘         ║
+║                                       │ ▲                                   ║
+║                          TX round-    │ │  RX batch I/O                     ║
+║                          robin        │ │  (recvmmsg, 8 dgram/syscall)      ║
+║                                       ▼ │                                   ║
+║  ┌─── WAN5 (enp7s7, Starlink) ────────────────────────────┐                ║
+║  │  SO_BINDTODEVICE + Socket Buffers 7 MB (RX+TX)          │                ║
+║  │                                                          │                ║
+║  │  Pipe 0  (UDP :rand) ──────┐                             │                ║
+║  │  Pipe 1  (UDP :rand) ──────┤                             │                ║
+║  │  Pipe 2  (UDP :rand) ──────┤                             │                ║
+║  │  Pipe 3  (UDP :rand) ──────┤                             │                ║
+║  │  Pipe 4  (UDP :rand) ──────┤  ◀── Starlink vede 12      │                ║
+║  │  Pipe 5  (UDP :rand) ──────┤      sessioni UDP           │                ║
+║  │  Pipe 6  (UDP :rand) ──────┤      indipendenti           │                ║
+║  │  Pipe 7  (UDP :rand) ──────┤      (~80 Mbps cap/each)    │                ║
+║  │  Pipe 8  (UDP :rand) ──────┤                             │                ║
+║  │  Pipe 9  (UDP :rand) ──────┤                             │                ║
+║  │  Pipe 10 (UDP :rand) ──────┤                             │                ║
+║  │  Pipe 11 (UDP :rand) ──────┘                             │                ║
+║  └──────────────────────────────────────────────────────────┘                ║
+║                                                                              ║
+║  ┌─── WAN6 (enp7s8, Starlink) ────────────────────────────┐                ║
+║  │  SO_BINDTODEVICE + Socket Buffers 7 MB (RX+TX)          │                ║
+║  │                                                          │                ║
+║  │  Pipe 0..11 (UDP :rand) ── identica struttura ──        │                ║
+║  └──────────────────────────────────────────────────────────┘                ║
+║                                                                              ║
+║  Totale: 24 pipe UDP ── 2 path × 12 pipe                                   ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+                              │ │                     ▲ ▲
+                              │ │    Internet         │ │
+                              ▼ ▼    (Starlink LEO)   │ │
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                     SERVER VPS (172.238.232.223)                            ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                             ║
+║  ┌─── UDP Listener :46017 ────────────────────────────────────┐            ║
+║  │  Socket Buffers 7 MB (RX+TX) + Batch I/O (recvmmsg)        │            ║
+║  │                                                             │            ║
+║  │  Riceve da tutte le 24 pipe client su un unico socket       │            ║
+║  │  Demultiplex per session ID (ipToUint32 ^ fnv32a(path))     │            ║
+║  └──────────────────────────┬──────────────────────────────────┘            ║
+║                              │                                              ║
+║                              ▼                                              ║
+║  ┌───────────────────────────────────────────────────────────┐              ║
+║  │               Stripe Session (per path)                    │              ║
+║  │                                                            │              ║
+║  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐   │              ║
+║  │  │ AES-256-GCM │  │ FEC Decoder  │  │ ARQ RX Tracker │   │              ║
+║  │  │ Decrypt     │  │ Reconstruct  │  │ NACK generator │   │              ║
+║  │  └──────┬──────┘  └──────┬───────┘  └───────┬────────┘   │              ║
+║  │         │               │                    │            │              ║
+║  │         ▼               ▼                    ▼            │              ║
+║  │  ┌─────────────────────────────────────────────────┐      │              ║
+║  │  │  TUN write ──▶ mp1 (10.200.17.254/24)           │      │              ║
+║  │  └─────────────────────────────────────────────────┘      │              ║
+║  │                                                            │              ║
+║  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐   │              ║
+║  │  │ TUN read    │  │ FEC Encoder  │  │ AES-256-GCM   │   │              ║
+║  │  │ mp1 ────────┼─▶│ (adaptive)  ─┼─▶│ Encrypt      ─┼───┼──▶ TX        ║
+║  │  └─────────────┘  └──────────────┘  └────────────────┘   │              ║
+║  │                                                            │              ║
+║  │  TX dispatch: txActivePipes cache (zero-alloc)            │              ║
+║  │  Flow-hash FNV-1a (5-tupla) → sessione per flusso TCP     │              ║
+║  └───────────────────────────────────────────────────────────┘              ║
+║                                                                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
 ```
+
+#### Legenda componenti
+
+| Componente | Funzione | Dettaglio |
+|------------|----------|-----------|  
+| **FEC Encoder/Decoder** | Protezione packet loss proattiva | Reed-Solomon K=10 data, M=2 parità. Adaptive: M=0 se loss=0, sale a M=2 se loss >2% |
+| **AES-256-GCM** | Cifratura + autenticazione | Chiavi derivate da TLS 1.3 Exporter (PFS per sessione). Nonce monotono anti-replay |
+| **ARQ TX Buffer** | Buffer ritrasmissione | Ring buffer 4096 entry (~200ms a 20K pps). Plaintext pronto per re-encrypt |
+| **ARQ RX Tracker** | Rilevamento gap | Bitmap circolare 8192 bit. NACK ogni 5ms, rate limit 30ms, soglia 96 seq |
+| **Dedup Receiver** | Eliminazione duplicati | `markReceived()` verificato prima della consegna TUN. Drop silenzioso duplicati ARQ |
+| **Batch I/O** | Riduzione overhead syscall | `recvmmsg` legge fino a 8 datagrammi per syscall (server RX + client RX) |
+| **Socket Buffers 7 MB** | Prevenzione drop kernel | Copre burst fino a 100ms a 500 Mbps (~4700 pacchetti). Richiede sysctl `rmem_max` |
+| **TX ActivePipes Cache** | Zero-alloc dispatch | Slice `[]*net.UDPAddr` pre-calcolata, ricostruita solo su REGISTER/keepalive |
+| **SO_BINDTODEVICE** | Binding interfaccia kernel | Forza uscita su interfaccia corretta. Necessario con multiple WAN |
+| **Flow-hash FNV-1a** | Anti-reordering TCP | Hash sulla 5-tupla → stesso flusso TCP sempre sullo stesso path |
 
 ### Wire Protocol
 ```
@@ -356,8 +472,8 @@ Meccanismo reattivo di ritrasmissione complementare a FEC adattivo:
 6. **Bidirezionale**: sia client che server hanno TX buf + RX tracker.
 7. **Solo M=0**: ARQ attivo solo quando effectiveM = 0 (non compete con FEC grouping).
 
-**Benchmark ARQ v2**: +43% throughput su dual Starlink (239 → 341 Mbps sostenuto, picco 390 Mbps).
-Overhead ~0% in condizioni normali (solo pacchetti NACK quando ci sono gap).
+**Benchmark ARQ v2 + Socket Tuning**: +48% throughput su dual Starlink (239 → 354 Mbps medio,
+picco 390 Mbps). Overhead ~0% in condizioni normali (solo pacchetti NACK quando ci sono gap).
 
 ### Batch I/O (recvmmsg)
 Sostituzione di `ReadFromUDP()` (1 syscall per pacchetto) con
