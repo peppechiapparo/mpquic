@@ -1812,6 +1812,38 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 		if sess.arqRx != nil {
 			go ss.startArqNackLoop(context.Background(), sess)
 		}
+	} else {
+		// Session exists — detect client reconnect (address change or pipe
+		// count change) and reset pipe state so stale NAT addresses are purged.
+		needReset := totalPipes != sess.totalPipes
+		if !needReset && pipeIdx >= 0 && pipeIdx < len(sess.pipes) && sess.pipes[pipeIdx] != nil {
+			if sess.pipes[pipeIdx].String() != from.String() {
+				needReset = true
+			}
+		}
+		if needReset {
+			ss.logger.Infof("stripe session %08x: reconnect detected (pipes %d→%d), resetting pipe state",
+				sessionID, sess.totalPipes, totalPipes)
+			// Remove all old addr→session mappings
+			for addr, sid := range ss.addrToSess {
+				if sid == sessionID {
+					delete(ss.addrToSess, addr)
+				}
+			}
+			// Resize or clear pipes slice
+			if totalPipes != sess.totalPipes {
+				sess.pipes = make([]*net.UDPAddr, totalPipes)
+				sess.totalPipes = totalPipes
+			} else {
+				for i := range sess.pipes {
+					sess.pipes[i] = nil
+				}
+			}
+			sess.registered = 0
+			sess.txMu.Lock()
+			sess.txActivePipes = nil
+			sess.txMu.Unlock()
+		}
 	}
 
 	if pipeIdx >= 0 && pipeIdx < len(sess.pipes) {
