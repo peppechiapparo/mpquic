@@ -1,7 +1,7 @@
 # Nota Tecnica — Piattaforma MPQUIC: Test e Risultati
 
-**Data**: 6 marzo 2026  
-**Versione**: 4.1  
+**Data**: 9 marzo 2026  
+**Versione**: 4.2  
 **Autori**: Team Engineering SATCOMVAS  
 **Classificazione**: Interna / Clienti
 
@@ -57,6 +57,10 @@
 **Fase 4b.7 — Socket Buffer Tuning + TX Cache (Riduzione Drop Kernel)**
 
 18b. [Socket Buffers 7 MB + TX ActivePipes Cache — Benchmark](#18b-socket-buffers-7-mb--tx-activepipes-cache--benchmark)
+
+**Infrastruttura Routing Dedicata (VLAN 17 + bd1)**
+
+18c. [Infrastruttura Routing — VLAN 17 + Tabella bd1](#18c-infrastruttura-routing--vlan-17--tabella-bd1)
 
 **Conclusioni e Appendice**
 
@@ -224,9 +228,9 @@ La piattaforma MPQUIC adotta un approccio radicalmente diverso:
 ```
 RETE CLIENTE                    VM MPQUIC (Client)                     VPS (Server)
 
-                                ┌────────────────┐
+                                ┌─────────────────┐
                                 │ Classifier      │
-  OpenWrt ──LAN──▶              │ (VLAN / nftables)│
+  OpenWrt ──LAN──▶              │(VLAN / nftables)│
                                 │                 │
                                 ├─┬───────────────┤       WAN (Starlink)        ┌──────────────┐
                   VoIP ────────▶│ │ TUN cr2       │─── QUIC tunnel ────────────▶│              │
@@ -2002,13 +2006,14 @@ In base all'analisi, il piano di sviluppo procede in fasi ordinate per rischio/b
 
 | Fase | Intervento | Effort | Guadagno atteso | Stato |
 |------|-----------|--------|-----------------|-------|
-| **4b.5** | Pacing per pipe (token bucket) | Ore | −50% retransmit, +15–25% throughput | ⬜ Prossimo |
-| **4b.6** | Hybrid ARQ con NACK selettivo | 2–3 giorni | Overhead 0–3%, recovery in 1×RTT | ⬜ Pianificato |
-| **4b.7** | FEC per dimensione pacchetto | Ore | −90% spreco su ACK/DNS quando M>0 | ⬜ Futuro |
-| **4b.8** | Sliding window FEC (M>0 evoluto) | Giorni | Migliore granularità recovery | ⬜ Futuro |
+| **4b.5** | Pacing per pipe (token bucket) | Ore | −50% retransmit, +15–25% throughput | ❌ Abbandonato (`time.Sleep` granularità 1–4 ms → regressione −40%) |
+| **4b.6** | Hybrid ARQ con NACK selettivo | 2–3 giorni | Overhead 0–3%, recovery in 1×RTT | ✅ Completato (§18) |
+| **4b.7** | Socket Buffers 7 MB + TX Cache | Ore | −drop kernel burst, +3.8% throughput | ✅ Completato (§18b) |
+| **4b.8** | FEC per dimensione pacchetto | Ore | −90% spreco su ACK/DNS quando M>0 | ⬜ Futuro |
+| **4b.9** | Sliding window FEC (M>0 evoluto) | Giorni | Migliore granularità recovery | ⬜ Futuro |
 
-**Strategia**: prima Fase 4b.5 (pacing) con benchmark rapido per quantificare il
-guadagno reale, poi Fase 4b.6 (Hybrid ARQ) come salto architetturale definitivo.
+**Riepilogo**: Pacing abbandonato per regressione (`time.Sleep` inadeguato su Linux).
+Hybrid ARQ v2 + Batch I/O + Socket Buffers hanno portato il throughput da 239 a 354 Mbps (+48%).
 
 ---
 
@@ -2317,6 +2322,69 @@ kernel durante i picchi di jitter.
 
 ---
 
+## 18c. Infrastruttura Routing — VLAN 17 + Tabella bd1
+
+### 18c.1 Problema: conflitto watchdog su tabella wan1
+
+Il tunnel multipath mp1 veniva inizialmente instradato tramite la tabella `wan1`
+(regola `from 172.16.1.0/30 lookup wan1`), condivisa con il tunnel single-link mpq1.
+Lo script watchdog `mpquic-lan-routing-check.sh` monitorava lo stato del modem WAN1
+(enp7s3) e, trovandolo offline (nessun modem collegato), sovrascriveva la tabella
+wan1 con `blackhole default`, interrompendo il routing di mp1.
+
+### 18c.2 Soluzione: tabella bd1 con VLAN 17 dedicata
+
+È stata creata un'infrastruttura routing completamente indipendente per mp1,
+senza modificare nulla della configurazione wan1/mpq1 esistente:
+
+| Componente | File | Descrizione |
+|------------|------|-------------|
+| VLAN netdev | `/etc/systemd/network/26-vlan17.netdev` | VLAN 17 su enp6s20 (LAN1) |
+| VLAN network | `/etc/systemd/network/27-bd1.network` | IP 172.16.17.1/30, ip rule priority 1017 |
+| Parent ref | `/etc/systemd/network/20-lan1.network` | Aggiunto `VLAN=enp6s20.17` |
+| Routing table | `/etc/iproute2/rt_tables` | `120 bd1` |
+| Route persistence | `mpquic@mp1.service.d/bd1-route.conf` | `ExecStartPost` con default + connected route |
+
+**Schema routing:**
+
+```
+OpenWrt B1 (172.16.17.2)
+    │
+    │ VLAN 17
+    ▼
+enp6s20.17 (172.16.17.1/30)
+    │
+    │ ip rule 1017: from 172.16.17.0/30 → lookup bd1
+    ▼
+table bd1:
+    default dev mp1 scope link
+    172.16.17.0/30 dev enp6s20.17 scope link
+    │
+    ▼
+mp1 TUN ──stripe (wan5 + wan6)──▶ VPS (10.200.17.254)
+```
+
+### 18c.3 Persistenza e boot order
+
+L'intero setup sopravvive al reboot della VM:
+
+1. `systemd-networkd` ricrea la VLAN, assegna IP, installa ip rule 1017
+2. `mpquic@mp1.service` (enabled) avvia il tunnel, crea la TUN mp1
+3. `ExecStartPost` (drop-in bd1-route.conf) popola la tabella bd1
+
+Lo script watchdog `mpquic-lan-routing-check.sh` non tocca la tabella bd1
+(gestisce solo wan1–wan6), eliminando il conflitto alla radice.
+
+### 18c.4 Nota operativa: coerenza stripe_fec_mode
+
+Il parametro `stripe_fec_mode` **deve essere identico** su client e server.
+Se il client usa `off` (nessun encoder RS) ma il server ha `adaptive` e
+rileva loss, il server può inviare gruppi FEC con parità che il client
+non sa decodificare. Dopo qualsiasi modifica di `stripe_fec_mode`, riavviare
+**entrambi** i nodi.
+
+---
+
 ## 19. Vantaggi per il Cliente
 
 ### 19.1 Qualità del Servizio Garantita
@@ -2489,7 +2557,8 @@ Batch I/O e socket buffer tuning.
 
 **Prossimi sviluppi:**
 
-- **Tre link Starlink**: aggiunta terzo link WAN per verificare scalabilità a ~450-500 Mbps
+- **Estensione bd1 ad altri router**: replicare il pattern VLAN + tabella dedicata per ulteriori LAN
+- **Persistenza VPS return route**: aggiungere `172.16.17.0/30 dev mp1` a `mpquic-vps-routes.sh`
 - **FEC per dimensione pacchetto**: skip FEC per pacchetti <300B quando M>0
 - **Sliding Window FEC**: evoluzione dei gruppi fissi verso finestra scorrevole
 - **Monitoring e telemetria stripe**: statistiche FEC, throughput per pipe, stato sessioni
@@ -2497,7 +2566,7 @@ Batch I/O e socket buffer tuning.
 
 ---
 
-*Documento aggiornato il 06/03/2026 — Piattaforma MPQUIC v4.1 (Socket Buffers 7 MB + TX ActivePipes Cache)*  
+*Documento aggiornato il 09/03/2026 — Piattaforma MPQUIC v4.2 (VLAN 17 + Tabella bd1)*  
 *Commit di riferimento: bef0894 (main)*
 
 ---
@@ -2568,24 +2637,31 @@ nft list ruleset > /etc/nftables.conf
 ```bash
 # Configurazione client (/etc/mpquic/instances/mp1.yaml — sezione rilevante)
 multipath_policy: balanced       # oppure: failover
-paths:
+stripe_fec_mode: adaptive        # deve essere uguale su client e server
+stripe_arq: true
+multipath_paths:
   - name: wan5
-    interface: enp7s7
+    bind_ip: if:enp7s7
+    remote_addr: 172.238.232.223
+    remote_port: 45017
     priority: 1
     weight: 1
-    # pipes: 4                   # multi-pipe (Fase 4b, attualmente disabilitato)
+    pipes: 12
+    transport: stripe
   - name: wan6
-    interface: enp7s8
+    bind_ip: if:enp7s8
+    remote_addr: 172.238.232.223
+    remote_port: 45017
     priority: 1                  # per failover: priority: 2
     weight: 1
-    # pipes: 4                   # multi-pipe (Fase 4b, attualmente disabilitato)
+    pipes: 12
+    transport: stripe
 
-# Routing SL1 tramite mp1
-ip route replace default dev mp1 table wan1
-nft add rule ip nat postrouting oifname "mp1" masquerade
+# Routing bd1 (automatico tramite systemd drop-in)
+# Le route vengono create da ExecStartPost in bd1-route.conf
 
 # VPS — route di ritorno
-ip route add 172.16.1.0/30 dev mp1
+ip route replace 172.16.17.0/30 dev mp1
 
 # Fault injection per test failover
 nft add table inet failover_test
@@ -2618,10 +2694,10 @@ Per riprodurre i test è necessario:
 6. Test sequenziali (un iperf3 alla volta) poiché il server iperf3 è single-instance
 7. Per test multi-path: almeno 2 link WAN attivi con tunnel mp1 configurato
 8. Per test end-to-end: router OpenWrt con mwan3 configurato per instradare SL1 via mp1
-9. Dopo restart di mp1, ri-aggiungere `ip route replace default dev mp1 table wan1`
-   (il TUN viene ricreato e la route va persa)
+9. Con la tabella bd1, le route vengono ripristinate automaticamente al restart
+   tramite `ExecStartPost` nel drop-in `bd1-route.conf`
 
 ---
 
-*Documento aggiornato il 06/03/2026 — Piattaforma MPQUIC v4.1*  
+*Documento aggiornato il 09/03/2026 — Piattaforma MPQUIC v4.2*  
 *Commit di riferimento: bef0894 (main)*

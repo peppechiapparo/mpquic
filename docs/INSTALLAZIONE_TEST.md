@@ -464,7 +464,12 @@ Aumentando M si migliora la resilienza al costo di più overhead di rete.
 In condizioni normali (loss < 1%), FEC adattivo opera con M=0 (zero overhead) e ARQ
 ritrasmette selettivamente i rari pacchetti persi. Se la perdita aumenta significativamente,
 FEC adattivo può passare automaticamente a M=2 come fallback.
-Benchmark dual Starlink 20 pipe: **274 Mbps** (+14.6% vs baseline 239 Mbps senza ARQ).
+Benchmark dual Starlink 24 pipe: **354 Mbps** media, picco 390 Mbps (+48% vs baseline 239 Mbps).
+
+**Nota critica**: `stripe_fec_mode` **deve essere identico su client e server**.
+Se il client usa `off` ma il server ha `adaptive`, il server può inviare gruppi
+FEC con parità che il client non sa decodificare. Dopo qualsiasi modifica,
+riavviare **entrambi** i nodi.
 
 ### 11.9 Attributi dataplane e QoS (avanzati)
 
@@ -571,9 +576,9 @@ tls_cert_file: /etc/mpquic/tls/server.crt
 tls_key_file: /etc/mpquic/tls/server.key
 ```
 
-### 11.12 Esempio completo: client multipath stripe 3 WAN (mp1)
+### 11.12 Esempio completo: client multipath stripe dual Starlink (mp1)
 
-Configurazione più avanzata — bonding 3 link Starlink con stripe + FEC:
+Configurazione produzione — bonding 2 link Starlink con stripe + FEC adattivo + ARQ:
 
 ```yaml
 # /etc/mpquic/instances/mp1.yaml (client)
@@ -594,21 +599,13 @@ stripe_parity_shards: 2
 stripe_fec_mode: adaptive
 stripe_arq: true
 multipath_paths:
-- name: wan4
-  bind_ip: if:enp7s6
-  remote_addr: 172.238.232.223
-  remote_port: 45017
-  priority: 1
-  weight: 1
-  pipes: 4
-  transport: stripe
 - name: wan5
   bind_ip: if:enp7s7
   remote_addr: 172.238.232.223
   remote_port: 45017
   priority: 1
   weight: 1
-  pipes: 4
+  pipes: 12
   transport: stripe
 - name: wan6
   bind_ip: if:enp7s8
@@ -616,7 +613,7 @@ multipath_paths:
   remote_port: 45017
   priority: 1
   weight: 1
-  pipes: 4
+  pipes: 12
   transport: stripe
 ```
 
@@ -707,6 +704,7 @@ La VM client ha 16 interfacce di rete suddivise in 4 ruoli:
 |--------|------------|-------|-----|
 | MGMT | enp6s18, enp6s19 | Management SSH | 10.10.11.100, 10.10.10.100 |
 | LAN | enp6s20-23, enp7s1-2 | Transit verso OpenWrt | 172.16.{1-6}.1/30 |
+| VLAN | enp6s20.17 | Transit dedicato mp1 (bd1) | 172.16.17.1/30 |
 | WAN | enp7s3-8 | Uplink Starlink (DHCP) | Dinamici (CGNAT/privato) |
 | TUN | mpq1-6, mp1, cr5, etc. | Tunnel MPQUIC | 10.200.x.x |
 
@@ -937,6 +935,7 @@ service `mpquic-routing.service`.
 103 wan4
 104 wan5
 105 wan6
+120 bd1
 ```
 
 ### 15.3 Regole e route per tunnel single-link
@@ -955,17 +954,75 @@ GATEWAY=$(ip route show dev enp7s6 | awk '/default/ {print $3}')
 ip route replace 172.238.232.223/32 via "$GATEWAY" dev enp7s6 table wan4
 ```
 
-### 15.4 Route per tunnel multipath mp1
+### 15.4 Route per tunnel multipath mp1 — tabella bd1
 
-Per instradare il traffico di una LAN specifica (es. LAN1) attraverso il tunnel
-multipath mp1:
+Il tunnel multipath mp1 utilizza una tabella di routing dedicata `bd1` (ID 120)
+con VLAN 17 su enp6s20, completamente indipendente dalle tabelle wan1–wan6 e
+dallo script watchdog `mpquic-lan-routing-check.sh`.
+
+**Infrastruttura VLAN 17 (systemd-networkd):**
+
+```ini
+# /etc/systemd/network/26-vlan17.netdev
+[NetDev]
+Name=enp6s20.17
+Kind=vlan
+
+[VLAN]
+Id=17
+```
+
+```ini
+# /etc/systemd/network/27-bd1.network
+[Match]
+Name=enp6s20.17
+
+[Network]
+Address=172.16.17.1/30
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[RoutingPolicyRule]
+From=172.16.17.0/30
+Table=120
+Priority=1017
+```
+
+```ini
+# /etc/systemd/network/20-lan1.network — aggiungere sotto [Network]:
+VLAN=enp6s20.17
+```
+
+**Route bd1 (persistenti tramite systemd drop-in):**
+
+```ini
+# /etc/systemd/system/mpquic@mp1.service.d/bd1-route.conf
+[Service]
+ExecStartPost=/bin/sh -c "sleep 1 && ip route replace default dev mp1 table bd1 && ip route replace 172.16.17.0/30 dev enp6s20.17 table bd1"
+```
+
+**Schema routing:**
+
+```
+Sorgente 172.16.17.0/30 → rule 1017 → table bd1 → default dev mp1
+                                                   → 172.16.17.0/30 dev enp6s20.17
+```
+
+**VPS — route di ritorno:**
 
 ```bash
-# Instradare LAN1 via mp1
-ip route replace default dev mp1 table wan1
+ip route replace 172.16.17.0/30 dev mp1
+```
 
-# VPS — route di ritorno per LAN1
-ip route add 172.16.1.0/30 dev mp1
+**Verifica:**
+
+```bash
+# Client
+ip route show table bd1
+ip rule show | grep 1017
+
+# VPS
+ip route show | grep 172.16.17
 ```
 
 ### 15.5 Route VPS (server)
@@ -979,8 +1036,8 @@ ip route add 172.16.4.0/30 dev mpq4
 ip route add 172.16.5.0/30 dev mpq5
 ip route add 172.16.6.0/30 dev mpq6
 
-# Route per subnet mp1 (multipath)
-ip route add 172.16.1.0/30 dev mp1  # se LAN1 transita via mp1
+# Route per subnet mp1 (multipath, tabella bd1)
+ip route add 172.16.17.0/30 dev mp1
 ```
 
 ### 15.6 Rendere le route permanenti

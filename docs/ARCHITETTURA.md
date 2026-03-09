@@ -305,116 +305,116 @@ con tutte le ottimizzazioni implementate (FEC adattivo, Hybrid ARQ v2,
 cifratura AES-256-GCM, batch I/O, socket buffer tuning, TX cache).
 
 ```
-╔══════════════════════════════════════════════════════════════════════════════════╗
+╔═════════════════════════════════════════════════════════════════════════════════╗
 ║                          CLIENT (VM MPQUIC)                                     ║
-╠══════════════════════════════════════════════════════════════════════════════════╣
+╠═════════════════════════════════════════════════════════════════════════════════╣
 ║                                                                                 ║
-║  ┌──────────┐     ┌───────────────────────────────────────────────────┐         ║
-║  │ TUN mp1  │     │            Stripe Engine (stripe.go)              │         ║
-║  │ 10.200.  │     │                                                   │         ║
-║  │ 17.1/24  │     │  ┌─────────────────┐   ┌──────────────────────┐  │         ║
-║  │          │◄───▶│  │  FEC Encoder     │   │   FEC Decoder        │  │         ║
-║  │ TUN read │────▶│  │  (Reed-Solomon)  │   │   (Reed-Solomon)    │──┼──▶TUN   ║
+║  ┌──────────┐     ┌──────────────────────────────────────────────────┐          ║
+║  │ TUN mp1  │     │            Stripe Engine (stripe.go)             │          ║
+║  │ 10.200.  │     │                                                  │          ║
+║  │ 17.1/24  │     │  ┌─────────────────┐   ┌──────────────────────┐  │          ║
+║  │          │◄───▶│  │  FEC Encoder     │   │   FEC Decoder       │  │          ║
+║  │ TUN read │────▶│  │  (Reed-Solomon)  │   │   (Reed-Solomon)    │──┼──▶TUN    ║
 ║  │          │     │  │                  │   │                     │  │   write  ║
-║  │          │     │  │  Mode: adaptive  │   │  Reconstruct if     │  │         ║
-║  │          │     │  │  M=0: passthrough│   │  shards missing     │  │         ║
-║  │          │     │  │  M>0: K+M shards │   │  (up to M losses)   │  │         ║
-║  │          │     │  └────────┬─────────┘   └──────────▲──────────┘  │         ║
-║  └──────────┘     │           │                        │              │         ║
-║                   │           ▼                        │              │         ║
-║                   │  ┌─────────────────┐   ┌──────────┴──────────┐  │         ║
-║                   │  │  AES-256-GCM    │   │   AES-256-GCM      │  │         ║
-║                   │  │  Encrypt        │   │   Decrypt          │  │         ║
-║                   │  │                 │   │                    │  │         ║
-║                   │  │  Key: TLS 1.3   │   │  Nonce monotono   │  │         ║
-║                   │  │  Exporter (PFS) │   │  (anti-replay)    │  │         ║
-║                   │  └────────┬────────┘   └──────────▲────────┘  │         ║
-║                   │           │                        │           │         ║
-║                   │           ▼                        │           │         ║
-║                   │  ┌─────────────────┐   ┌──────────┴────────┐  │         ║
-║                   │  │  ARQ TX Buffer  │   │  ARQ RX Tracker   │  │         ║
-║                   │  │  (ring 4096)    │   │  (bitmap 8192)    │  │         ║
-║                   │  │                 │   │                   │  │         ║
-║                   │  │  Stores plain-  │   │  Detects gaps,    │  │         ║
-║                   │  │  text for re-   │   │  sends NACK every │  │         ║
-║                   │  │  encrypt+resend │   │  5ms (rate limit  │  │         ║
-║                   │  │  on NACK recv   │   │  30ms, thresh 96) │  │         ║
-║                   │  └────────┬────────┘   └──────────▲────────┘  │         ║
-║                   │           │                        │           │         ║
-║                   │           ▼              Dedup     │           │         ║
-║                   │  ┌────────────────────────────────────────┐   │         ║
-║                   │  │        Wire Format (16B header)        │   │         ║
-║                   │  │  magic(2)+ver(1)+type(1)+session(4)    │   │         ║
-║                   │  │  +groupSeq(4)+shardIdx(1)+dataN(1)     │   │         ║
-║                   │  │  +dataLen(2) + [encrypted payload]     │   │         ║
-║                   │  └────────────────┬───────────────────────┘   │         ║
-║                   └───────────────────┼───────────────────────────┘         ║
-║                                       │ ▲                                   ║
-║                          TX round-    │ │  RX batch I/O                     ║
-║                          robin        │ │  (recvmmsg, 8 dgram/syscall)      ║
-║                                       ▼ │                                   ║
-║  ┌─── WAN5 (enp7s7, Starlink) ────────────────────────────┐                ║
-║  │  SO_BINDTODEVICE + Socket Buffers 7 MB (RX+TX)          │                ║
-║  │                                                          │                ║
-║  │  Pipe 0  (UDP :rand) ──────┐                             │                ║
-║  │  Pipe 1  (UDP :rand) ──────┤                             │                ║
-║  │  Pipe 2  (UDP :rand) ──────┤                             │                ║
-║  │  Pipe 3  (UDP :rand) ──────┤                             │                ║
-║  │  Pipe 4  (UDP :rand) ──────┤  ◀── Starlink vede 12      │                ║
-║  │  Pipe 5  (UDP :rand) ──────┤      sessioni UDP           │                ║
-║  │  Pipe 6  (UDP :rand) ──────┤      indipendenti           │                ║
-║  │  Pipe 7  (UDP :rand) ──────┤      (~80 Mbps cap/each)    │                ║
-║  │  Pipe 8  (UDP :rand) ──────┤                             │                ║
-║  │  Pipe 9  (UDP :rand) ──────┤                             │                ║
-║  │  Pipe 10 (UDP :rand) ──────┤                             │                ║
-║  │  Pipe 11 (UDP :rand) ──────┘                             │                ║
-║  └──────────────────────────────────────────────────────────┘                ║
-║                                                                              ║
-║  ┌─── WAN6 (enp7s8, Starlink) ────────────────────────────┐                ║
-║  │  SO_BINDTODEVICE + Socket Buffers 7 MB (RX+TX)          │                ║
-║  │                                                          │                ║
-║  │  Pipe 0..11 (UDP :rand) ── identica struttura ──        │                ║
-║  └──────────────────────────────────────────────────────────┘                ║
-║                                                                              ║
-║  Totale: 24 pipe UDP ── 2 path × 12 pipe                                   ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+║  │          │     │  │  Mode: adaptive  │   │  Reconstruct if     │  │          ║
+║  │          │     │  │  M=0: passthrough│   │  shards missing     │  │          ║
+║  │          │     │  │  M>0: K+M shards │   │  (up to M losses)   │  │          ║
+║  │          │     │  └────────┬─────────┘   └──────────▲──────────┘  │          ║
+║  └──────────┘     │           │                        │             │          ║
+║                   │           ▼                        │             │          ║
+║                   │  ┌─────────────────┐   ┌──────────┴────────┐     │          ║
+║                   │  │  AES-256-GCM    │   │   AES-256-GCM     │     │          ║
+║                   │  │  Encrypt        │   │   Decrypt         │     │          ║
+║                   │  │                 │   │                   │     │          ║
+║                   │  │  Key: TLS 1.3   │   │  Nonce monotono   │     │          ║
+║                   │  │  Exporter (PFS) │   │  (anti-replay)    │     │          ║
+║                   │  └────────┬────────┘   └──────────▲────────┘     │          ║
+║                   │           │                        │             │          ║
+║                   │           ▼                        │             │          ║
+║                   │  ┌─────────────────┐   ┌──────────┴────────┐     │          ║
+║                   │  │  ARQ TX Buffer  │   │  ARQ RX Tracker   │     │          ║
+║                   │  │  (ring 4096)    │   │  (bitmap 8192)    │     │          ║
+║                   │  │                 │   │                   │     │          ║
+║                   │  │  Stores plain-  │   │  Detects gaps,    │     │          ║
+║                   │  │  text for re-   │   │  sends NACK every │     │          ║
+║                   │  │  encrypt+resend │   │  5ms (rate limit  │     │          ║
+║                   │  │  on NACK recv   │   │  30ms, thresh 96) │     │          ║
+║                   │  └────────┬────────┘   └──────────▲────────┘     │          ║
+║                   │           │                        │             │          ║
+║                   │           ▼              Dedup     │             │          ║
+║                   │  ┌────────────────────────────────────────┐      │          ║
+║                   │  │        Wire Format (16B header)        │      │          ║
+║                   │  │  magic(2)+ver(1)+type(1)+session(4)    │      │          ║
+║                   │  │  +groupSeq(4)+shardIdx(1)+dataN(1)     │      │          ║
+║                   │  │  +dataLen(2) + [encrypted payload]     │      │          ║
+║                   │  └────────────────┬───────────────────────┘      │          ║
+║                   └───────────────────┼──────────────────────────────┘          ║
+║                                       │ ▲                                       ║
+║                          TX round-    │ │  RX batch I/O                         ║
+║                          robin        │ │  (recvmmsg, 8 dgram/syscall)          ║
+║                                       ▼ │                                       ║
+║  ┌─── WAN5 (enp7s7, Starlink) ──────────────────────────────┐                   ║
+║  │  SO_BINDTODEVICE + Socket Buffers 7 MB (RX+TX)           │                   ║
+║  │                                                          │                   ║
+║  │  Pipe 0  (UDP :rand) ──────┐                             │                   ║
+║  │  Pipe 1  (UDP :rand) ──────┤                             │                   ║
+║  │  Pipe 2  (UDP :rand) ──────┤                             │                   ║
+║  │  Pipe 3  (UDP :rand) ──────┤                             │                   ║
+║  │  Pipe 4  (UDP :rand) ──────┤  ◀── Starlink vede 12       │                   ║
+║  │  Pipe 5  (UDP :rand) ──────┤      sessioni UDP           │                   ║
+║  │  Pipe 6  (UDP :rand) ──────┤      indipendenti           │                   ║
+║  │  Pipe 7  (UDP :rand) ──────┤      (~80 Mbps cap/each)    │                   ║
+║  │  Pipe 8  (UDP :rand) ──────┤                             │                   ║
+║  │  Pipe 9  (UDP :rand) ──────┤                             │                   ║
+║  │  Pipe 10 (UDP :rand) ──────┤                             │                   ║
+║  │  Pipe 11 (UDP :rand) ──────┘                             │                   ║
+║  └──────────────────────────────────────────────────────────┘                   ║
+║                                                                                 ║
+║  ┌─── WAN6 (enp7s8, Starlink) ────────────────────────────┐                     ║
+║  │  SO_BINDTODEVICE + Socket Buffers 7 MB (RX+TX)         │                     ║
+║  │                                                        │                     ║
+║  │  Pipe 0..11 (UDP :rand) ── identica struttura ──       │                     ║
+║  └────────────────────────────────────────────────────────┘                     ║
+║                                                                                 ║
+║  Totale: 24 pipe UDP ── 2 path × 12 pipe                                        ║
+╚═════════════════════════════════════════════════════════════════════════════════╝
                               │ │                     ▲ ▲
                               │ │    Internet         │ │
                               ▼ ▼    (Starlink LEO)   │ │
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                     SERVER VPS (172.238.232.223)                            ║
+║                     SERVER VPS (172.238.232.223)                             ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║                                                                             ║
-║  ┌─── UDP Listener :46017 ────────────────────────────────────┐            ║
-║  │  Socket Buffers 7 MB (RX+TX) + Batch I/O (recvmmsg)        │            ║
-║  │                                                             │            ║
-║  │  Riceve da tutte le 24 pipe client su un unico socket       │            ║
-║  │  Demultiplex per session ID (ipToUint32 ^ fnv32a(path))     │            ║
-║  └──────────────────────────┬──────────────────────────────────┘            ║
-║                              │                                              ║
-║                              ▼                                              ║
-║  ┌───────────────────────────────────────────────────────────┐              ║
-║  │               Stripe Session (per path)                    │              ║
+║                                                                              ║
+║  ┌─── UDP Listener :46017 ────────────────────────────────────┐              ║
+║  │  Socket Buffers 7 MB (RX+TX) + Batch I/O (recvmmsg)        │              ║
 ║  │                                                            │              ║
-║  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐   │              ║
-║  │  │ AES-256-GCM │  │ FEC Decoder  │  │ ARQ RX Tracker │   │              ║
-║  │  │ Decrypt     │  │ Reconstruct  │  │ NACK generator │   │              ║
-║  │  └──────┬──────┘  └──────┬───────┘  └───────┬────────┘   │              ║
-║  │         │               │                    │            │              ║
-║  │         ▼               ▼                    ▼            │              ║
-║  │  ┌─────────────────────────────────────────────────┐      │              ║
-║  │  │  TUN write ──▶ mp1 (10.200.17.254/24)           │      │              ║
-║  │  └─────────────────────────────────────────────────┘      │              ║
-║  │                                                            │              ║
-║  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐   │              ║
-║  │  │ TUN read    │  │ FEC Encoder  │  │ AES-256-GCM   │   │              ║
-║  │  │ mp1 ────────┼─▶│ (adaptive)  ─┼─▶│ Encrypt      ─┼───┼──▶ TX        ║
-║  │  └─────────────┘  └──────────────┘  └────────────────┘   │              ║
-║  │                                                            │              ║
-║  │  TX dispatch: txActivePipes cache (zero-alloc)            │              ║
-║  │  Flow-hash FNV-1a (5-tupla) → sessione per flusso TCP     │              ║
-║  └───────────────────────────────────────────────────────────┘              ║
-║                                                                             ║
+║  │  Riceve da tutte le 24 pipe client su un unico socket      │              ║
+║  │  Demultiplex per session ID (ipToUint32 ^ fnv32a(path))    │              ║
+║  └───────────────────────────┬────────────────────────────────┘              ║
+║                              │                                               ║
+║                              ▼                                               ║
+║  ┌───────────────────────────────────────────────────────────┐               ║
+║  │               Stripe Session (per path)                   │               ║
+║  │                                                           │               ║
+║  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐    │               ║
+║  │  │ AES-256-GCM │  │ FEC Decoder  │  │ ARQ RX Tracker │    │               ║
+║  │  │ Decrypt     │  │ Reconstruct  │  │ NACK generator │    │               ║
+║  │  └──────┬──────┘  └──────┬───────┘  └───────┬────────┘    │               ║
+║  │         │               │                    │            │               ║
+║  │         ▼               ▼                    ▼            │               ║
+║  │  ┌─────────────────────────────────────────────────┐      │               ║
+║  │  │  TUN write ──▶ mp1 (10.200.17.254/24)           │      │               ║
+║  │  └─────────────────────────────────────────────────┘      │               ║
+║  │                                                           │               ║
+║  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐    │               ║
+║  │  │ TUN read    │  │ FEC Encoder  │  │ AES-256-GCM    │    │               ║
+║  │  │ mp1 ────────┼─▶│ (adaptive)  ─┼─▶│ Encrypt       ─┼────┼──▶ TX         ║
+║  │  └─────────────┘  └──────────────┘  └────────────────┘    │               ║
+║  │                                                           │               ║
+║  │  TX dispatch: txActivePipes cache (zero-alloc)            │               ║
+║  │  Flow-hash FNV-1a (5-tupla) → sessione per flusso TCP     │               ║
+║  └───────────────────────────────────────────────────────────┘               ║
+║                                                                              ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 ```
 
