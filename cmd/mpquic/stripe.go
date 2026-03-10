@@ -231,6 +231,7 @@ type stripeClientConn struct {
 	pipes      []*net.UDPConn
 	serverAddr *net.UDPAddr
 	sessionID  uint32
+	tunIPU32   uint32 // TUN IP as uint32 for periodic re-register
 
 	dataK   int
 	parityM int
@@ -423,6 +424,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	scc := &stripeClientConn{
 		serverAddr: serverAddr,
 		sessionID:  sessionID,
+		tunIPU32:   ipToUint32(tunIP),
 		dataK:      dataK,
 		parityM:    parityM,
 		enc:        enc,
@@ -1022,6 +1024,7 @@ func (scc *stripeClientConn) deliverGroupData(grp *fecGroup) {
 func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 	ticker := time.NewTicker(stripeKeepaliveInterval)
 	defer ticker.Stop()
+	var tickCount int
 	for {
 		select {
 		case <-ctx.Done():
@@ -1029,6 +1032,8 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 		case <-scc.closeCh:
 			return
 		case <-ticker.C:
+			tickCount++
+
 			// Check for session timeout — server may have restarted
 			last := time.Unix(0, atomic.LoadInt64(&scc.lastRx))
 			if time.Since(last) > stripeSessionTimeout {
@@ -1043,6 +1048,29 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 
 			// ── Update our TX M based on peer's loss report ──
 			scc.updateAdaptiveM()
+
+			// ── Periodic re-register (every 30s) for self-healing ──
+			// If the server lost pipe addresses (re-key race, GC, etc.),
+			// this ensures pipe mappings are refreshed without a full restart.
+			if tickCount%6 == 0 {
+				for i, pipe := range scc.pipes {
+					regPayload := make([]byte, 6)
+					binary.BigEndian.PutUint32(regPayload[0:4], scc.tunIPU32)
+					regPayload[4] = uint8(i)
+					regPayload[5] = uint8(len(scc.pipes))
+					pkt := make([]byte, stripeHdrLen+len(regPayload))
+					encodeStripeHdr(pkt, &stripeHdr{
+						Magic:   stripeMagic,
+						Version: stripeVersion,
+						Type:    stripeREGISTER,
+						Session: scc.sessionID,
+						DataLen: uint16(len(regPayload)),
+					})
+					copy(pkt[stripeHdrLen:], regPayload)
+					pkt = stripeEncrypt(scc.txCipher, pkt)
+					_, _ = pipe.WriteToUDP(pkt, scc.serverAddr)
+				}
+			}
 
 			for i, pipe := range scc.pipes {
 				// Keepalive payload: [pipe_index: 1B][rx_loss_pct: 1B]
@@ -1662,6 +1690,25 @@ func (ss *stripeServer) processIncomingPacket(raw []byte, from *net.UDPAddr) {
 							sess.rxCipher = tmpCipher
 							sess.txCipher = newTx
 							ss.logger.Infof("stripe: session %08x re-keyed in-place", hdr.Session)
+
+							// Re-key means client restarted with new TLS session.
+							// Clear stale pipe addresses so return traffic doesn't
+							// go to dead NAT endpoints from the previous connection.
+							ss.mu.Lock()
+							for addr, sid := range ss.addrToSess {
+								if sid == hdr.Session {
+									delete(ss.addrToSess, addr)
+								}
+							}
+							for i := range sess.pipes {
+								sess.pipes[i] = nil
+							}
+							sess.registered = 0
+							ss.mu.Unlock()
+							sess.txMu.Lock()
+							sess.txActivePipes = nil
+							sess.txMu.Unlock()
+
 							payload = decrypted2[stripeHdrLen:]
 							goto dispatch
 						}
