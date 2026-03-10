@@ -1,5 +1,27 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-03-10
+
+### Fix: re-register connectionTable on re-key (`89ab73f`)
+- Dopo riavvio client, il `pathConn` nella connectionTable del server manteneva
+  un `lastRecv` stantio dalla sessione precedente. `dispatch()` lo considerava
+  "stale" (soglia 3s) e scartava silenziosamente il traffico di ritorno.
+- Fix: al re-key e al reconnect, viene ricreato il `stripeServerDC` e chiamato
+  `registerStripe()` con `lastRecv = time.Now()`.
+- Aggiunto lock `txMu` per update `txCipher` (data race con `drainSendCh`).
+- `pendingKeys.Delete()` dopo re-key per evitare re-key spurii.
+- Logging diagnostico rate-limited (1/s) per TX drop e dispatch falliti.
+
+### Fix: reset ARQ/FEC state on re-key (`6ca7052`)
+- Dopo riavvio client, il server manteneva `arqRxTracker.base` dalla sessione
+  precedente. Il nuovo client riparte da `txSeq=0`, ma tutti i pacchetti con
+  `seq < base` venivano rifiutati come "troppo vecchi" da `markReceived()`.
+- Sintomo: ritardo progressivo nel ripristino del ping (+8s ad ogni riavvio).
+- Fix: al re-key e al reconnect, reset completo di `arqRx`, `arqTx`, `rxGroups`,
+  `rxSeqHighest`, counters RX/TX, e `txSeq`/`txPipe`/`txGroup` del server.
+- Risultato: dopo il fix, il ping risponde immediatamente ad ogni riavvio
+  (verificato 4 riavvii consecutivi con 0 pacchetti persi da stale state).
+
 ## 2026-03-01
 
 ### Cleanup diagnostico (`c15b235`)
