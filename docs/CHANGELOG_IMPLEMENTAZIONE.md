@@ -2,6 +2,18 @@
 
 ## 2026-03-10
 
+### Step 4.14: FEC per dimensione pacchetto (skip small packets)
+- Quando `effectiveM > 0` (FEC attivo), i pacchetti più piccoli di `fecMinSize`
+  (default 300 byte) vengono inviati direttamente senza accumulo FEC.
+- Evita il padding di pacchetti piccoli (ACK TCP ~52B, DNS ~80B, keepalive)
+  a ~1402B all'interno di un FEC group, con >90% di spreco banda.
+- Implementato sia nel client `SendDatagram()` che nel server `SendDatagram()`.
+- Compatibile con ARQ (pacchetti skipped salvati in `arqTx`).
+- Configurabile via YAML: `stripe_fec_min_size: 300` (default), `-1` per disabilitare.
+- Contatore `txFECSkip` (atomic) per telemetria.
+- Nessuna modifica RX necessaria: il receiver gestisce già `GroupDataN < K` come
+  consegna diretta.
+
 ### Fix: re-register connectionTable on re-key (`89ab73f`)
 - Dopo riavvio client, il `pathConn` nella connectionTable del server manteneva
   un `lastRecv` stantio dalla sessione precedente. `dispatch()` lo considerava
