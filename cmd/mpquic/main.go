@@ -1151,6 +1151,7 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 	// Single TUN reader dispatches packets to the right connection via dst IP.
 	go func() {
 		buf := make([]byte, 65535)
+		var lastDispatchFail time.Time
 		for {
 			n, readErr := tun.Read(buf)
 			if readErr != nil {
@@ -1177,7 +1178,11 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 
 			pktCopy := append([]byte(nil), pkt...)
 			if !ct.dispatch(dstIP, pktCopy) {
-				logger.Debugf("dispatch failed for dst=%s (no path or buffer full)", dstIP)
+				now := time.Now()
+				if now.Sub(lastDispatchFail) > time.Second {
+					lastDispatchFail = now
+					logger.Infof("dispatch failed for dst=%s (no path or buffer full)", dstIP)
+				}
 			}
 		}
 	}()

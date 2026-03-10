@@ -930,14 +930,14 @@ net.core.wmem_max = 7340032
 
 **Benchmark** (6 marzo 2026, dual Starlink WAN5+WAN6, 24 pipe, P20 30s × 6 run):
 
-| Run | Receiver (Mbps) | Retransmit |
-|-----|-----------------|------------|
-| 1 | 223 | 3.585 (cold start) |
-| 2 | 344 | 3.569 |
-| 3 | 345 | 4.695 |
-| 4 | **390** | 2.282 |
-| 5 | 338 | 3.030 |
-| 6 | 352 | 3.786 |
+| Run | Receiver (Mbps) | Retransmit         |
+|-----|-----------------|------------        |
+| 1   | 223             | 3.585 (cold start) |
+| 2   | 344             | 3.569              |
+| 3   | 345             | 4.695              |
+| 4   | **390**         | 2.282              |
+| 5   | 338             | 3.030              |
+| 6   | 352             | 3.786              |
 | **Media (run 2-6)** | **354 Mbps** | **3.472** |
 
 **Risultato**: +3.8% vs Step 4.16 (341 → 354 Mbps), +48% vs baseline (239 Mbps).

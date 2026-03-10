@@ -1315,6 +1315,7 @@ type stripeSession struct {
 	txTimer       *time.Timer
 
 	lastActivity time.Time
+	lastTxDrop   time.Time // rate-limit for TX drop logging
 	logger       *Logger
 
 	securityDecryptFail uint64
@@ -1340,6 +1341,14 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 	if effectiveM == 0 {
 		activePipes := sess.txActivePipes
 		if len(activePipes) == 0 {
+			// Rate-limited log: at most once per second per session
+			now := time.Now()
+			if now.Sub(sess.lastTxDrop) > time.Second {
+				sess.lastTxDrop = now
+				if sess.logger != nil {
+					sess.logger.Infof("stripe: session %08x TX drop (no active pipes), pktLen=%d", sess.sessionID, len(pkt))
+				}
+			}
 			return nil
 		}
 
@@ -1418,6 +1427,13 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 
 	activePipes := sess.txActivePipes
 	if len(activePipes) == 0 {
+		now := time.Now()
+		if now.Sub(sess.lastTxDrop) > time.Second {
+			sess.lastTxDrop = now
+			if sess.logger != nil {
+				sess.logger.Infof("stripe: session %08x FEC TX drop (no active pipes), shards=%d", sess.sessionID, K)
+			}
+		}
 		sess.txGroup = sess.txGroup[:0]
 		return
 	}
@@ -1688,8 +1704,18 @@ func (ss *stripeServer) processIncomingPacket(raw []byte, from *net.UDPAddr) {
 						newTx, errTx := newStripeCipher(km.s2cKey)
 						if errTx == nil {
 							sess.rxCipher = tmpCipher
+							// Update txCipher under txMu to prevent data race
+							// with concurrent SendDatagram reads.
+							sess.txMu.Lock()
 							sess.txCipher = newTx
-							ss.logger.Infof("stripe: session %08x re-keyed in-place", hdr.Session)
+							sess.txActivePipes = nil
+							sess.txMu.Unlock()
+
+							// Consume the pending key so it doesn't trigger
+							// spurious re-keys on future decrypt failures.
+							ss.pendingKeys.Delete(hdr.Session)
+
+							ss.logger.Infof("stripe: session %08x re-keyed in-place peer=%s", hdr.Session, sess.peerIP)
 
 							// Re-key means client restarted with new TLS session.
 							// Clear stale pipe addresses so return traffic doesn't
@@ -1705,9 +1731,17 @@ func (ss *stripeServer) processIncomingPacket(raw []byte, from *net.UDPAddr) {
 							}
 							sess.registered = 0
 							ss.mu.Unlock()
-							sess.txMu.Lock()
-							sess.txActivePipes = nil
-							sess.txMu.Unlock()
+
+							// Re-register in connectionTable so the pathConn
+							// gets a fresh lastRecv timestamp and drain goroutine.
+							// Without this, dispatch() may consider the path stale
+							// (lastRecv from before client restart) and skip it,
+							// causing return traffic to be silently dropped.
+							sdc := &stripeServerDC{session: sess, conn: ss.conn}
+							_, cancel := context.WithCancel(context.Background())
+							remoteID := fmt.Sprintf("stripe:%08x", hdr.Session)
+							ss.ct.registerStripe(sess.peerIP, remoteID, sdc, cancel)
+							ss.logger.Infof("stripe: session %08x re-registered in connectionTable", hdr.Session)
 
 							payload = decrypted2[stripeHdrLen:]
 							goto dispatch
@@ -1890,6 +1924,12 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			sess.txMu.Lock()
 			sess.txActivePipes = nil
 			sess.txMu.Unlock()
+
+			// Re-register in connectionTable with fresh pathConn
+			sdc := &stripeServerDC{session: sess, conn: ss.conn}
+			_, cancel := context.WithCancel(context.Background())
+			remoteID := fmt.Sprintf("stripe:%08x", sessionID)
+			ss.ct.registerStripe(sess.peerIP, remoteID, sdc, cancel)
 		}
 	}
 
