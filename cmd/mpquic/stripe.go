@@ -1709,6 +1709,9 @@ func (ss *stripeServer) processIncomingPacket(raw []byte, from *net.UDPAddr) {
 							sess.txMu.Lock()
 							sess.txCipher = newTx
 							sess.txActivePipes = nil
+							sess.txGroup = sess.txGroup[:0]
+							atomic.StoreUint32(&sess.txSeq, 0)
+							atomic.StoreUint32(&sess.txPipe, 0)
 							sess.txMu.Unlock()
 
 							// Consume the pending key so it doesn't trigger
@@ -1718,6 +1721,24 @@ func (ss *stripeServer) processIncomingPacket(raw []byte, from *net.UDPAddr) {
 							ss.logger.Infof("stripe: session %08x re-keyed in-place peer=%s", hdr.Session, sess.peerIP)
 
 							// Re-key means client restarted with new TLS session.
+							// Reset ARQ / FEC RX state: the new client starts
+							// at txSeq=0 but the old arqRx.base holds the
+							// previous client's highest seq, causing all new
+							// packets to be rejected as "too old" duplicates.
+							if sess.arqRx != nil {
+								sess.arqRx = newArqRxTracker()
+							}
+							if sess.arqTx != nil {
+								sess.arqTx = &arqTxBuf{}
+							}
+							atomic.StoreUint64(&sess.rxSeqHighest, 0)
+							atomic.StoreUint64(&sess.rxDirectCount, 0)
+							atomic.StoreUint64(&sess.rxFECGroups, 0)
+							atomic.StoreUint64(&sess.rxFECRecov, 0)
+							sess.rxMu.Lock()
+							sess.rxGroups = make(map[uint32]*fecGroup)
+							sess.rxMu.Unlock()
+
 							// Clear stale pipe addresses so return traffic doesn't
 							// go to dead NAT endpoints from the previous connection.
 							ss.mu.Lock()
@@ -1924,6 +1945,18 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			sess.txMu.Lock()
 			sess.txActivePipes = nil
 			sess.txMu.Unlock()
+
+			// Reset ARQ / FEC state: new client starts at txSeq=0
+			if sess.arqRx != nil {
+				sess.arqRx = newArqRxTracker()
+			}
+			if sess.arqTx != nil {
+				sess.arqTx = &arqTxBuf{}
+			}
+			atomic.StoreUint64(&sess.rxSeqHighest, 0)
+			sess.rxMu.Lock()
+			sess.rxGroups = make(map[uint32]*fecGroup)
+			sess.rxMu.Unlock()
 
 			// Re-register in connectionTable with fresh pathConn
 			sdc := &stripeServerDC{session: sess, conn: ss.conn}
