@@ -2745,16 +2745,16 @@ l'utente) e un **punto di concentrazione cloud** (che fornisce l'uscita Internet
                            SITO REMOTO (TBOX)
   ┌──────────────────────────────────────────────────────────────────┐
   │                                                                  │
-  │   ┌──────────────┐       ┌──────────────────────────────────┐   │
-  │   │              │       │       Macchina Virtuale           │   │
-  │   │   Router     │       │     (Orchestratore Tunnel)        │   │
-  │   │              │       │                                   │   │
-  │   │  • Gestione  │       │  • Creazione tunnel MPQUIC       │   │
-  │   │    failover  │◄─────►│  • Aggregazione multi-path       │   │
-  │   │  • Routing   │       │  • Cifratura AES-256-GCM         │   │
-  │   │    traffico  │       │  • Correzione errori automatica   │   │
-  │   │              │       │                                   │   │
-  │   └──────┬───────┘       └────────┬──────────────┬──────────┘   │
+  │   ┌──────────────┐       ┌──────────────────────────────────┐    │
+  │   │              │       │       Macchina Virtuale          │    │
+  │   │   Router     │       │     (Orchestratore Tunnel)       │    │
+  │   │              │       │                                  │    │
+  │   │  • Gestione  │       │  • Creazione tunnel MPQUIC       │    │
+  │   │    failover  │◄─────►│  • Aggregazione multi-path       │    │
+  │   │  • Routing   │       │  • Cifratura AES-256-GCM         │    │
+  │   │    traffico  │       │  • Correzione errori automatica  │    │
+  │   │              │       │                                  │    │
+  │   └──────┬───────┘       └────────┬──────────────┬──────────┘    │
   │          │                        │              │               │
   │          │ LAN                    │              │               │
   │          │                   eth 8│         eth 7│               │
@@ -2898,8 +2898,8 @@ nel sito di installazione.
        │                                  ▲
        ▼                                  │
   ┌─────────┐    ┌──────────────┐    ┌────┴─────┐
-  │ Router   │───►│ Orchestratore│═══►│  Server  │
-  │ (TBOX)   │    │   (TBOX)     │    │  Cloud   │
+  │ Router  │───►│ Orchestratore│═══►│  Server  │
+  │ (TBOX)  │    │   (TBOX)     │    │  Cloud   │
   └─────────┘    └──┬────────┬──┘    └──────────┘
                     │        │
               ┌─────┘        └──────┐
