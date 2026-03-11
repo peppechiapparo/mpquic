@@ -248,9 +248,6 @@ type stripeClientConn struct {
 	arqTx *arqTxBuf     // TX retransmit buffer (nil = ARQ disabled)
 	arqRx *arqRxTracker // RX gap detector + NACK generator
 
-	// RX reorder buffer (Step 4.18)
-	reorderBuf *stripeReorderBuf
-
 	// TX state
 	txSeq    uint32 // atomic: next data sequence number
 	txPipe   uint32 // atomic: round-robin pipe selector
@@ -448,16 +445,6 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		scc.arqRx = newArqRxTracker()
 	}
 
-	// RX reorder buffer (Step 4.18)
-	reorderWindow := cfg.StripeReorderWindow
-	if reorderWindow == 0 {
-		reorderWindow = stripeReorderDefaultWindow // default enabled
-	}
-	if reorderWindow > 0 {
-		scc.reorderBuf = newStripeReorderBuf(scc.rxCh, scc.closeCh, reorderWindow, cfg.StripeReorderTimeout)
-		logger.Infof("stripe: RX reorder buffer enabled: window=%d timeout=%dµs", reorderWindow, cfg.StripeReorderTimeout)
-	}
-
 	// Open N UDP sockets bound to the same interface
 	for i := 0; i < pipes; i++ {
 		laddr := &net.UDPAddr{IP: net.ParseIP(bindIP), Port: 0}
@@ -635,9 +622,6 @@ func (scc *stripeClientConn) ReceiveDatagram(ctx context.Context) ([]byte, error
 func (scc *stripeClientConn) Close() error {
 	scc.closeOnce.Do(func() {
 		close(scc.closeCh)
-		if scc.reorderBuf != nil {
-			scc.reorderBuf.Stop()
-		}
 		if scc.txTimer != nil {
 			scc.txTimer.Stop()
 		}
@@ -952,11 +936,6 @@ func (scc *stripeClientConn) deliverDataDirect(hdr stripeHdr, payload []byte) {
 	copy(pkt, payload[2:2+hdr.DataLen])
 
 	atomic.AddUint64(&scc.rxDirectCount, 1)
-
-	if scc.reorderBuf != nil {
-		scc.reorderBuf.Insert(hdr.GroupSeq, pkt)
-		return
-	}
 
 	select {
 	case scc.rxCh <- pkt:
@@ -1305,9 +1284,6 @@ type stripeSession struct {
 	arqTx *arqTxBuf     // TX retransmit buffer (nil = ARQ disabled)
 	arqRx *arqRxTracker // RX gap detector + NACK generator
 
-	// RX reorder buffer (Step 4.18)
-	reorderBuf *stripeReorderBuf
-
 	// RX (client → server): FEC decode → TUN
 	rxGroups map[uint32]*fecGroup
 	rxMu     sync.Mutex
@@ -1577,10 +1553,6 @@ type stripeServer struct {
 	logger     *Logger
 	closeCh    chan struct{}
 
-	// RX reorder config (Step 4.18)
-	reorderWindow    int
-	reorderTimeoutUs int
-
 	pendingKeys *stripePendingKeys
 
 	securityDecryptFail uint64
@@ -1635,8 +1607,6 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 		arqEnabled: cfg.StripeARQ,
 		logger:     logger,
 		closeCh:    make(chan struct{}),
-		reorderWindow:    cfg.StripeReorderWindow,
-		reorderTimeoutUs: cfg.StripeReorderTimeout,
 		pendingKeys: pendingKeys,
 	}
 
@@ -1648,19 +1618,7 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 	if cfg.StripeARQ {
 		arqStr = "on"
 	}
-	reorderStr := "off"
-	rw := ss.reorderWindow
-	if rw == 0 {
-		rw = stripeReorderDefaultWindow
-	}
-	if rw > 0 {
-		rt := ss.reorderTimeoutUs
-		if rt <= 0 {
-			rt = stripeReorderDefaultTimeoutUs
-		}
-		reorderStr = fmt.Sprintf("window=%d timeout=%dµs", rw, rt)
-	}
-	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s pacing=%s arq=%s reorder=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode, pacingStr, arqStr, reorderStr)
+	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s pacing=%s arq=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode, pacingStr, arqStr)
 	return ss, nil
 }
 
@@ -1772,9 +1730,6 @@ func (ss *stripeServer) processIncomingPacket(raw []byte, from *net.UDPAddr) {
 							}
 							if sess.arqTx != nil {
 								sess.arqTx = &arqTxBuf{}
-							}
-							if sess.reorderBuf != nil {
-								sess.reorderBuf.Reset()
 							}
 							atomic.StoreUint64(&sess.rxSeqHighest, 0)
 							atomic.StoreUint64(&sess.rxDirectCount, 0)
@@ -1935,17 +1890,6 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			sess.arqTx = &arqTxBuf{}
 			sess.arqRx = newArqRxTracker()
 		}
-
-		// RX reorder buffer (Step 4.18)
-		reorderWindow := ss.reorderWindow
-		if reorderWindow == 0 {
-			reorderWindow = stripeReorderDefaultWindow
-		}
-		if reorderWindow > 0 {
-			sess.reorderBuf = newStripeReorderBuf(rxCh, ss.closeCh, reorderWindow, ss.reorderTimeoutUs)
-			ss.logger.Infof("stripe: session %08x RX reorder buffer: window=%d timeout=%dµs", sessionID, reorderWindow, ss.reorderTimeoutUs)
-		}
-
 		ss.sessions[sessionID] = sess
 
 		// Create server-to-client datagramConn and register in connectionTable
@@ -2008,9 +1952,6 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			}
 			if sess.arqTx != nil {
 				sess.arqTx = &arqTxBuf{}
-			}
-			if sess.reorderBuf != nil {
-				sess.reorderBuf.Reset()
 			}
 			atomic.StoreUint64(&sess.rxSeqHighest, 0)
 			sess.rxMu.Lock()
@@ -2114,13 +2055,9 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 			pkt := make([]byte, hdr.DataLen)
 			copy(pkt, payload[2:2+hdr.DataLen])
 			atomic.AddUint64(&sess.rxDirectCount, 1)
-			if sess.reorderBuf != nil {
-				sess.reorderBuf.Insert(hdr.GroupSeq, pkt)
-			} else {
-				select {
-				case sess.rxCh <- pkt:
-				default:
-				}
+			select {
+			case sess.rxCh <- pkt:
+			default:
 			}
 		}
 		return

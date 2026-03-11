@@ -1,19 +1,5 @@
 # Changelog implementazione (replicabile TBOX)
 
-## 2026-03-12
-
-### Step 4.18: Stripe RX Reorder Buffer — IMPLEMENTATO
-- Jitter buffer sul path RX che riordina i pacchetti per GroupSeq prima di
-  consegnarli al TUN, eliminando i retransmit TCP da DupACK.
-- Root cause: TX round-robin su 12 pipe con latenze diverse → pacchetti arrivano
-  fuori ordine → TCP vede reordering → DupACK → retransmit → CC back-off.
-- `stripeReorderBuf`: mappa slots + nextSeq, timeout 3ms per gap, window 128.
-- Configurazione: `stripe_reorder_window` (default 128), `stripe_reorder_timeout` (default 3ms).
-- Integrato in client `deliverDataDirect()` e server `handleDataShard()`.
-- FEC groups bypassano il buffer (già atomici per gruppo).
-- File: `cmd/mpquic/stripe_reorder.go` (nuovo), modifiche a `stripe.go` e `main.go`.
-- Benchmark: da eseguire.
-
 ## 2026-03-11
 
 ### Step 4.14: FEC per dimensione pacchetto — ❌ NEGATIVO (revert)
