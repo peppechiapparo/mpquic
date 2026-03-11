@@ -984,6 +984,39 @@ sarebbe comunque marginale.
 contatori atomici) senza beneficio misurabile. Non è prerequisito per nessun
 altro step. **Codice revertito**, codebase torna a v4.1 (senza Step 4.14).
 
+### Step 4.18 — Stripe RX Reorder Buffer 🔄 IN CORSO
+
+**Obiettivo**: eliminare i retransmit TCP causati dal riordino dei pacchetti.
+
+**Root cause identificata**: il TX round-robin distribuisce i pacchetti su 12 pipe
+UDP con latenze leggermente diverse. I pacchetti arrivano al receiver fuori ordine
+→ TCP nel tunnel vede DupACK → retransmit → congestion-control back-off →
+throughput limitato a ~350 Mbps.
+
+**Soluzione**: jitter buffer sul path RX che accumula pacchetti per GroupSeq e li
+rilascia in ordine monotonicamente crescente. Se un gap persiste oltre il timeout
+(default 3 ms), il buffer avanza oltre il buco e consegna ciò che ha.
+
+**Implementazione** (`stripe_reorder.go`):
+
+1. Struct `stripeReorderBuf`: mappa `slots[uint32][]byte` + `nextSeq`, mutex, timer
+2. `Insert(seq, pkt)`: se seq == nextSeq → consegna immediata + flush consecutivi;
+   altrimenti buffer + arm timer
+3. Timeout 3 ms: avanza `nextSeq` al minimo buffered, flush consecutivi
+4. Safety valve: se `len(slots) >= window` → force-flush
+5. `Reset()` per re-key/reconnect, `Stop()` per shutdown
+
+**Configurazione** (yaml):
+- `stripe_reorder_window: 128` (0 per disabilitare, default 128)
+- `stripe_reorder_timeout: 3` (ms, default 3)
+
+**Integrazione**:
+- Client: `deliverDataDirect()` → `reorderBuf.Insert()` → `rxCh`
+- Server: `handleDataShard()` inline delivery → `reorderBuf.Insert()` → `rxCh`
+- FEC groups bypassano il buffer (già atomici per gruppo)
+
+**Benchmark**: da eseguire (6×30s dual Starlink, P20).
+
 ### Step 4.15 — Sliding Window FEC ⬜ FUTURO
 
 **Obiettivo**: evoluzione dei gruppi FEC fissi (K blocchi → K+M shard) verso una
@@ -1006,6 +1039,7 @@ finestra scorrevole dove la parità protegge gli ultimi N shard "in volo".
 - [x] Batch I/O recvmmsg (Step 4.16) — **risultato neutro** (+1%), ipotesi syscall falsificata
 - [x] Socket buffers 7MB + TX cache (Step 4.17) — **+3.8%** (341→354 Mbps), picco 390 Mbps, efficienza 84.3%
 - [x] FEC per dimensione pacchetto (Step 4.14) — **risultato negativo**, dead code in M=0 adaptive, revertito
+- [ ] RX Reorder Buffer (Step 4.18) — in corso
 - [ ] Sliding window FEC (Step 4.15)
 - [ ] Throughput ≥ 400 Mbps su dual Starlink
 

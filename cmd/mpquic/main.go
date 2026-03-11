@@ -62,6 +62,8 @@ type Config struct {
 	StripeFECMode         string                `yaml:"stripe_fec_mode"` // "always" (default), "adaptive", "off"
 	StripePacingRate      int                   `yaml:"stripe_pacing_rate"` // Mbps per session (0 = disabled)
 	StripeARQ             bool                  `yaml:"stripe_arq"`         // Hybrid ARQ with NACK retransmission
+	StripeReorderWindow   int                   `yaml:"stripe_reorder_window"`    // RX reorder buffer window (0 = disabled, default 128)
+	StripeReorderTimeout  int                   `yaml:"stripe_reorder_timeout"`   // RX reorder gap timeout in ms (default 3)
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
 }
 
