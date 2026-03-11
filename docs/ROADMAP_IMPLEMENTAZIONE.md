@@ -1055,7 +1055,7 @@ Profilo CPU 30s catturabile con: `go tool pprof http://host:6060/debug/pprof/pro
 - Priorità #2: **batch TUN write via writev** (attacca il 23%)
 - Deprioritizzato: UDP GRO (solo 5%), crypto optimization (solo 4.6%)
 
-### Step 4.20 — Batch TX via sendmmsg ⬜ DA IMPLEMENTARE
+### Step 4.20 — Batch TX via sendmmsg ✅ IMPLEMENTATO (commit ae36b1e, benchmark pendente)
 
 **Obiettivo**: ridurre le syscall TX da N a N/batch usando `sendmmsg` (batch sendto).
 Profiler mostra che `SendDatagram → WriteToUDP → sendto` consuma il **45% del tempo
