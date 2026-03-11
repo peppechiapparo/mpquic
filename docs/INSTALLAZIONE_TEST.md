@@ -41,39 +41,161 @@ Verifica file:
 ls -l /etc/mpquic/instances/{1..6}.yaml.tpl
 ```
 
-## 4.1) Stabilità hotplug WAN (raccomandato prima dei test)
+## 4.1) Configurazione WAN con systemd-networkd (per-interfaccia)
 
-Per il tuo caso (plug/unplug modem WAN con ripartenza automatica DHCP + `mpquic@X`), la configurazione più robusta è:
-- backend rete `systemd-networkd`
-- configurazione tramite `netplan` (renderer `networkd`)
-- hook eventi `networkd-dispatcher` + hook `ifupdown` (entrambi supportati dal progetto)
+### Problema
 
-Perché: con questa combinazione gli eventi carrier/DHCP vengono propagati in modo affidabile anche dopo unplug/replug ripetuti.
+Le WAN usano DHCP per ottenere l'IP dal modem collegato (Starlink, terrestre, LTE).
+In ambienti virtualizzati (Proxmox/VirtIO), quando si scollega e ricollega un cavo
+su una diversa porta fisica (es. da modem terrestre a modem Starlink), la NIC
+virtuale **non perde il carrier** — il DHCP client non sa che deve fare un nuovo
+DISCOVER e mantiene il lease vecchio (rete sbagliata). L'unico rimedio senza
+watchdog sarebbe un reboot.
 
-Pacchetti consigliati lato client:
-```bash
-sudo apt-get install -y netplan.io systemd-networkd networkd-dispatcher ifupdown isc-dhcp-client
+### Soluzione: configurazione per-WAN + wan-watchdog
+
+Due componenti:
+
+1. **File `.network` individuali per WAN** — sostituiscono il singolo file condiviso.
+   Ogni WAN ha la propria configurazione con `RouteMetric` dedicata, `KeepConfiguration=no`
+   per rilascio IP immediato su reconfigure, e `ClientIdentifier=mac` per DHCP robusto.
+
+2. **`wan-watchdog.service`** — daemon che ogni 15s pinga il gateway DHCP di ogni WAN.
+   Se il gateway diventa irraggiungibile per 4 check consecutivi (60s), forza
+   `networkctl reconfigure` sull'interfaccia per triggerare un nuovo DHCP DISCOVER.
+
+### 4.1.1) Installazione configurazione di rete per-WAN
+
+I file di configurazione sono in `deploy/networkd/wan/`:
+
+| File | Interfaccia | RouteMetric | Note |
+|------|-------------|-------------|------|
+| `10-wan1.network` | enp7s3 | 101 | WAN1 |
+| `11-wan2.network` | enp7s4 | 102 | WAN2 |
+| `12-wan3.network` | enp7s5 | 103 | WAN3 |
+| `13-wan4.network` | enp7s6 | 104 | WAN4 (fibra/terrestre) |
+| `14-wan5.network` | enp7s7 | 105 | WAN5 (Starlink #1) |
+| `15-wan6.network` | enp7s8 | 106 | WAN6 (Starlink #2) |
+
+Esempio contenuto (`14-wan5.network`):
+```ini
+# WAN5 — enp7s7 (Starlink #1)
+[Match]
+Name=enp7s7
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=no
+LinkLocalAddressing=no
+KeepConfiguration=no
+
+[DHCP]
+RouteMetric=105
+UseDNS=no
+UseRoutes=yes
+SendRelease=yes
+ClientIdentifier=mac
+
+[Link]
+RequiredForOnline=no
 ```
 
-Verifica hook installati:
+Opzioni chiave:
+- **`KeepConfiguration=no`** — rimuove l'IP vecchio immediatamente su reconfigure
+- **`SendRelease=yes`** — invia DHCP RELEASE prima del nuovo DISCOVER
+- **`ClientIdentifier=mac`** — identifica il client per MAC (più robusto del DUID condiviso)
+- **`RequiredForOnline=no`** — le WAN senza modem non bloccano il boot
+- **`RouteMetric` diverso** — evita conflitti nella routing table tra WAN
+
+Deploy:
 ```bash
-ls -l /etc/network/if-up.d/mpquic-auto /etc/network/if-post-down.d/mpquic-auto
-ls -l /etc/networkd-dispatcher/routable.d/50-mpquic-auto
-ls -l /etc/networkd-dispatcher/configured.d/50-mpquic-auto
-ls -l /etc/networkd-dispatcher/degraded.d/50-mpquic-auto
-ls -l /etc/networkd-dispatcher/off.d/50-mpquic-auto
-ls -l /etc/networkd-dispatcher/no-carrier.d/50-mpquic-auto
+# Rimuovi il vecchio file condiviso (se presente)
+sudo rm -f /etc/systemd/network/10-wan.network
+
+# Installa i file per-WAN
+sudo cp deploy/networkd/wan/*.network /etc/systemd/network/
+
+# Ricarica configurazione
+sudo networkctl reload
 ```
 
-Verifica runtime eventi/hotplug:
+Verifica:
 ```bash
-sudo systemctl status systemd-networkd --no-pager
-sudo systemctl status networkd-dispatcher --no-pager
-journalctl -u systemd-networkd -u networkd-dispatcher -n 200 --no-pager
-journalctl -u mpquic@4.service -n 100 --no-pager
+# Ogni WAN deve mostrare il proprio Network File
+networkctl status enp7s7  # → Network File: /etc/systemd/network/14-wan5.network
+networkctl status enp7s8  # → Network File: /etc/systemd/network/15-wan6.network
 ```
 
-Nota operativa: se usi `netplan`, imposta renderer `networkd` ed evita che `NetworkManager` gestisca le stesse WAN.
+### 4.1.2) Installazione wan-watchdog (auto-recovery DHCP)
+
+Il watchdog rileva automaticamente quando il gateway DHCP di una WAN diventa
+irraggiungibile e forza un DHCP re-discover, senza necessità di reboot.
+
+**Flusso operativo:**
+```
+Cable swap → gateway vecchio irraggiungibile → 4 ping falliti (60s)
+  → networkctl reconfigure → DHCP DISCOVER → nuovo IP dal modem collegato
+  → WAN operativa (~70s totale)
+```
+
+Installazione:
+```bash
+# Script
+sudo cp scripts/wan-watchdog.sh /usr/local/bin/
+sudo chmod +x /usr/local/bin/wan-watchdog.sh
+
+# Service systemd
+sudo cp deploy/systemd/wan-watchdog.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wan-watchdog.service
+```
+
+Verifica:
+```bash
+sudo systemctl status wan-watchdog.service
+# Deve mostrare: Active: active (running)
+
+# Log del watchdog
+journalctl -u wan-watchdog.service -f
+```
+
+Esempio di log durante un cable swap:
+```
+wan-watchdog: enp7s7: gateway 10.150.19.1 UNREACHABLE (1/4)
+wan-watchdog: enp7s7: gateway 10.150.19.1 UNREACHABLE (2/4)
+wan-watchdog: enp7s7: gateway 10.150.19.1 UNREACHABLE (3/4)
+wan-watchdog: enp7s7: gateway 10.150.19.1 UNREACHABLE (4/4)
+wan-watchdog: enp7s7: *** RECONFIGURE *** reason: gateway 10.150.19.1 unreachable for 60s
+wan-watchdog: enp7s7: old gateway=10.150.19.1, old addr=10.150.19.116
+wan-watchdog: enp7s7: new gateway=100.64.0.1, new addr=100.110.241.142
+```
+
+### 4.1.3) Riconfigurazione manuale WAN (wan-reconfigure.sh)
+
+Per forzare un DHCP re-discover immediato (senza attendere il watchdog):
+
+```bash
+# Singola interfaccia
+sudo /opt/mpquic/scripts/wan-reconfigure.sh enp7s7
+
+# Tutte le WAN
+sudo /opt/mpquic/scripts/wan-reconfigure.sh
+```
+
+### 4.1.4) Configurazione watchdog (opzionale)
+
+I parametri del watchdog sono configurabili via variabili d'ambiente nel service file.
+Decommentare le righe desiderate in `/etc/systemd/system/wan-watchdog.service`:
+
+| Variabile | Default | Descrizione |
+|-----------|---------|-------------|
+| `WAN_INTERFACES` | `enp7s3 ... enp7s8` | Interfacce da monitorare |
+| `CHECK_INTERVAL` | `15` | Secondi tra un check e l'altro |
+| `FAIL_THRESHOLD` | `4` | Check falliti prima di reconfigure (4 × 15s = 60s) |
+| `COOLDOWN` | `120` | Secondi minimo tra due reconfigure sulla stessa iface |
+| `PING_TIMEOUT` | `3` | Timeout singolo ping in secondi |
+
+Per applicare le modifiche: `sudo systemctl daemon-reload && sudo systemctl restart wan-watchdog`
 
 ## 5) Parametrizzazione endpoint
 ### Client
@@ -708,72 +830,42 @@ La VM client ha 16 interfacce di rete suddivise in 4 ruoli:
 | WAN | enp7s3-8 | Uplink Starlink (DHCP) | Dinamici (CGNAT/privato) |
 | TUN | mpq1-6, mp1, cr5, etc. | Tunnel MPQUIC | 10.200.x.x |
 
-### 13.2 Configurazione interfacce con `/etc/network/interfaces`
+### 13.2 Configurazione interfacce con systemd-networkd
+
+La VM client usa `systemd-networkd` come backend di rete. I file di configurazione
+sono in `/etc/systemd/network/` e vengono forniti dal progetto in `deploy/networkd/`.
+
+#### MGMT e LAN (statiche)
+
+Le interfacce di management e LAN usano IP statici configurati nei file
+`01-mgmt1.network`, `02-mgmt2.network`, `20-lan1.network` ... `25-lan6.network`.
+
+#### WAN (DHCP — file per-interfaccia)
+
+Ogni WAN ha il proprio file `.network` individuale (vedi §4.1 per dettagli):
 
 ```bash
-# /etc/network/interfaces
-
-auto lo
-iface lo inet loopback
-
-# === MANAGEMENT ===
-auto enp6s18
-iface enp6s18 inet static
-    address 10.10.11.100/24
-    gateway 10.10.11.1
-
-auto enp6s19
-iface enp6s19 inet static
-    address 10.10.10.100/24
-
-# === LAN (transit verso OpenWrt) ===
-auto enp6s20
-iface enp6s20 inet static
-    address 172.16.1.1/30
-
-auto enp6s21
-iface enp6s21 inet static
-    address 172.16.2.1/30
-
-auto enp6s22
-iface enp6s22 inet static
-    address 172.16.3.1/30
-
-auto enp6s23
-iface enp6s23 inet static
-    address 172.16.4.1/30
-
-auto enp7s1
-iface enp7s1 inet static
-    address 172.16.5.1/30
-
-auto enp7s2
-iface enp7s2 inet static
-    address 172.16.6.1/30
-
-# === WAN (Starlink, DHCP) ===
-auto enp7s3
-iface enp7s3 inet dhcp
-
-auto enp7s4
-iface enp7s4 inet dhcp
-
-auto enp7s5
-iface enp7s5 inet dhcp
-
-auto enp7s6
-iface enp7s6 inet dhcp
-
-auto enp7s7
-iface enp7s7 inet dhcp
-
-auto enp7s8
-iface enp7s8 inet dhcp
+/etc/systemd/network/10-wan1.network   # enp7s3 — WAN1 (metric 101)
+/etc/systemd/network/11-wan2.network   # enp7s4 — WAN2 (metric 102)
+/etc/systemd/network/12-wan3.network   # enp7s5 — WAN3 (metric 103)
+/etc/systemd/network/13-wan4.network   # enp7s6 — WAN4 (metric 104)
+/etc/systemd/network/14-wan5.network   # enp7s7 — WAN5 (metric 105)
+/etc/systemd/network/15-wan6.network   # enp7s8 — WAN6 (metric 106)
 ```
+
+I file vengono installati con:
+```bash
+sudo cp deploy/networkd/wan/*.network /etc/systemd/network/
+sudo networkctl reload
+```
+
+**Importante**: non usare un singolo file condiviso per tutte le WAN. La configurazione
+per-interfaccia è necessaria per il corretto funzionamento del `wan-watchdog` e per
+avere `RouteMetric` diversificate.
 
 ### 13.3 Rendere permanente la configurazione di rete
 
-La configurazione in `/etc/network/interfaces` è già persistente. Dopo un reboot:
+La configurazione in `/etc/systemd/network/` è già persistente. Dopo un reboot:
 
 ```bash
 # Verifica tutte le interfacce sono up con IP
@@ -783,10 +875,13 @@ ip -br a | egrep 'enp6s|enp7s'
 ip -4 -br a show dev enp7s6   # WAN4
 ip -4 -br a show dev enp7s7   # WAN5
 ip -4 -br a show dev enp7s8   # WAN6
+
+# Verifica che ogni WAN usi il proprio file .network
+networkctl status enp7s7   # → Network File: /etc/systemd/network/14-wan5.network
 ```
 
-Se si usa `systemd-networkd` al posto di ifupdown, le configurazioni vanno in
-`/etc/systemd/network/*.network`. Il progetto supporta entrambi i backend.
+Il servizio `wan-watchdog.service` (vedi §4.1.2) garantisce la recovery automatica
+del lease DHCP anche in caso di cable swap senza carrier loss.
 
 ---
 
