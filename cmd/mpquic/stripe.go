@@ -455,7 +455,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	}
 	if reorderWindow > 0 {
 		scc.reorderBuf = newStripeReorderBuf(scc.rxCh, scc.closeCh, reorderWindow, cfg.StripeReorderTimeout)
-		logger.Infof("stripe: RX reorder buffer enabled: window=%d timeout=%dms", reorderWindow, cfg.StripeReorderTimeout)
+		logger.Infof("stripe: RX reorder buffer enabled: window=%d timeout=%dµs", reorderWindow, cfg.StripeReorderTimeout)
 	}
 
 	// Open N UDP sockets bound to the same interface
@@ -1579,7 +1579,7 @@ type stripeServer struct {
 
 	// RX reorder config (Step 4.18)
 	reorderWindow    int
-	reorderTimeoutMs int
+	reorderTimeoutUs int
 
 	pendingKeys *stripePendingKeys
 
@@ -1636,7 +1636,7 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 		logger:     logger,
 		closeCh:    make(chan struct{}),
 		reorderWindow:    cfg.StripeReorderWindow,
-		reorderTimeoutMs: cfg.StripeReorderTimeout,
+		reorderTimeoutUs: cfg.StripeReorderTimeout,
 		pendingKeys: pendingKeys,
 	}
 
@@ -1654,11 +1654,11 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 		rw = stripeReorderDefaultWindow
 	}
 	if rw > 0 {
-		rt := ss.reorderTimeoutMs
+		rt := ss.reorderTimeoutUs
 		if rt <= 0 {
-			rt = stripeReorderDefaultTimeoutMs
+			rt = stripeReorderDefaultTimeoutUs
 		}
-		reorderStr = fmt.Sprintf("window=%d timeout=%dms", rw, rt)
+		reorderStr = fmt.Sprintf("window=%d timeout=%dµs", rw, rt)
 	}
 	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s pacing=%s arq=%s reorder=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode, pacingStr, arqStr, reorderStr)
 	return ss, nil
@@ -1942,8 +1942,8 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			reorderWindow = stripeReorderDefaultWindow
 		}
 		if reorderWindow > 0 {
-			sess.reorderBuf = newStripeReorderBuf(rxCh, ss.closeCh, reorderWindow, ss.reorderTimeoutMs)
-			ss.logger.Infof("stripe: session %08x RX reorder buffer: window=%d timeout=%dms", sessionID, reorderWindow, ss.reorderTimeoutMs)
+			sess.reorderBuf = newStripeReorderBuf(rxCh, ss.closeCh, reorderWindow, ss.reorderTimeoutUs)
+			ss.logger.Infof("stripe: session %08x RX reorder buffer: window=%d timeout=%dµs", sessionID, reorderWindow, ss.reorderTimeoutUs)
 		}
 
 		ss.sessions[sessionID] = sess

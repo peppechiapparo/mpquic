@@ -22,8 +22,8 @@ import (
 // recvPipeLoop goroutines.
 
 const (
-	stripeReorderDefaultWindow    = 128
-	stripeReorderDefaultTimeoutMs = 3
+	stripeReorderDefaultWindow    = 64
+	stripeReorderDefaultTimeoutUs = 3000 // microseconds
 )
 
 type stripeReorderBuf struct {
@@ -46,17 +46,17 @@ type stripeReorderBuf struct {
 	buffered  uint64 // current buffered count (informational)
 }
 
-func newStripeReorderBuf(rxCh chan []byte, closeCh chan struct{}, window int, timeoutMs int) *stripeReorderBuf {
+func newStripeReorderBuf(rxCh chan []byte, closeCh chan struct{}, window int, timeoutUs int) *stripeReorderBuf {
 	if window <= 0 {
 		window = stripeReorderDefaultWindow
 	}
-	if timeoutMs <= 0 {
-		timeoutMs = stripeReorderDefaultTimeoutMs
+	if timeoutUs <= 0 {
+		timeoutUs = stripeReorderDefaultTimeoutUs
 	}
 	rb := &stripeReorderBuf{
 		slots:   make(map[uint32][]byte, window),
 		window:  window,
-		timeout: time.Duration(timeoutMs) * time.Millisecond,
+		timeout: time.Duration(timeoutUs) * time.Microsecond,
 		rxCh:    rxCh,
 		closeCh: closeCh,
 	}
