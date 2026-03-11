@@ -57,7 +57,6 @@ const (
 	stripeDefaultDataShards   = 10
 	stripeDefaultParityShards = 2
 	stripeMaxPayload          = 1500
-	stripeFECMinSize           = 300 // skip FEC for packets smaller than this (bytes)
 	stripeFlushInterval       = 5 * time.Millisecond
 	stripeKeepaliveInterval   = 5 * time.Second
 	stripeSessionTimeout      = 30 * time.Second
@@ -239,9 +238,8 @@ type stripeClientConn struct {
 	enc     reedsolomon.Encoder // nil if parityM == 0
 
 	// Adaptive FEC
-	fecMode    string // "always", "adaptive", "off"
-	adaptiveM  int32  // atomic: current TX parity M (0..parityM)
-	fecMinSize int    // skip FEC for packets smaller than this (bytes)
+	fecMode   string // "always", "adaptive", "off"
+	adaptiveM int32  // atomic: current TX parity M (0..parityM)
 
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
@@ -251,8 +249,7 @@ type stripeClientConn struct {
 	arqRx *arqRxTracker // RX gap detector + NACK generator
 
 	// TX state
-	txSeq     uint32 // atomic: next data sequence number
-	txFECSkip uint64 // atomic: packets sent direct (FEC skipped due to small size)
+	txSeq    uint32 // atomic: next data sequence number
 	txPipe   uint32 // atomic: round-robin pipe selector
 	txGroup  [][]byte
 	txGrpSeq uint32
@@ -424,14 +421,6 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		return nil, fmt.Errorf("stripe: RX cipher: %w", err)
 	}
 
-	fecMinSize := cfg.StripeFECMinSize
-	if fecMinSize == 0 {
-		fecMinSize = stripeFECMinSize
-	}
-	if fecMinSize < 0 {
-		fecMinSize = 0 // explicit disable
-	}
-
 	scc := &stripeClientConn{
 		serverAddr: serverAddr,
 		sessionID:  sessionID,
@@ -440,7 +429,6 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		parityM:    parityM,
 		enc:        enc,
 		fecMode:    fecMode,
-		fecMinSize: fecMinSize,
 		txGroup:    make([][]byte, 0, dataK),
 		rxCh:       make(chan []byte, 512),
 		rxGroups:   make(map[uint32]*fecGroup),
@@ -545,8 +533,8 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	if cfg.StripeARQ {
 		arqStr = "on"
 	}
-	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d mode=%s fecMinSize=%d pacing=%s arq=%s server=%s encrypted=AES-256-GCM",
-		sessionID, len(scc.pipes), dataK, parityM, fecMode, fecMinSize, pacingStr, arqStr, serverAddr)
+	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d mode=%s pacing=%s arq=%s server=%s encrypted=AES-256-GCM",
+		sessionID, len(scc.pipes), dataK, parityM, fecMode, pacingStr, arqStr, serverAddr)
 
 	return scc, nil
 }
@@ -590,42 +578,6 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 
 		atomic.AddUint64(&scc.txPkts, 1)
 		atomic.AddUint64(&scc.txBytes, uint64(len(pkt)))
-		return nil
-	}
-
-	// ── M>0 small-packet skip: send directly without FEC when packet is
-	//    smaller than fecMinSize. Avoids padding tiny packets (ACK, DNS,
-	//    keepalive) to ~1402 bytes inside a FEC group (>90% waste). ──
-	if scc.fecMinSize > 0 && len(pkt) < scc.fecMinSize {
-		seq := atomic.AddUint32(&scc.txSeq, 1) - 1
-
-		shardData := make([]byte, 2+len(pkt))
-		binary.BigEndian.PutUint16(shardData[0:2], uint16(len(pkt)))
-		copy(shardData[2:], pkt)
-
-		wirePkt := stripeEncryptShard(scc.txCipher, &stripeHdr{
-			Magic:      stripeMagic,
-			Version:    stripeVersion,
-			Type:       stripeDATA,
-			Session:    scc.sessionID,
-			GroupSeq:   seq,
-			ShardIdx:   0,
-			GroupDataN: 1, // signals RX to deliver directly (< K)
-			DataLen:    uint16(len(pkt)),
-		}, shardData)
-
-		if scc.arqTx != nil {
-			scc.arqTx.store(seq, shardData, uint16(len(pkt)))
-		}
-
-		scc.pacer.pace(len(wirePkt))
-		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
-		pipe := scc.pipes[int(idx)%len(scc.pipes)]
-		_, _ = pipe.WriteToUDP(wirePkt, scc.serverAddr)
-
-		atomic.AddUint64(&scc.txPkts, 1)
-		atomic.AddUint64(&scc.txBytes, uint64(len(pkt)))
-		atomic.AddUint64(&scc.txFECSkip, 1)
 		return nil
 	}
 
@@ -1322,9 +1274,8 @@ type stripeSession struct {
 	enc     reedsolomon.Encoder
 
 	// Adaptive FEC
-	fecMode    string // "always", "adaptive", "off"
-	adaptiveM  int32  // atomic: current TX parity M (0..parityM)
-	fecMinSize int    // skip FEC for packets smaller than this (bytes)
+	fecMode   string // "always", "adaptive", "off"
+	adaptiveM int32  // atomic: current TX parity M (0..parityM)
 
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
@@ -1332,8 +1283,6 @@ type stripeSession struct {
 	// Hybrid ARQ
 	arqTx *arqTxBuf     // TX retransmit buffer (nil = ARQ disabled)
 	arqRx *arqRxTracker // RX gap detector + NACK generator
-
-	// TX (server → client): FEC encode + stripe
 
 	// RX (client → server): FEC decode → TUN
 	rxGroups map[uint32]*fecGroup
@@ -1357,9 +1306,8 @@ type stripeSession struct {
 	rxLossPrevFECGroups  uint64
 
 	// TX (server → client): FEC encode + stripe
-	txSeq     uint32 // atomic
-	txFECSkip uint64 // atomic: packets sent direct (FEC skipped due to small size)
-	txPipe    uint32 // atomic
+	txSeq    uint32 // atomic
+	txPipe   uint32 // atomic
 	txGroup       [][]byte
 	txGrpSeq      uint32
 	txActivePipes []*net.UDPAddr // cached non-nil pipes, rebuilt on REGISTER (under txMu)
@@ -1429,43 +1377,6 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 		sess.pacer.pace(len(wirePkt))
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		_, _ = sdc.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
-		return nil
-	}
-
-	// ── M>0 small-packet skip: send directly without FEC when packet is
-	//    smaller than fecMinSize. Avoids padding tiny packets (ACK, DNS,
-	//    keepalive) to ~1402 bytes inside a FEC group (>90% waste). ──
-	if sess.fecMinSize > 0 && len(pkt) < sess.fecMinSize {
-		activePipes := sess.txActivePipes
-		if len(activePipes) == 0 {
-			return nil
-		}
-
-		seq := atomic.AddUint32(&sess.txSeq, 1) - 1
-
-		shardData := make([]byte, 2+len(pkt))
-		binary.BigEndian.PutUint16(shardData[0:2], uint16(len(pkt)))
-		copy(shardData[2:], pkt)
-
-		wirePkt := stripeEncryptShard(sess.txCipher, &stripeHdr{
-			Magic:      stripeMagic,
-			Version:    stripeVersion,
-			Type:       stripeDATA,
-			Session:    sess.sessionID,
-			GroupSeq:   seq,
-			ShardIdx:   0,
-			GroupDataN: 1,
-			DataLen:    uint16(len(pkt)),
-		}, shardData)
-
-		if sess.arqTx != nil {
-			sess.arqTx.store(seq, shardData, uint16(len(pkt)))
-		}
-
-		sess.pacer.pace(len(wirePkt))
-		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
-		_, _ = sdc.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
-		atomic.AddUint64(&sess.txFECSkip, 1)
 		return nil
 	}
 
@@ -1637,7 +1548,6 @@ type stripeServer struct {
 	dataK   int
 	parityM int
 	fecMode    string // "always", "adaptive", "off"
-	fecMinSize int    // skip FEC for packets smaller than this (bytes)
 	pacingRate int    // Mbps per session (0 = disabled)
 	arqEnabled bool   // Hybrid ARQ enabled
 	logger     *Logger
@@ -1684,14 +1594,6 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 		parityM = 0
 	}
 
-	fecMinSize := cfg.StripeFECMinSize
-	if fecMinSize == 0 {
-		fecMinSize = stripeFECMinSize
-	}
-	if fecMinSize < 0 {
-		fecMinSize = 0
-	}
-
 	ss := &stripeServer{
 		conn:       conn,
 		sessions:   make(map[uint32]*stripeSession),
@@ -1701,7 +1603,6 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 		dataK:      dataK,
 		parityM:    parityM,
 		fecMode:    fecMode,
-		fecMinSize: fecMinSize,
 		pacingRate: cfg.StripePacingRate,
 		arqEnabled: cfg.StripeARQ,
 		logger:     logger,
@@ -1717,7 +1618,7 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 	if cfg.StripeARQ {
 		arqStr = "on"
 	}
-	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s fecMinSize=%d pacing=%s arq=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode, fecMinSize, pacingStr, arqStr)
+	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s pacing=%s arq=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode, pacingStr, arqStr)
 	return ss, nil
 }
 
@@ -1969,7 +1870,6 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			dataK:        ss.dataK,
 			parityM:      ss.parityM,
 			fecMode:      ss.fecMode,
-			fecMinSize:   ss.fecMinSize,
 			enc:          enc,
 			rxGroups:     make(map[uint32]*fecGroup),
 			rxCh:         rxCh,

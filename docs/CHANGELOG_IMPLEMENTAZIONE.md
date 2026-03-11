@@ -1,8 +1,30 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-03-11
+
+### Step 4.14: FEC per dimensione pacchetto — ❌ NEGATIVO (revert)
+- Benchmark dual Starlink: 331 Mbps media (-6.5% vs baseline 354), retransmit +186%.
+- Root cause: il codice FEC skip è dead code in modalità adaptive M=0 (il 99% del
+  tempo operativo). Il fast path M=0 in `SendDatagram()` ritorna prima del blocco skip.
+- Nessun beneficio misurabile, complessità aggiunta inutile.
+- **Codice revertito** (`git revert ca4f179`), codebase torna a v4.1.
+
+### Deploy: wan-watchdog auto DHCP re-discover
+- Daemon systemd che monitora i gateway DHCP delle WAN ogni 15s.
+- Se il gateway diventa irraggiungibile per 60s (4 check), forza `networkctl reconfigure`.
+- Risolve il problema delle NIC VirtIO che non perdono carrier su cable-swap.
+- File: `scripts/wan-watchdog.sh`, `deploy/systemd/wan-watchdog.service`.
+
+### Deploy: configurazione di rete per-WAN
+- Sostituito il singolo `10-wan.network` con 6 file individuali per WAN.
+- `KeepConfiguration=no`, `SendRelease=yes`, `ClientIdentifier=mac`.
+- `RouteMetric` diversificata per evitare conflitti routing.
+- File: `deploy/networkd/wan/10-wan1.network` ... `15-wan6.network`.
+- Script manuale: `scripts/wan-reconfigure.sh`.
+
 ## 2026-03-10
 
-### Step 4.14: FEC per dimensione pacchetto (skip small packets)
+### Step 4.14: FEC per dimensione pacchetto (skip small packets) — IMPLEMENTATO poi REVERTITO
 - Quando `effectiveM > 0` (FEC attivo), i pacchetti più piccoli di `fecMinSize`
   (default 300 byte) vengono inviati direttamente senza accumulo FEC.
 - Evita il padding di pacchetti piccoli (ACK TCP ~52B, DNS ~80B, keepalive)
@@ -13,6 +35,7 @@
 - Contatore `txFECSkip` (atomic) per telemetria.
 - Nessuna modifica RX necessaria: il receiver gestisce già `GroupDataN < K` come
   consegna diretta.
+- **Revertito l'11 marzo** — vedi sopra.
 
 ### Fix: re-register connectionTable on re-key (`89ab73f`)
 - Dopo riavvio client, il `pathConn` nella connectionTable del server manteneva
