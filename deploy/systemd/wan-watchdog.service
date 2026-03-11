@@ -1,0 +1,25 @@
+[Unit]
+Description=WAN Watchdog — auto DHCP re-discover on cable swap
+Documentation=https://github.com/peppechiapparo/mpquic
+After=systemd-networkd.service
+Wants=systemd-networkd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wan-watchdog.sh
+Restart=always
+RestartSec=10
+
+# Variabili configurabili (decommentare per override)
+#Environment=WAN_INTERFACES=enp7s7 enp7s8
+#Environment=CHECK_INTERVAL=15
+#Environment=FAIL_THRESHOLD=4
+#Environment=COOLDOWN=120
+
+# Logging via journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wan-watchdog
+
+[Install]
+WantedBy=multi-user.target
