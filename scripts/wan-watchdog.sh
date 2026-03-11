@@ -26,7 +26,7 @@
 #   PING_COUNT       — numero ping per check (default: 2)
 #   COOLDOWN         — secondi minimo tra due reconfigure sulla stessa iface (default: 120)
 
-set -euo pipefail
+set -uo pipefail
 
 WAN_INTERFACES="${WAN_INTERFACES:-enp7s3 enp7s4 enp7s5 enp7s6 enp7s7 enp7s8}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-15}"
@@ -56,7 +56,7 @@ get_dhcp_gateway() {
     # networkctl status mostra "Gateway: x.x.x.x" per DHCP
     networkctl status "$iface" 2>/dev/null \
         | grep -oP 'Gateway:\s+\K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
-        | head -1
+        | head -1 || true
 }
 
 # Estrae l'IP DHCP corrente dell'interfaccia
@@ -64,7 +64,7 @@ get_dhcp_address() {
     local iface="$1"
     networkctl status "$iface" 2>/dev/null \
         | grep -oP 'Address:\s+\K[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
-        | head -1
+        | head -1 || true
 }
 
 # Controlla se l'interfaccia ha carrier (link fisico up)
