@@ -1,0 +1,19 @@
+# WAN6 — enp7s8 (Starlink #2)
+[Match]
+Name=enp7s8
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=no
+LinkLocalAddressing=no
+KeepConfiguration=no
+
+[DHCP]
+RouteMetric=106
+UseDNS=no
+UseRoutes=yes
+SendRelease=yes
+ClientIdentifier=mac
+
+[Link]
+RequiredForOnline=no

@@ -1,0 +1,19 @@
+# WAN4 — enp7s6 (Fibra / collegamento terrestre)
+[Match]
+Name=enp7s6
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=no
+LinkLocalAddressing=no
+KeepConfiguration=no
+
+[DHCP]
+RouteMetric=104
+UseDNS=no
+UseRoutes=yes
+SendRelease=yes
+ClientIdentifier=mac
+
+[Link]
+RequiredForOnline=no

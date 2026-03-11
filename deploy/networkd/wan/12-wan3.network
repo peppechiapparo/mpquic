@@ -1,0 +1,19 @@
+# WAN3 — enp7s5 (slot modem, attualmente vuoto)
+[Match]
+Name=enp7s5
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=no
+LinkLocalAddressing=no
+KeepConfiguration=no
+
+[DHCP]
+RouteMetric=103
+UseDNS=no
+UseRoutes=yes
+SendRelease=yes
+ClientIdentifier=mac
+
+[Link]
+RequiredForOnline=no

@@ -1,0 +1,19 @@
+# WAN5 — enp7s7 (Starlink #1)
+[Match]
+Name=enp7s7
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=no
+LinkLocalAddressing=no
+KeepConfiguration=no
+
+[DHCP]
+RouteMetric=105
+UseDNS=no
+UseRoutes=yes
+SendRelease=yes
+ClientIdentifier=mac
+
+[Link]
+RequiredForOnline=no
