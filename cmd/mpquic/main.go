@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/netip"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -834,6 +835,7 @@ func (l *Logger) Errorf(format string, args ...any) {
 
 func main() {
 	cfgPath := flag.String("config", "", "path to YAML config")
+	pprofAddr := flag.String("pprof", "", "pprof HTTP listen address (e.g. :6060)")
 	flag.Parse()
 	if *cfgPath == "" {
 		log.Fatal("--config is required")
@@ -845,6 +847,16 @@ func main() {
 	}
 
 	logger := newLogger(cfg.LogLevel)
+
+	// Optional pprof HTTP server for CPU/memory profiling
+	if *pprofAddr != "" {
+		go func() {
+			logger.Infof("pprof listening on %s", *pprofAddr)
+			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+				logger.Errorf("pprof server: %v", err)
+			}
+		}()
+	}
 
 	// Default congestion algorithm to "cubic" and normalize
 	cfg.CongestionAlgorithm = strings.ToLower(strings.TrimSpace(cfg.CongestionAlgorithm))

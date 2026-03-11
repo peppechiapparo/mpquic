@@ -2,6 +2,16 @@
 
 ## 2026-03-11
 
+### Step 4.18: RX Reorder Buffer — ❌ NEGATIVO (revert 1b010a9)
+- Implementazione completa con 3 tuning testati (default/window24-1ms/window16-200µs).
+- Tutti i tuning peggiorativi: -13% a -16% throughput, retransmit fino a +234%.
+- Root cause: jitter artificiale dal buffer confonde smoothed-RTT di TCP → CC backoff.
+- **Codice completamente rimosso**, codebase torna a v4.1.
+
+### Step 4.19: pprof profiling support
+- Flag `--pprof :6060` per CPU/memory profiling runtime via `net/http/pprof`.
+- Prerequisito per ottimizzazioni data-driven (Step 4.20 UDP GSO, Step 4.21 UDP GRO).
+
 ### Step 4.14: FEC per dimensione pacchetto — ❌ NEGATIVO (revert)
 - Benchmark dual Starlink: 331 Mbps media (-6.5% vs baseline 354), retransmit +186%.
 - Root cause: il codice FEC skip è dead code in modalità adaptive M=0 (il 99% del

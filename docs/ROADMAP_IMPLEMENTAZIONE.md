@@ -996,6 +996,88 @@ finestra scorrevole dove la parità protegge gli ultimi N shard "in volo".
 
 **Effort stimato**: giorni — complessità significativa nel tracking della finestra.
 
+### Step 4.18 — RX Reorder Buffer ❌ NEGATIVO (commit 6e6293c→revert 1b010a9)
+
+**Obiettivo**: buffer di riordinamento RX basato su sequenza per eliminare il
+packet reordering causato dal round-robin su N pipe con latenze diverse.
+
+**Implementazione**: `stripeReorderBuf` con window slot, consegna in-order,
+timeout per gap. Integrato in client `deliverDataDirect()` e server RX path.
+
+**Tuning testati** (6 run × 30s, iperf3 -R -P20, dual Starlink):
+
+| Tuning | Window | Timeout | Throughput | Retransmit | vs Baseline |
+|--------|--------|---------|------------|------------|-------------|
+| Default | 128 | 3ms | 307 Mbps | 4.344 | -13.3% |
+| #1 | 24 | 1ms | 303 Mbps | 4.245 | -14.4% |
+| #2 | 16 | 200µs | 298 Mbps | 11.574 | -15.8% |
+
+**Root cause del fallimento**: il reorder buffer aggiunge **jitter artificiale**
+ai pacchetti (in-order: 0 delay, fuori-ordine: fino a timeout). Questo jitter
+variabile confonde la stima RTT di TCP più del reordering naturale sui pipe.
+TCP gestisce il reordering con DupACK (meccanismo collaudato), ma il jitter
+variabile corrompe lo smoothed-RTT e causa backoff del congestion control.
+
+**Conclusione**: approccio fondamentalmente incompatibile con TCP inner flow.
+**Codice completamente rimosso**.
+
+### Step 4.19 — pprof Profiling Support ✅ COMPLETATO
+
+**Obiettivo**: aggiungere profiling CPU/memoria runtime per identificare i
+bottleneck reali prima di ottimizzare.
+
+**Implementazione**: flag `--pprof :6060` avvia HTTP server con `net/http/pprof`.
+Profilo CPU 30s catturabile con: `go tool pprof http://host:6060/debug/pprof/profile?seconds=30`
+
+**Effort**: 5 righe, zero impatto su performance quando non attivato.
+
+### Step 4.20 — UDP GSO (UDP_SEGMENT) per TX ⬜ DA IMPLEMENTARE
+
+**Obiettivo**: ridurre traversate kernel stack TX usando Generic Segmentation Offload.
+Invece di N syscall per N datagrammi, si invia un "super datagramma" con hint
+`UDP_SEGMENT` e il kernel segmenta in MTU autonomamente.
+
+**Perché è il candidato #1**:
+- Cloudflare e quic-go usano GSO per QUIC UDP → benefici dimostrati
+- Riduce costo per-packet nella pipeline kernel, non solo syscall count
+- Compatibile con shard stripe (datagrammi uniformi ~1402B)
+- Non interferisce con FEC adattivo, ARQ, encryption
+- Supporto Linux ≥ 4.18 (server Ubuntu 24.04 e client Debian 12: ok)
+
+**Prerequisito**: profiling Step 4.19 per confermare che TX path è il bottleneck.
+
+**Effort stimato**: ~100 righe — `setsockopt(UDP_SEGMENT)` + batch write.
+
+### Step 4.21 — UDP GRO per RX ⬜ DA IMPLEMENTARE
+
+**Obiettivo**: Generic Receive Offload per coalescere datagrammi UDP in arrivo.
+Il kernel consegna batch aggregati, riducendo il numero di unità da processare
+in user space (complementare a recvmmsg che riduce solo syscalls).
+
+**Perché dopo GSO**: recvmmsg (Step 4.16) è stato neutro, ma GRO opera a livello
+diverso — riduce il numero di pacchetti visibili al processo, non solo le call.
+
+**Prerequisito**: profiling Step 4.19 per confermare che RX path contribuisce.
+
+**Effort stimato**: ~50 righe — `setsockopt(UDP_GRO)` + parsing segmenti coalesciti.
+
+### Ottimizzazioni valutate e scartate
+
+| Ottimizzazione | Motivo esclusione |
+|---|---|
+| `SO_ZEROCOPY` / `MSG_ZEROCOPY` | Incompatibile con Go GC (runtime gestisce memoria), beneficio solo se memory-bound |
+| `SO_BUSY_POLL` | Il jitter è Starlink (15-50ms), non scheduling CPU (µs) — nessun impatto atteso |
+| `SO_REUSEPORT` + CPU pinning | Già 24 socket separati con 1 goroutine/pipe, zero contention socket |
+| AF_XDP kernel bypass | Richiede CGo o data plane C separato, effort sproporzionato vs beneficio |
+| `io_uring` per UDP | Benchmark reali mostrano underperformance vs mmsg per UDP |
+
+### Piano operativo ottimizzazioni (priorità)
+
+1. **Step 4.19 — pprof profiling** → identifica bottleneck reale (crypto? copy? syscall? lock?)
+2. **Step 4.20 — UDP GSO** → se TX path domina nel profilo
+3. **Step 4.21 — UDP GRO** → se RX path contribuisce significativamente
+4. **Step 4.15 — Sliding Window FEC** → se loss recovery è il fattore limitante
+
 ### Done criteria Fase 4b (aggiornati)
 - [x] UDP Stripe + FEC transport implementato e deployato
 - [x] AES-256-GCM + TLS Exporter per sicurezza stripe
@@ -1006,6 +1088,10 @@ finestra scorrevole dove la parità protegge gli ultimi N shard "in volo".
 - [x] Batch I/O recvmmsg (Step 4.16) — **risultato neutro** (+1%), ipotesi syscall falsificata
 - [x] Socket buffers 7MB + TX cache (Step 4.17) — **+3.8%** (341→354 Mbps), picco 390 Mbps, efficienza 84.3%
 - [x] FEC per dimensione pacchetto (Step 4.14) — **risultato negativo**, dead code in M=0 adaptive, revertito
+- [x] RX Reorder Buffer (Step 4.18) — **risultato negativo**, jitter artificiale peggiorativo, revertito
+- [x] pprof profiling support (Step 4.19) — flag `--pprof` per CPU/memory profiling
+- [ ] UDP GSO per TX (Step 4.20)
+- [ ] UDP GRO per RX (Step 4.21)
 - [ ] Sliding window FEC (Step 4.15)
 - [ ] Throughput ≥ 400 Mbps su dual Starlink
 
