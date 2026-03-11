@@ -2559,19 +2559,45 @@ Batch I/O e socket buffer tuning.
     (pacing → NACK ARQ → FEC per size → sliding window FEC) per raggiungere
     l'obiettivo 500 Mbps.
 
-**Prossimi sviluppi:**
+**Fase 4b.8 — CPU Profiling e Analisi Bottleneck:**
 
-- **Estensione bd1 ad altri router**: replicare il pattern VLAN + tabella dedicata per ulteriori LAN
-- **Persistenza VPS return route**: aggiungere `172.16.17.0/30 dev mp1` a `mpquic-vps-routes.sh`
-- **FEC per dimensione pacchetto**: skip FEC per pacchetti <300B quando M>0
+27. **pprof profiling runtime**: flag `--pprof :6060` attiva profiler CPU/memoria senza
+    impatto su performance quando inattivo. Profilo catturato sotto carico reale
+    (iperf3 -R -P20, 60 secondi, server VPS).
+
+28. **Analisi quantitativa CPU**: su 86.56 secondi di campionamento (143.9% di 2 core):
+
+| Area funzionale | Tempo cumulativo | % CPU totale | Causa |
+|---|---|---|---|
+| **TX path** (`SendDatagram → WriteToUDP → sendto`) | 39.0s | **45.0%** | 1 syscall `sendto` per ogni pacchetto UDP cifrato |
+| **TUN write** (`tunWriter → os.File.Write`) | 19.8s | **22.8%** | 1 syscall `write` per ogni pacchetto IP decrittato |
+| **Runtime scheduling** | 12.5s | 14.4% | Overhead goroutine context switch |
+| **Allocazioni** (`runtime.mallocgc`) | 5.1s | 5.9% | GC pressure da buffer intermedii |
+| **RX path** (`recvmmsg + decrypt`) | 4.5s | 5.2% | Già ottimizzato con recvmmsg (Step 4b.6) |
+| **AES-GCM crypto** (`stripeEncryptShard`) | 4.0s | 4.6% | Efficiente — AES-NI hardware |
+
+29. **Conclusione profiling**: il server è completamente **I/O bound** (66.8% del tempo in
+    `syscall.Syscall6`). Il collo di bottiglia dominante è il TX path (45%) dove ogni
+    pacchetto richiede una traversata completa del kernel networking stack. La crittografia
+    AES-GCM è trascurabile (4.6%) grazie ad AES-NI. Il RX path (5.2%) conferma l'efficacia
+    di recvmmsg. L'ottimizzazione principale da perseguire è **batch TX via sendmmsg**
+    (`WriteBatch`) per ridurre le syscall TX di ~8×, seguita da **batch TUN write** per
+    attaccare il 23% del tempo CPU nella scrittura al device TUN.
+
+**Prossimi sviluppi (aggiornati post-profiling):**
+
+- **Batch TX via sendmmsg** (Step 4.20): `WriteBatch()` per accorpare fino a 8 `sendto`
+  in una singola syscall `sendmmsg` — attacca il 45% del tempo CPU (priorità massima)
+- **Batch TUN Write** (Step 4.21): `writev()` per accorpare scritture al device TUN —
+  attacca il 23% del tempo CPU
 - **Sliding Window FEC**: evoluzione dei gruppi fissi verso finestra scorrevole
-- **Monitoring e telemetria stripe**: statistiche FEC, throughput per pipe, stato sessioni
+- **UDP GRO** (deprioritizzato): impatto marginale dato che RX path è solo 5.2%
 - **Monitoring dashboard**: interfaccia web per tutti i tunnel e metriche real-time
 
 ---
 
-*Documento aggiornato il 09/03/2026 — Piattaforma MPQUIC v4.2 (VLAN 17 + Tabella bd1)*  
-*Commit di riferimento: bef0894 (main)*
+*Documento aggiornato il 11/03/2026 — Piattaforma MPQUIC v4.2 (Profiling + Batch TX)*  
+*Commit di riferimento: e4e0091 (main)*
 
 ---
 

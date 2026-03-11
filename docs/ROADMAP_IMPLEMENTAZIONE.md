@@ -1021,7 +1021,7 @@ variabile corrompe lo smoothed-RTT e causa backoff del congestion control.
 **Conclusione**: approccio fondamentalmente incompatibile con TCP inner flow.
 **Codice completamente rimosso**.
 
-### Step 4.19 — pprof Profiling Support ✅ COMPLETATO
+### Step 4.19 — pprof Profiling + Analisi Bottleneck ✅ COMPLETATO
 
 **Obiettivo**: aggiungere profiling CPU/memoria runtime per identificare i
 bottleneck reali prima di ottimizzare.
@@ -1031,35 +1031,76 @@ Profilo CPU 30s catturabile con: `go tool pprof http://host:6060/debug/pprof/pro
 
 **Effort**: 5 righe, zero impatto su performance quando non attivato.
 
-### Step 4.20 — UDP GSO (UDP_SEGMENT) per TX ⬜ DA IMPLEMENTARE
+**Risultati profiling** (server VPS, 60s sotto carico iperf3 -R -P20, 86.56s CPU totali = 143.9%):
 
-**Obiettivo**: ridurre traversate kernel stack TX usando Generic Segmentation Offload.
-Invece di N syscall per N datagrammi, si invia un "super datagramma" con hint
-`UDP_SEGMENT` e il kernel segmenta in MTU autonomamente.
+| Funzione | Tempo cum | % CPU | Analisi |
+|---|---|---|---|
+| `SendDatagram → WriteToUDP → sendto` | **39s** | **45.0%** | TX path: 1 syscall `sendto` per ogni pacchetto |
+| `tunWriter → os.File.Write` | **20s** | **22.8%** | TUN write: 1 syscall `write` per ogni pacchetto IP |
+| `runtime scheduling` | **12.5s** | **14.4%** | Overhead goroutine scheduling |
+| `stripeEncryptShard (AES-GCM)` | **4s** | **4.6%** | Crypto — molto efficiente con AES-NI hardware |
+| `stripeServer.Run → RX path` | **4.5s** | **5.2%** | recvmmsg + decrypt + dispatch |
+| `runtime.mallocgc` | **5.1s** | **5.9%** | Garbage collection / allocazioni |
 
-**Perché è il candidato #1**:
-- Cloudflare e quic-go usano GSO per QUIC UDP → benefici dimostrati
-- Riduce costo per-packet nella pipeline kernel, non solo syscall count
-- Compatibile con shard stripe (datagrammi uniformi ~1402B)
-- Non interferisce con FEC adattivo, ARQ, encryption
-- Supporto Linux ≥ 4.18 (server Ubuntu 24.04 e client Debian 12: ok)
+**Conclusioni chiave**:
+1. **Il 67% del tempo CPU totale è in `syscall.Syscall6`** — il server è completamente I/O-bound
+2. **TX path (45%)** è il bottleneck dominante: `SendDatagram()` fa 1 `WriteToUDP` per pacchetto
+3. **TUN write (23%)** è il secondo bottleneck: 1 `write()` per pacchetto IP decrittato
+4. **AES-GCM è trascurabile (4.6%)** — AES-NI hardware fa il suo lavoro, non da ottimizzare
+5. **RX path (5.2%)** — conferma che `recvmmsg` (Step 4.16) ha già risolto il lato RX
+6. **UDP GRO avrebbe impatto marginale** — solo 5% del tempo è nel RX path
 
-**Prerequisito**: profiling Step 4.19 per confermare che TX path è il bottleneck.
+**Roadmap aggiornata in base al profiling**:
+- Priorità #1: **batch TX via sendmmsg** (attacca il 45%)
+- Priorità #2: **batch TUN write via writev** (attacca il 23%)
+- Deprioritizzato: UDP GRO (solo 5%), crypto optimization (solo 4.6%)
 
-**Effort stimato**: ~100 righe — `setsockopt(UDP_SEGMENT)` + batch write.
+### Step 4.20 — Batch TX via sendmmsg ⬜ DA IMPLEMENTARE
 
-### Step 4.21 — UDP GRO per RX ⬜ DA IMPLEMENTARE
+**Obiettivo**: ridurre le syscall TX da N a N/batch usando `sendmmsg` (batch sendto).
+Profiler mostra che `SendDatagram → WriteToUDP → sendto` consuma il **45% del tempo
+CPU server** — ogni pacchetto richiede una traversata completa del kernel stack.
 
-**Obiettivo**: Generic Receive Offload per coalescere datagrammi UDP in arrivo.
-Il kernel consegna batch aggregati, riducendo il numero di unità da processare
-in user space (complementare a recvmmsg che riduce solo syscalls).
+**Perché sendmmsg invece di UDP GSO**:
+- GSO richiede che tutti i segmenti vadano alla stessa destinazione — incompatibile
+  con il round-robin server che ruota tra N pipe address diverse
+- `sendmmsg` supporta destinazioni diverse per ogni messaggio nel batch
+- Già usato lato RX (`recvmmsg` / `ReadBatch`) con successo
+- `ipv4.PacketConn.WriteBatch()` disponibile in `golang.org/x/net/ipv4`
 
-**Perché dopo GSO**: recvmmsg (Step 4.16) è stato neutro, ma GRO opera a livello
-diverso — riduce il numero di pacchetti visibili al processo, non solo le call.
+**Architettura**:
+1. `SendDatagram()` accumula pacchetti criptati in un ring buffer per-sessione
+2. Flush via `WriteBatch()` quando: (a) batch pieno (8 pacchetti) oppure
+   (b) nessun altro pacchetto in coda (channel drain)
+3. Client: batch per-pipe (stessa destinazione), server: batch multi-destinazione
+4. Fallback: se `WriteBatch` non disponibile, singolo `WriteToUDP` come oggi
 
-**Prerequisito**: profiling Step 4.19 per confermare che RX path contribuisce.
+**Impatto atteso**: riduzione syscall TX di ~8× → libera il 40% del tempo CPU server.
 
-**Effort stimato**: ~50 righe — `setsockopt(UDP_GRO)` + parsing segmenti coalesciti.
+**Effort stimato**: ~150 righe.
+
+### Step 4.21 — Batch TUN Write (writev) ⬜ FUTURO
+
+**Obiettivo**: ridurre le syscall TUN write da N a N/batch.
+Profiler mostra che `tunWriter → os.File.Write` consuma il **23% del tempo CPU server**.
+
+**Approccio**: accumulare pacchetti IP decrittati e scriverli al TUN device in batch
+usando `writev()` o buffered writer. Richiede verifica che il TUN device supporti
+multi-packet write.
+
+**Prerequisito**: Step 4.20 completato, re-profiling per confermare che TUN write
+diventa il nuovo bottleneck dominante.
+
+**Effort stimato**: ~80 righe.
+
+### Step 4.22 — UDP GRO per RX ⬜ DEPRIORITIZZATO
+
+**Obiettivo originale**: Generic Receive Offload per coalescere datagrammi UDP.
+
+**Stato dopo profiling**: il RX path consuma solo il **5.2% del tempo CPU** server.
+L'impatto atteso di UDP GRO è marginale (~2-3% miglioramento complessivo).
+Resta come opzione futura se altri bottleneck vengono risolti e il RX path
+diventa il fattore limitante.
 
 ### Ottimizzazioni valutate e scartate
 
@@ -1071,12 +1112,13 @@ diverso — riduce il numero di pacchetti visibili al processo, non solo le call
 | AF_XDP kernel bypass | Richiede CGo o data plane C separato, effort sproporzionato vs beneficio |
 | `io_uring` per UDP | Benchmark reali mostrano underperformance vs mmsg per UDP |
 
-### Piano operativo ottimizzazioni (priorità)
+### Piano operativo ottimizzazioni (aggiornato post-profiling)
 
-1. **Step 4.19 — pprof profiling** → identifica bottleneck reale (crypto? copy? syscall? lock?)
-2. **Step 4.20 — UDP GSO** → se TX path domina nel profilo
-3. **Step 4.21 — UDP GRO** → se RX path contribuisce significativamente
-4. **Step 4.15 — Sliding Window FEC** → se loss recovery è il fattore limitante
+1. ~~**Step 4.19 — pprof profiling**~~ ✅ Completato — bottleneck identificati: TX syscall 45%, TUN write 23%
+2. **Step 4.20 — Batch TX (sendmmsg)** → attacca il 45% del tempo CPU (priorità massima)
+3. **Step 4.21 — Batch TUN Write (writev)** → attacca il 23% del tempo CPU
+4. **Step 4.22 — UDP GRO** → deprioritizzato (RX path solo 5.2%)
+5. **Step 4.15 — Sliding Window FEC** → se loss recovery diventa il fattore limitante
 
 ### Done criteria Fase 4b (aggiornati)
 - [x] UDP Stripe + FEC transport implementato e deployato
@@ -1090,8 +1132,9 @@ diverso — riduce il numero di pacchetti visibili al processo, non solo le call
 - [x] FEC per dimensione pacchetto (Step 4.14) — **risultato negativo**, dead code in M=0 adaptive, revertito
 - [x] RX Reorder Buffer (Step 4.18) — **risultato negativo**, jitter artificiale peggiorativo, revertito
 - [x] pprof profiling support (Step 4.19) — flag `--pprof` per CPU/memory profiling
-- [ ] UDP GSO per TX (Step 4.20)
-- [ ] UDP GRO per RX (Step 4.21)
+- [ ] Batch TX sendmmsg (Step 4.20)
+- [ ] Batch TUN Write writev (Step 4.21)
+- [ ] UDP GRO per RX (Step 4.22) — deprioritizzato
 - [ ] Sliding window FEC (Step 4.15)
 - [ ] Throughput ≥ 400 Mbps su dual Starlink
 

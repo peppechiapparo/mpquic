@@ -179,6 +179,13 @@ type datagramConn interface {
 	ReceiveDatagram(context.Context) ([]byte, error)
 }
 
+// txBatcher is an optional interface for datagramConn implementations that
+// support batch TX via sendmmsg. drainSendCh uses type assertion to call
+// FlushTxBatch after draining the send channel.
+type txBatcher interface {
+	FlushTxBatch()
+}
+
 // streamConn wraps a single bidirectional QUIC stream to provide reliable,
 // ordered delivery with 2-byte length-prefixed framing.
 // This allows the congestion control algorithm (BBR vs Cubic) to drive
@@ -420,10 +427,33 @@ func (ct *connectionTable) refreshAllFEC(grp *connGroup) {
 
 // drainSendCh is the per-path goroutine that reads from sendCh and writes
 // to the QUIC stream/datagram. Runs until sendCh is closed.
+//
+// Uses batch-drain: after receiving one packet (blocking), non-blocking drain
+// any additional queued packets, then flush the TX batch via sendmmsg.
+// This reduces per-packet syscall overhead by ~8× on the TX hot path.
 func (pc *pathConn) drainSendCh() {
 	defer close(pc.sendDone)
+	batcher, hasBatch := pc.dc.(txBatcher)
 	for pkt := range pc.sendCh {
 		_ = pc.dc.SendDatagram(pkt)
+		if !hasBatch {
+			continue
+		}
+		// Non-blocking drain: process any additional queued packets
+		drain := true
+		for drain {
+			select {
+			case pkt2, ok := <-pc.sendCh:
+				if !ok {
+					batcher.FlushTxBatch()
+					return
+				}
+				_ = pc.dc.SendDatagram(pkt2)
+			default:
+				drain = false
+			}
+		}
+		batcher.FlushTxBatch()
 	}
 }
 

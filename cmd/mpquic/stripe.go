@@ -781,6 +781,46 @@ func (sdc *stripeServerDC) getEffectiveM() int {
 	}
 }
 
+// ─── TX Batch (sendmmsg) ──────────────────────────────────────────────────
+// Server-side batch TX: accumulates encrypted wire packets and flushes them
+// via ipv4.PacketConn.WriteBatch (sendmmsg), reducing per-packet syscall
+// overhead by up to 8×. All batch methods require txMu to be held.
+
+// txBatchAddLocked enqueues a wire packet for batched transmission.
+// Auto-flushes when the batch reaches stripeBatchSize.
+// Caller must hold sess.txMu.
+func (sdc *stripeServerDC) txBatchAddLocked(wirePkt []byte, addr *net.UDPAddr) {
+	sess := sdc.session
+	n := sess.txBatchN
+	sess.txBatchMsgs[n].Buffers[0] = wirePkt
+	sess.txBatchMsgs[n].Addr = addr
+	sess.txBatchN = n + 1
+	if sess.txBatchN >= stripeBatchSize {
+		sdc.txBatchFlushLocked()
+	}
+}
+
+// txBatchFlushLocked sends all accumulated messages via sendmmsg.
+// Caller must hold sess.txMu.
+func (sdc *stripeServerDC) txBatchFlushLocked() {
+	sess := sdc.session
+	if sess.txBatchN == 0 {
+		return
+	}
+	_, _ = sess.txBatchPC.WriteBatch(sess.txBatchMsgs[:sess.txBatchN], 0)
+	sess.txBatchN = 0
+}
+
+// FlushTxBatch flushes any pending TX batch. Thread-safe.
+// Called by drainSendCh after batch-draining the send channel.
+// Implements txBatcher interface.
+func (sdc *stripeServerDC) FlushTxBatch() {
+	sess := sdc.session
+	sess.txMu.Lock()
+	sdc.txBatchFlushLocked()
+	sess.txMu.Unlock()
+}
+
 // sendToPipe encrypts and sends a pre-built stripe packet to a pipe (round-robin).
 // Used only by low-frequency paths (keepalive, register); the FEC TX hot path
 // calls stripeEncryptShard directly to avoid the intermediate cleartext buffer.
@@ -1314,6 +1354,12 @@ type stripeSession struct {
 	txMu          sync.Mutex
 	txTimer       *time.Timer
 
+	// TX batch (sendmmsg) — reduces per-packet syscall overhead by ~8×.
+	// All fields protected by txMu.
+	txBatchPC   *ipv4.PacketConn // wraps server listener for WriteBatch
+	txBatchMsgs []ipv4.Message   // pre-allocated message slots
+	txBatchN    int              // messages in current batch
+
 	lastActivity time.Time
 	lastTxDrop   time.Time // rate-limit for TX drop logging
 	logger       *Logger
@@ -1376,7 +1422,7 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 
 		sess.pacer.pace(len(wirePkt))
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
-		_, _ = sdc.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
+		sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
 		return nil
 	}
 
@@ -1502,7 +1548,7 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 
 		sess.pacer.pace(len(wirePkt))
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
-		_, _ = sdc.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
+		sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
 	}
 
 	// Send parity shards (1 alloc per shard).
@@ -1520,7 +1566,7 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 
 		sess.pacer.pace(len(wirePkt))
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
-		_, _ = sdc.conn.WriteToUDP(wirePkt, activePipes[pipeIdx])
+		sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
 	}
 
 	sess.txGroup = sess.txGroup[:0]
@@ -1890,6 +1936,15 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			sess.arqTx = &arqTxBuf{}
 			sess.arqRx = newArqRxTracker()
 		}
+
+		// Initialize TX batch (sendmmsg) — pre-allocate message slots to avoid
+		// per-call allocations on the hot path.
+		sess.txBatchPC = ipv4.NewPacketConn(ss.conn)
+		sess.txBatchMsgs = make([]ipv4.Message, stripeBatchSize)
+		for i := range sess.txBatchMsgs {
+			sess.txBatchMsgs[i].Buffers = make([][]byte, 1)
+		}
+
 		ss.sessions[sessionID] = sess
 
 		// Create server-to-client datagramConn and register in connectionTable
@@ -1899,6 +1954,7 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			if len(sess.txGroup) > 0 {
 				sdc.sendFECGroupLocked()
 			}
+			sdc.txBatchFlushLocked() // flush any partial batch from FEC timer
 			sdc.resetFlushTimer()
 			sess.txMu.Unlock()
 		})

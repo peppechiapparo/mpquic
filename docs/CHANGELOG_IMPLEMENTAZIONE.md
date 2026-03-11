@@ -2,6 +2,26 @@
 
 ## 2026-03-11
 
+### Step 4.20: Batch TX via sendmmsg — server-side
+- **Profiling-driven**: pprof CPU 60s mostra TX path (SendDatagram→WriteToUDP→sendto)
+  consuma il **45% del tempo CPU server** — 1 syscall sendto per ogni pacchetto.
+- Implementazione `sendmmsg` via `ipv4.PacketConn.WriteBatch()`:
+  - `stripeSession` accumula pacchetti criptati in batch di 8 (`stripeBatchSize`)
+  - Flush automatico quando batch pieno, o da `drainSendCh` dopo batch-drain
+  - `drainSendCh` modificato: blocking recv → non-blocking drain → FlushTxBatch
+  - Copre M=0 fast path E M>0 FEC path (data + parity shards)
+  - Timer FEC flush include anche batch flush per non lasciare pacchetti pendenti
+- Interfaccia `txBatcher` con type assertion (non modifica `datagramConn`)
+- Impatto atteso: riduzione syscall TX di ~8× → libera ~40% del tempo CPU server
+- File modificati: `stripe.go` (batch add/flush/init), `main.go` (drainSendCh + txBatcher)
+
+### Step 4.19: pprof profiling + analisi bottleneck COMPLETATO
+- Flag `--pprof :6060` per CPU/memory profiling runtime via `net/http/pprof`.
+- Profilo CPU catturato sotto carico reale (iperf3 -R -P20, 60s, 86.56s CPU).
+- Risultati: TX syscall **45%**, TUN write **23%**, scheduling 14%, crypto 4.6%, RX 5.2%.
+- Il server è completamente **I/O bound** (66.8% in syscall.Syscall6).
+- ROADMAP e NOTA_TECNICA aggiornate con tabella profiling e nuove priorità.
+
 ### Step 4.18: RX Reorder Buffer — ❌ NEGATIVO (revert 1b010a9)
 - Implementazione completa con 3 tuning testati (default/window24-1ms/window16-200µs).
 - Tutti i tuning peggiorativi: -13% a -16% throughput, retransmit fino a +234%.
