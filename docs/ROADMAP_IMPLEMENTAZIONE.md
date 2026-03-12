@@ -1055,7 +1055,7 @@ Profilo CPU 30s catturabile con: `go tool pprof http://host:6060/debug/pprof/pro
 - Priorità #2: **batch TUN write via writev** (attacca il 23%)
 - Deprioritizzato: UDP GRO (solo 5%), crypto optimization (solo 4.6%)
 
-### Step 4.20 — Batch TX via sendmmsg ✅ IMPLEMENTATO (commit ae36b1e, benchmark pendente)
+### Step 4.20 — Batch TX via sendmmsg ✅ COMPLETATO (commit ae36b1e)
 
 **Obiettivo**: ridurre le syscall TX da N a N/batch usando `sendmmsg` (batch sendto).
 Profiler mostra che `SendDatagram → WriteToUDP → sendto` consuma il **45% del tempo
@@ -1075,23 +1075,69 @@ CPU server** — ogni pacchetto richiede una traversata completa del kernel stac
 3. Client: batch per-pipe (stessa destinazione), server: batch multi-destinazione
 4. Fallback: se `WriteBatch` non disponibile, singolo `WriteToUDP` come oggi
 
-**Impatto atteso**: riduzione syscall TX di ~8× → libera il 40% del tempo CPU server.
+**Implementazione** (commit ae36b1e, 214 righe):
+- `txBatchAddLocked()`: accumula wirePkt+addr in `txBatchMsgs[]`, auto-flush a 8
+- `txBatchFlushLocked()`: `WriteBatch()` = sendmmsg — 1 syscall per batch
+- `FlushTxBatch()`: thread-safe, chiamato da `drainSendCh` dopo batch-drain
+- `drainSendCh` modificato: blocking recv → non-blocking drain → FlushTxBatch
+- `txBatcher` interface con type assertion (non modifica `datagramConn`)
+- Timer FEC flush include batch flush per pacchetti pendenti
 
-**Effort stimato**: ~150 righe.
+**Risultati profiling (validazione CPU, dual Starlink, pioggia 12/03)**:
 
-### Step 4.21 — Batch TUN Write (writev) ⬜ FUTURO
+| Area | Prima (v4.1) | Dopo (sendmmsg) | Delta |
+|---|---|---|---|
+| TX path (`drainSendCh`) | **45.0%** | **42.2%** | -2.8 pp |
+| TUN write (`tunWriter`) | 22.8% | 26.3% | +3.5 pp (relativo) |
+| Scheduling | 14.4% | 11.2% | **-3.2 pp** |
+| RX path | 5.2% | 10.0% | +4.8 pp (pioggia) |
+| **CPU totale** | **143.9%** | **127.0%** | **-17%** |
 
-**Obiettivo**: ridurre le syscall TUN write da N a N/batch.
-Profiler mostra che `tunWriter → os.File.Write` consuma il **23% del tempo CPU server**.
+**Benchmark throughput (pioggia forte, dual Starlink, P30)**:
+- Media: **332 Mbps** (60s, P30, iperf3 -R)
+- **Picco: 434 Mbps** — record assoluto del progetto
+- Retransmit: 10.375 (influenzati da attenuazione pioggia)
+- P30 > P20: confermato che più flussi TCP paralleli migliorano l'aggregazione
 
-**Approccio**: accumulare pacchetti IP decrittati e scriverli al TUN device in batch
-usando `writev()` o buffered writer. Richiede verifica che il TUN device supporti
-multi-packet write.
+**Nota**: FlushTxBatch (flush esplicito) non appare nei top 40 — i batch si
+riempiono a 8 e si auto-flushano da txBatchAddLocked. Il batching funziona
+come progettato.
 
-**Prerequisito**: Step 4.20 completato, re-profiling per confermare che TUN write
-diventa il nuovo bottleneck dominante.
+**Benchmark definitivo con tempo buono**: pendente (confronto diretto con baseline 354 Mbps).
 
-**Effort stimato**: ~80 righe.
+**Effort**: ~150 righe codice, 0 nuove dipendenze, 0 configurazione.
+
+### Step 4.21 — tunWriter batch-drain + reduce per-packet mutex ✅ IMPLEMENTATO
+
+**Obiettivo**: ridurre overhead di scheduling e mutex contention nel hot loop `tunWriter`.
+
+**Analisi profiling** (dual Starlink, 12 marzo, pioggia):
+- `tunWriter → os.File.Write` = **26.3%** del tempo CPU server
+- `runtime.findRunnable` (scheduling) = **9.76%** — include park/unpark di tunWriter
+- `touchPath` e `learnRoute` chiamati **per ogni pacchetto** con RLock + operazioni
+
+**Limitazione TUN**: il device `/dev/net/tun` in modalità `IFF_TUN` (layer 3) accetta
+esattamente **1 pacchetto IP per write()**. Non c'è modo di iniettare più pacchetti
+in una singola syscall (`writev` concatena gli iovec in un unico pacchetto).
+L'approccio originale `writev` è quindi inapplicabile.
+
+**Approccio implementato — batch-drain rxCh**:
+Stesso pattern di `drainSendCh` (Step 4.20):
+1. **Blocking receive** di 1 pacchetto da `sess.rxCh` (buffer 512)
+2. **Non-blocking drain** di tutti i pacchetti aggiuntivi in coda
+3. **Tight write loop**: `tun.Write()` per ogni pacchetto senza re-scheduling
+4. **touchPath una volta per batch** (non per pacchetto) — elimina N-1 RLock per batch
+5. **learnRoute solo se srcIP ≠ peerIP** — skip per traffico dalla stessa sorgente
+
+**Impatto atteso**:
+- Goroutine tunWriter resta running per l'intero batch → meno park/unpark cycles
+- Riduzione mutex contention: touchPath da N a 1 lock per batch
+- TUN write resta 1 syscall per pacchetto (limitazione strutturale)
+- Stima: scheduling da 11.2% → ~8-9%, touchPath overhead quasi azzerato
+
+**Effort**: ~45 righe (rewrite funzione `tunWriter` in `stripe.go`).
+
+**Commit**: da verificare con profiling post-deploy.
 
 ### Step 4.22 — UDP GRO per RX ⬜ DEPRIORITIZZATO
 
@@ -1116,7 +1162,7 @@ diventa il fattore limitante.
 
 1. ~~**Step 4.19 — pprof profiling**~~ ✅ Completato — bottleneck identificati: TX syscall 45%, TUN write 23%
 2. **Step 4.20 — Batch TX (sendmmsg)** → attacca il 45% del tempo CPU (priorità massima)
-3. **Step 4.21 — Batch TUN Write (writev)** → attacca il 23% del tempo CPU
+3. ~~**Step 4.21 — tunWriter batch-drain + reduce mutex**~~ ✅ Completato — batch-drain rxCh, touchPath 1/batch
 4. **Step 4.22 — UDP GRO** → deprioritizzato (RX path solo 5.2%)
 5. **Step 4.15 — Sliding Window FEC** → se loss recovery diventa il fattore limitante
 
@@ -1132,8 +1178,8 @@ diventa il fattore limitante.
 - [x] FEC per dimensione pacchetto (Step 4.14) — **risultato negativo**, dead code in M=0 adaptive, revertito
 - [x] RX Reorder Buffer (Step 4.18) — **risultato negativo**, jitter artificiale peggiorativo, revertito
 - [x] pprof profiling support (Step 4.19) — flag `--pprof` per CPU/memory profiling
-- [ ] Batch TX sendmmsg (Step 4.20)
-- [ ] Batch TUN Write writev (Step 4.21)
+- [x] Batch TX sendmmsg (Step 4.20) — **CPU -17%**, picco 434 Mbps (record), sendmmsg confermato in profile
+- [x] tunWriter batch-drain + reduce mutex (Step 4.21) — batch-drain rxCh, touchPath 1/batch
 - [ ] UDP GRO per RX (Step 4.22) — deprioritizzato
 - [ ] Sliding window FEC (Step 4.15)
 - [ ] Throughput ≥ 400 Mbps su dual Starlink

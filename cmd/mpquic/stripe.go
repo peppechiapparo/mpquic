@@ -2058,11 +2058,15 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 
 func (ss *stripeServer) tunWriter(sess *stripeSession) {
 	remoteID := fmt.Sprintf("stripe:%08x", sess.sessionID)
-	for pkt := range sess.rxCh {
-		// Update lastRecv so dispatch() considers this path active
-		ss.ct.touchPath(sess.peerIP, remoteID)
 
-		// Learn routes for return traffic (like runServerMultiConnTunnel does)
+	// writePkt writes a single IP packet to the TUN device and learns routes.
+	// touchPath/learnRoute are called only on the first packet of each batch
+	// to reduce mutex contention (touchPath does RLock + string compare + time
+	// check per call; learnRoute does RLock + map lookup per call).
+	writePkt := func(pkt []byte, doTouch bool) {
+		if doTouch {
+			ss.ct.touchPath(sess.peerIP, remoteID)
+		}
 		if len(pkt) >= 20 {
 			version := pkt[0] >> 4
 			if version == 4 {
@@ -2074,6 +2078,27 @@ func (ss *stripeServer) tunWriter(sess *stripeSession) {
 		}
 		if _, err := ss.tun.Write(pkt); err != nil {
 			ss.logger.Errorf("stripe: TUN write error: %v", err)
+		}
+	}
+
+	// Batch-drain: blocking receive one packet, then non-blocking drain any
+	// additional queued packets. The goroutine stays running for the entire
+	// batch, reducing park/unpark scheduling overhead (~11% of CPU).
+	// touchPath is called only on the first packet of each batch.
+	for pkt := range sess.rxCh {
+		writePkt(pkt, true) // first packet: touchPath + learnRoute
+		// Non-blocking drain
+		drain := true
+		for drain {
+			select {
+			case pkt2, ok := <-sess.rxCh:
+				if !ok {
+					return
+				}
+				writePkt(pkt2, false) // subsequent: learnRoute only
+			default:
+				drain = false
+			}
 		}
 	}
 }

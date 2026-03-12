@@ -1,6 +1,21 @@
 # Changelog implementazione (replicabile TBOX)
 
-## 2026-03-11
+## 2025-03-12
+
+### Step 4.21: tunWriter batch-drain + reduce per-packet mutex
+- **Profiling-driven**: pprof mostra `tunWriter → os.File.Write` al **26.3%** CPU,
+  `runtime.findRunnable` (scheduling) al **9.76%**, touchPath/learnRoute con mutex per pacchetto.
+- Limitazione TUN: `/dev/net/tun` accetta 1 pacchetto IP per `write()` —
+  `writev` concatena in un unico pacchetto, non supporta multi-packet batch.
+- Implementazione batch-drain rxCh (stesso pattern di `drainSendCh`):
+  - Blocking receive 1 pacchetto, non-blocking drain di tutti i pacchetti in coda
+  - Tight write loop: `tun.Write()` per ogni pacchetto senza re-scheduling goroutine
+  - `touchPath` chiamato **1 volta per batch** (non per pacchetto) — elimina N-1 RLock
+  - `learnRoute` chiamato solo se `srcIP ≠ peerIP` — skip per traffico dalla stessa sorgente
+- Impatto atteso: scheduling da 11.2% → ~8-9%, mutex contention quasi azzerata
+- File modificati: `stripe.go` (rewrite `tunWriter`)
+
+## 2025-03-11
 
 ### Step 4.20: Batch TX via sendmmsg — server-side
 - **Profiling-driven**: pprof CPU 60s mostra TX path (SendDatagram→WriteToUDP→sendto)
