@@ -2,6 +2,21 @@
 
 ## 2025-03-12
 
+### Step 4.23: TUN Multiqueue (IFF_MULTI_QUEUE) — per-session fd
+- **Profiling-driven**: TUN write al 26.9% CPU + TUN read al 7.5% = 34.4% totale I/O TUN.
+  Con singolo fd, reader e N writer serializzati su stessa coda kernel.
+- Linux TUN multiqueue (kernel 3.8+): `IFF_MULTI_QUEUE` permette N fd indipendenti
+  sullo stesso device, ognuno con coda kernel propria.
+- Implementazione:
+  - `runServerMultiConn`: TUN aperto con `MultiQueue: true` (fd #1 per reader)
+  - `stripeSession`: nuovo campo `tunFd *water.Interface` — fd dedicato per-session
+  - Session creation: `water.New(MultiQueue: true, Name: tunName)` apre fd aggiuntivo
+  - `tunWriter`: usa `sess.tunFd.Write()` (fd dedicato, non condiviso)
+  - Session cleanup (GC + Close): chiusura per-session fd
+  - Fallback: se multiqueue fd fails, usa fd condiviso (backward compatible)
+- Con dual Starlink: 3 fd paralleli (1 reader + 2 writer per wan5/wan6)
+- File modificati: `main.go` (MultiQueue: true), `stripe.go` (per-session fd + cleanup)
+
 ### Step 4.21: tunWriter batch-drain + reduce per-packet mutex
 - **Profiling-driven**: pprof mostra `tunWriter → os.File.Write` al **26.3%** CPU,
   `runtime.findRunnable` (scheduling) al **9.76%**, touchPath/learnRoute con mutex per pacchetto.

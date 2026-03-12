@@ -1137,6 +1137,56 @@ Stesso pattern di `drainSendCh` (Step 4.20):
 
 **Effort**: ~45 righe (rewrite funzione `tunWriter` in `stripe.go`).
 
+**Risultati profiling (validazione post-deploy, dual Starlink, pioggia 12/03)**:
+
+| Area | Step 4.20 | Step 4.20+4.21 | Delta |
+|---|---|---|---|
+| TX path (`drainSendCh`) | 42.2% | **41.0%** | -1.2 pp |
+| TUN write (`tunWriter`) | 26.3% | **26.9%** | +0.6 pp (relativo) |
+| Scheduling (`findRunnable`) | 11.2% | **10.1%** | **-1.1 pp** |
+| **CPU totale** | **127%** | **108%** | **-19 pp (-15%)** |
+
+**touchPath/learnRoute non appaiono nel top 40** — overhead mutex per-packet
+eliminato dal batch-drain. Overhead tunWriter: 26.89% cum - 26.38% (os.File.Write)
+= **0.51%** di overhead puro (prima era significativo).
+
+**Benchmark throughput (pioggia, dual Starlink, P30)**:
+- **Picco: 458 Mbps** — nuovo record assoluto
+- Media: 296 Mbps (variabilità meteo 148-458 Mbps nel run)
+- Finestra 67-82s (link buono): 370-458 Mbps stabile
+
+**Commit**: 688e952.
+
+### Step 4.23 — TUN Multiqueue (IFF_MULTI_QUEUE) ✅ IMPLEMENTATO
+
+**Obiettivo**: eliminare la contention sul singolo file descriptor TUN condiviso
+tra TUN reader (goroutine dispatch) e N tunWriter (goroutine per-session).
+
+**Profiling post Step 4.21**: TUN write al **26.9%** CPU, TUN read al **7.5%** CPU.
+Totale TUN I/O = ~34.4% della CPU. Con singolo fd, tutte le write/read sono
+serializzate dal kernel su un'unica coda interna del device.
+
+**Linux TUN multiqueue** (kernel 3.8+): flag `IFF_MULTI_QUEUE` sull'ioctl
+`TUNSETIFF` permette di aprire **N file descriptor indipendenti** sullo stesso
+TUN device. Il kernel mantiene una coda per fd:
+- **RX** (kernel → userspace): i pacchetti sono distribuiti tra le code (hash-based)
+- **TX** (userspace → kernel): ogni fd scrive sulla propria coda senza lock globale
+
+**Implementazione**:
+1. `runServerMultiConn`: TUN creato con `MultiQueue: true` (fd #1 per TUN reader)
+2. `stripeSession`: nuovo campo `tunFd *water.Interface` — fd dedicato per-sessione
+3. Session creation: `water.New()` con `MultiQueue: true` e stesso nome TUN → nuovo fd
+4. `tunWriter`: usa `sess.tunFd.Write()` invece di `ss.tun.Write()` (fd condiviso)
+5. Session cleanup (GC + Close): chiusura del per-session fd
+6. Fallback: se multiqueue fd fails, usa fd condiviso (backward compatible)
+
+**Impatto atteso**:
+- Eliminazione kernel-level lock contention tra reader e writer su stesso fd
+- Con 2 sessioni (wan5+wan6): 3 fd paralleli (1 reader + 2 writer)
+- Stima: TUN write efficiency +10-20% (meno tempo in attesa del lock interno TUN)
+
+**Effort**: ~30 righe (modifiche a `main.go` + `stripe.go`).
+
 **Commit**: da verificare con profiling post-deploy.
 
 ### Step 4.22 — UDP GRO per RX ⬜ DEPRIORITIZZATO
@@ -1162,8 +1212,9 @@ diventa il fattore limitante.
 
 1. ~~**Step 4.19 — pprof profiling**~~ ✅ Completato — bottleneck identificati: TX syscall 45%, TUN write 23%
 2. **Step 4.20 — Batch TX (sendmmsg)** → attacca il 45% del tempo CPU (priorità massima)
-3. ~~**Step 4.21 — tunWriter batch-drain + reduce mutex**~~ ✅ Completato — batch-drain rxCh, touchPath 1/batch
-4. **Step 4.22 — UDP GRO** → deprioritizzato (RX path solo 5.2%)
+3. ~~**Step 4.21 — tunWriter batch-drain + reduce mutex**~~ ✅ Completato — CPU -19pp (108%), picco 458 Mbps
+4. ~~**Step 4.23 — TUN Multiqueue (IFF_MULTI_QUEUE)**~~ ✅ Completato — per-session TUN fd
+5. **Step 4.22 — UDP GRO** → deprioritizzato (RX path solo 5.2%)
 5. **Step 4.15 — Sliding Window FEC** → se loss recovery diventa il fattore limitante
 
 ### Done criteria Fase 4b (aggiornati)
@@ -1179,7 +1230,8 @@ diventa il fattore limitante.
 - [x] RX Reorder Buffer (Step 4.18) — **risultato negativo**, jitter artificiale peggiorativo, revertito
 - [x] pprof profiling support (Step 4.19) — flag `--pprof` per CPU/memory profiling
 - [x] Batch TX sendmmsg (Step 4.20) — **CPU -17%**, picco 434 Mbps (record), sendmmsg confermato in profile
-- [x] tunWriter batch-drain + reduce mutex (Step 4.21) — batch-drain rxCh, touchPath 1/batch
+- [x] tunWriter batch-drain + reduce mutex (Step 4.21) — **CPU -19pp** (108%), picco 458 Mbps
+- [x] TUN Multiqueue IFF_MULTI_QUEUE (Step 4.23) — per-session TUN fd, elimina contention kernel
 - [ ] UDP GRO per RX (Step 4.22) — deprioritizzato
 - [ ] Sliding window FEC (Step 4.15)
 - [ ] Throughput ≥ 400 Mbps su dual Starlink

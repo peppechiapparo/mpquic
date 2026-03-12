@@ -1181,11 +1181,21 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 		return err
 	}
 
-	tun, err := water.New(water.Config{DeviceType: water.TUN, PlatformSpecificParams: water.PlatformSpecificParams{Name: cfg.TunName}})
+	// Open TUN with IFF_MULTI_QUEUE so that additional file descriptors can be
+	// opened later for parallel write (one per stripe session). The first fd
+	// is used exclusively by the TUN reader goroutine below.
+	tun, err := water.New(water.Config{
+		DeviceType: water.TUN,
+		PlatformSpecificParams: water.PlatformSpecificParams{
+			Name:       cfg.TunName,
+			MultiQueue: true,
+		},
+	})
 	if err != nil {
 		return err
 	}
 	defer tun.Close()
+	logger.Infof("TUN %s opened with IFF_MULTI_QUEUE", cfg.TunName)
 
 	ct := newConnectionTable()
 	defer ct.closeAll()

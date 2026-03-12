@@ -1320,6 +1320,11 @@ type stripeSession struct {
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
 
+	// TUN multiqueue: per-session write fd for parallel TUN writes.
+	// Opened with IFF_MULTI_QUEUE on the same device, so each tunWriter
+	// goroutine writes to its own kernel queue without contention.
+	tunFd *water.Interface
+
 	// Hybrid ARQ
 	arqTx *arqTxBuf     // TX retransmit buffer (nil = ARQ disabled)
 	arqRx *arqRxTracker // RX gap detector + NACK generator
@@ -1589,7 +1594,8 @@ type stripeServer struct {
 	addrToSess map[string]uint32 // "IP:port" → sessionID
 	mu         sync.RWMutex
 
-	tun     *water.Interface
+	tun     *water.Interface // primary fd (fallback if multiqueue unavailable)
+	tunName string           // TUN device name for opening multiqueue fds
 	ct      *connectionTable
 	dataK   int
 	parityM int
@@ -1606,6 +1612,7 @@ type stripeServer struct {
 
 // newStripeServer creates and starts the server-side stripe listener.
 func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pendingKeys *stripePendingKeys, logger *Logger) (*stripeServer, error) {
+	tunName := cfg.TunName
 	bindIP, err := resolveBindIP(cfg.BindIP)
 	if err != nil {
 		return nil, fmt.Errorf("stripe server: resolve bind: %w", err)
@@ -1645,6 +1652,7 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 		sessions:   make(map[uint32]*stripeSession),
 		addrToSess: make(map[string]uint32),
 		tun:        tun,
+		tunName:    tunName,
 		ct:         ct,
 		dataK:      dataK,
 		parityM:    parityM,
@@ -1963,6 +1971,24 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 		ss.ct.registerStripe(peerIP, fmt.Sprintf("stripe:%08x", sessionID), sdc, cancel)
 		ss.logger.Infof("stripe session created: peer=%s session=%08x pipes=%d", peerIP, sessionID, totalPipes)
 
+		// Open per-session TUN fd via IFF_MULTI_QUEUE for parallel writes.
+		// Each tunWriter goroutine gets its own kernel queue, avoiding
+		// contention on a single fd shared by all sessions.
+		tunFd, tunErr := water.New(water.Config{
+			DeviceType: water.TUN,
+			PlatformSpecificParams: water.PlatformSpecificParams{
+				Name:       ss.tunName,
+				MultiQueue: true,
+			},
+		})
+		if tunErr != nil {
+			ss.logger.Errorf("stripe: multiqueue TUN fd for session %08x: %v (using shared fd)", sessionID, tunErr)
+			sess.tunFd = ss.tun // fallback to shared fd
+		} else {
+			sess.tunFd = tunFd
+			ss.logger.Infof("stripe: multiqueue TUN fd opened for session %08x", sessionID)
+		}
+
 		// Start goroutine writing decoded packets to TUN
 		go ss.tunWriter(sess)
 
@@ -2076,7 +2102,7 @@ func (ss *stripeServer) tunWriter(sess *stripeSession) {
 				}
 			}
 		}
-		if _, err := ss.tun.Write(pkt); err != nil {
+		if _, err := sess.tunFd.Write(pkt); err != nil {
 			ss.logger.Errorf("stripe: TUN write error: %v", err)
 		}
 	}
@@ -2527,6 +2553,10 @@ func (ss *stripeServer) runGC() {
 				sess.txTimer.Stop()
 			}
 			close(sess.rxCh)
+			// Close per-session TUN fd (multiqueue) if it's not the shared fd
+			if sess.tunFd != nil && sess.tunFd != ss.tun {
+				sess.tunFd.Close()
+			}
 			// Remove addr→session mappings
 			for addr, sid := range ss.addrToSess {
 				if sid == sessID {
@@ -2561,6 +2591,14 @@ func (ss *stripeServer) runGC() {
 // Close stops the stripe server.
 func (ss *stripeServer) Close() error {
 	close(ss.closeCh)
+	// Close per-session multiqueue TUN fds
+	ss.mu.RLock()
+	for _, sess := range ss.sessions {
+		if sess.tunFd != nil && sess.tunFd != ss.tun {
+			sess.tunFd.Close()
+		}
+	}
+	ss.mu.RUnlock()
 	return ss.conn.Close()
 }
 
