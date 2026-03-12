@@ -1594,9 +1594,10 @@ type stripeServer struct {
 	addrToSess map[string]uint32 // "IP:port" → sessionID
 	mu         sync.RWMutex
 
-	tun     *water.Interface // primary fd (fallback if multiqueue unavailable)
-	tunName string           // TUN device name for opening multiqueue fds
-	ct      *connectionTable
+	tun            *water.Interface // primary fd (fallback if multiqueue unavailable)
+	tunName        string           // TUN device name for opening multiqueue fds
+	tunMultiQueue  bool             // true if TUN was opened with IFF_MULTI_QUEUE
+	ct             *connectionTable
 	dataK   int
 	parityM int
 	fecMode    string // "always", "adaptive", "off"
@@ -1611,7 +1612,7 @@ type stripeServer struct {
 }
 
 // newStripeServer creates and starts the server-side stripe listener.
-func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pendingKeys *stripePendingKeys, logger *Logger) (*stripeServer, error) {
+func newStripeServer(cfg *Config, tun *water.Interface, tunMultiQueue bool, ct *connectionTable, pendingKeys *stripePendingKeys, logger *Logger) (*stripeServer, error) {
 	tunName := cfg.TunName
 	bindIP, err := resolveBindIP(cfg.BindIP)
 	if err != nil {
@@ -1651,9 +1652,10 @@ func newStripeServer(cfg *Config, tun *water.Interface, ct *connectionTable, pen
 		conn:       conn,
 		sessions:   make(map[uint32]*stripeSession),
 		addrToSess: make(map[string]uint32),
-		tun:        tun,
-		tunName:    tunName,
-		ct:         ct,
+		tun:           tun,
+		tunName:       tunName,
+		tunMultiQueue: tunMultiQueue,
+		ct:            ct,
 		dataK:      dataK,
 		parityM:    parityM,
 		fecMode:    fecMode,
@@ -1974,19 +1976,23 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 		// Open per-session TUN fd via IFF_MULTI_QUEUE for parallel writes.
 		// Each tunWriter goroutine gets its own kernel queue, avoiding
 		// contention on a single fd shared by all sessions.
-		tunFd, tunErr := water.New(water.Config{
-			DeviceType: water.TUN,
-			PlatformSpecificParams: water.PlatformSpecificParams{
-				Name:       ss.tunName,
-				MultiQueue: true,
-			},
-		})
-		if tunErr != nil {
-			ss.logger.Errorf("stripe: multiqueue TUN fd for session %08x: %v (using shared fd)", sessionID, tunErr)
-			sess.tunFd = ss.tun // fallback to shared fd
+		if ss.tunMultiQueue {
+			tunFd, tunErr := water.New(water.Config{
+				DeviceType: water.TUN,
+				PlatformSpecificParams: water.PlatformSpecificParams{
+					Name:       ss.tunName,
+					MultiQueue: true,
+				},
+			})
+			if tunErr != nil {
+				ss.logger.Errorf("stripe: multiqueue TUN fd for session %08x: %v (using shared fd)", sessionID, tunErr)
+				sess.tunFd = ss.tun
+			} else {
+				sess.tunFd = tunFd
+				ss.logger.Infof("stripe: multiqueue TUN fd opened for session %08x", sessionID)
+			}
 		} else {
-			sess.tunFd = tunFd
-			ss.logger.Infof("stripe: multiqueue TUN fd opened for session %08x", sessionID)
+			sess.tunFd = ss.tun
 		}
 
 		// Start goroutine writing decoded packets to TUN

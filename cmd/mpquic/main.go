@@ -1184,6 +1184,10 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 	// Open TUN with IFF_MULTI_QUEUE so that additional file descriptors can be
 	// opened later for parallel write (one per stripe session). The first fd
 	// is used exclusively by the TUN reader goroutine below.
+	// Fallback: if the TUN device already exists without IFF_MULTI_QUEUE
+	// (e.g. created by systemd-networkd), the kernel rejects the ioctl.
+	// In that case, open without multiqueue and per-session fds will share it.
+	tunMultiQueue := true
 	tun, err := water.New(water.Config{
 		DeviceType: water.TUN,
 		PlatformSpecificParams: water.PlatformSpecificParams{
@@ -1192,10 +1196,22 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 		},
 	})
 	if err != nil {
-		return err
+		logger.Infof("TUN %s: multiqueue not available (%v), falling back to single-queue", cfg.TunName, err)
+		tunMultiQueue = false
+		tun, err = water.New(water.Config{
+			DeviceType: water.TUN,
+			PlatformSpecificParams: water.PlatformSpecificParams{
+				Name: cfg.TunName,
+			},
+		})
+		if err != nil {
+			return err
+		}
 	}
 	defer tun.Close()
-	logger.Infof("TUN %s opened with IFF_MULTI_QUEUE", cfg.TunName)
+	if tunMultiQueue {
+		logger.Infof("TUN %s opened with IFF_MULTI_QUEUE", cfg.TunName)
+	}
 
 	ct := newConnectionTable()
 	defer ct.closeAll()
@@ -1249,7 +1265,7 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 
 	// Start stripe listener if enabled (for Starlink session bypass clients)
 	if cfg.StripeEnabled {
-		ss, err := newStripeServer(cfg, tun, ct, pendingKeys, logger)
+		ss, err := newStripeServer(cfg, tun, tunMultiQueue, ct, pendingKeys, logger)
 		if err != nil {
 			logger.Errorf("stripe server init failed: %v (continuing with QUIC only)", err)
 		} else {
