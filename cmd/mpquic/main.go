@@ -64,6 +64,7 @@ type Config struct {
 	StripePacingRate      int                   `yaml:"stripe_pacing_rate"` // Mbps per session (0 = disabled)
 	StripeARQ             bool                  `yaml:"stripe_arq"`         // Hybrid ARQ with NACK retransmission
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
+	MetricsListen         string                `yaml:"metrics_listen"` // e.g. "10.200.17.254:9090" — bind to tunnel IP only
 }
 
 type MultipathPathConfig struct {
@@ -878,11 +879,10 @@ func main() {
 
 	logger := newLogger(cfg.LogLevel)
 
-	// Optional pprof HTTP server for CPU/memory profiling
+	// Optional pprof HTTP server for CPU/memory profiling (debug only, localhost)
 	if *pprofAddr != "" {
-		initMetrics() // register /metrics and /api/v1/stats on DefaultServeMux
 		go func() {
-			logger.Infof("pprof+metrics listening on %s", *pprofAddr)
+			logger.Infof("pprof listening on %s", *pprofAddr)
 			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
 				logger.Errorf("pprof server: %v", err)
 			}
@@ -987,6 +987,17 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.TunCIDR == "" {
 		return nil, fmt.Errorf("tun_cidr required")
 	}
+
+	// Resolve metrics_listen: "auto" → derive from tun_cidr IP + port 9090
+	cfg.MetricsListen = strings.TrimSpace(cfg.MetricsListen)
+	if strings.EqualFold(cfg.MetricsListen, "auto") {
+		tunPrefix, err := netip.ParsePrefix(cfg.TunCIDR)
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse tun_cidr for metrics auto-bind: %w", err)
+		}
+		cfg.MetricsListen = net.JoinHostPort(tunPrefix.Addr().String(), "9090")
+	}
+
 	if cfg.Role == "client" && !cfg.MultipathEnabled && cfg.RemoteAddr == "" {
 		return nil, fmt.Errorf("remote_addr required for client")
 	}
@@ -1275,6 +1286,12 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 			defer ss.Close()
 			go ss.Run(ctx)
 		}
+	}
+
+	// Start metrics server (bound to tunnel IP for security)
+	if cfg.MetricsListen != "" {
+		stopMetrics := startMetricsServer(ctx, cfg.MetricsListen, logger)
+		defer stopMetrics()
 	}
 
 	listenAddr := net.JoinHostPort(bindIP, fmt.Sprintf("%d", cfg.RemotePort))
@@ -1685,6 +1702,13 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 		baseCtx: ctx,
 	}
 	registerMetricsClient(mp)
+
+	// Start metrics server (bound to tunnel IP for security)
+	if cfg.MetricsListen != "" {
+		stopMetrics := startMetricsServer(ctx, cfg.MetricsListen, logger)
+		defer stopMetrics()
+	}
+
 	for className := range dpRuntime.classes {
 		mp.classTx[className] = &trafficClassCounters{}
 	}

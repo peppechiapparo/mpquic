@@ -9,10 +9,12 @@ package main
 // Design principles:
 //   - Zero-alloc in hot path: all counters use sync/atomic
 //   - Zero-lock on read: snapshot iterates sessions under RLock only
-//   - Handlers registered on http.DefaultServeMux (shared with pprof)
+//   - Dedicated http.Server bound to tunnel IP (not exposed to Internet)
+//   - pprof stays on its own optional --pprof listener (localhost only)
 //   - Gracefully returns empty output if no stripe server/client registered
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -33,13 +35,8 @@ type metricsRegistry struct {
 	clientPaths  func() []*multipathPathState // snapshot under lock
 }
 
-func initMetrics() {
-	globalMetrics.mu.Lock()
+func init() {
 	globalMetrics.startTime = time.Now()
-	globalMetrics.mu.Unlock()
-
-	http.HandleFunc("/metrics", handlePrometheus)
-	http.HandleFunc("/api/v1/stats", handleStatsJSON)
 }
 
 func registerMetricsServer(ss *stripeServer) {
@@ -59,6 +56,40 @@ func registerMetricsClient(mc *multipathConn) {
 		return out
 	}
 	globalMetrics.mu.Unlock()
+}
+
+// startMetricsServer launches a dedicated HTTP server for /metrics and
+// /api/v1/stats on the given address (typically a tunnel IP like
+// 10.200.17.254:9090). Returns a stop function.
+func startMetricsServer(ctx context.Context, addr string, logger *Logger) func() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", handlePrometheus)
+	mux.HandleFunc("/api/v1/stats", handleStatsJSON)
+
+	server := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	go func() {
+		logger.Infof("metrics server listening on %s", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Errorf("metrics server: %v", err)
+		}
+	}()
+
+	return func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}
 }
 
 // ─── Snapshot types (Layer 1 → Layer 2 boundary) ──────────────────────────
