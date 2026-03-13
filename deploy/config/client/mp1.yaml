@@ -1,0 +1,36 @@
+# Multipath stripe client — dual Starlink bonding (wan5 + wan6)
+# FEC adaptive + ARQ for Starlink resilience
+role: client
+multipath_enabled: true
+multipath_policy: balanced
+tun_name: mp1
+tun_cidr: 10.200.17.1/24
+metrics_listen: auto
+log_level: info
+tls_ca_file: /etc/mpquic/tls/ca.crt
+tls_server_name: mpquic-server
+tls_insecure_skip_verify: false
+congestion_algorithm: bbr
+transport_mode: reliable
+stripe_port: 46017
+stripe_data_shards: 10
+stripe_parity_shards: 2
+stripe_fec_mode: adaptive
+stripe_arq: true
+multipath_paths:
+- name: wan5
+  bind_ip: if:enp7s7
+  remote_addr: 172.238.232.223
+  remote_port: 45017
+  priority: 1
+  weight: 1
+  pipes: 12
+  transport: stripe
+- name: wan6
+  bind_ip: if:enp7s8
+  remote_addr: 172.238.232.223
+  remote_port: 45017
+  priority: 1
+  weight: 1
+  pipes: 12
+  transport: stripe

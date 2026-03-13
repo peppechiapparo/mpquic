@@ -913,6 +913,13 @@ func main() {
 		})
 	}()
 
+	// Start metrics server (bound to tunnel IP for security)
+	if cfg.MetricsListen != "" {
+		registerMetricsRole(cfg.Role)
+		stopMetrics := startMetricsServer(ctx, cfg.MetricsListen, logger)
+		defer stopMetrics()
+	}
+
 	if cfg.Role == "server" {
 		err = runServer(ctx, cfg, logger)
 	} else {
@@ -1286,13 +1293,6 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 			defer ss.Close()
 			go ss.Run(ctx)
 		}
-	}
-
-	// Start metrics server (bound to tunnel IP for security)
-	if cfg.MetricsListen != "" {
-		registerMetricsRole(cfg.Role)
-		stopMetrics := startMetricsServer(ctx, cfg.MetricsListen, logger)
-		defer stopMetrics()
 	}
 
 	listenAddr := net.JoinHostPort(bindIP, fmt.Sprintf("%d", cfg.RemotePort))
@@ -1703,13 +1703,6 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 		baseCtx: ctx,
 	}
 	registerMetricsClient(mp)
-
-	// Start metrics server (bound to tunnel IP for security)
-	if cfg.MetricsListen != "" {
-		registerMetricsRole(cfg.Role)
-		stopMetrics := startMetricsServer(ctx, cfg.MetricsListen, logger)
-		defer stopMetrics()
-	}
 
 	for className := range dpRuntime.classes {
 		mp.classTx[className] = &trafficClassCounters{}
