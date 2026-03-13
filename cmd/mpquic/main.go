@@ -880,8 +880,9 @@ func main() {
 
 	// Optional pprof HTTP server for CPU/memory profiling
 	if *pprofAddr != "" {
+		initMetrics() // register /metrics and /api/v1/stats on DefaultServeMux
 		go func() {
-			logger.Infof("pprof listening on %s", *pprofAddr)
+			logger.Infof("pprof+metrics listening on %s", *pprofAddr)
 			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
 				logger.Errorf("pprof server: %v", err)
 			}
@@ -1270,6 +1271,7 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 		if err != nil {
 			logger.Errorf("stripe server init failed: %v (continuing with QUIC only)", err)
 		} else {
+			registerMetricsServer(ss)
 			defer ss.Close()
 			go ss.Run(ctx)
 		}
@@ -1682,6 +1684,7 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 		classTx: make(map[string]*trafficClassCounters),
 		baseCtx: ctx,
 	}
+	registerMetricsClient(mp)
 	for className := range dpRuntime.classes {
 		mp.classTx[className] = &trafficClassCounters{}
 	}

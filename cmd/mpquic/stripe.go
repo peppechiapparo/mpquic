@@ -1365,6 +1365,14 @@ type stripeSession struct {
 	txBatchMsgs []ipv4.Message   // pre-allocated message slots
 	txBatchN    int              // messages in current batch
 
+	// Metrics (atomic, zero-alloc counters for /metrics and /api/v1/stats)
+	txPkts     uint64 // IP packets sent to client
+	txBytes    uint64 // IP payload bytes sent to client
+	rxPkts     uint64 // IP packets received from client
+	rxBytes    uint64 // IP payload bytes received from client
+	fecEncoded uint64 // FEC groups encoded (TX)
+	createdAt  time.Time
+
 	lastActivity time.Time
 	lastTxDrop   time.Time // rate-limit for TX drop logging
 	logger       *Logger
@@ -1428,6 +1436,8 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 		sess.pacer.pace(len(wirePkt))
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
+		atomic.AddUint64(&sess.txPkts, 1)
+		atomic.AddUint64(&sess.txBytes, uint64(len(pkt)))
 		return nil
 	}
 
@@ -1447,6 +1457,8 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 	}
 	sdc.resetFlushTimer()
 
+	atomic.AddUint64(&sess.txPkts, 1)
+	atomic.AddUint64(&sess.txBytes, uint64(len(pkt)))
 	return nil
 }
 
@@ -1575,6 +1587,7 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 	}
 
 	sess.txGroup = sess.txGroup[:0]
+	atomic.AddUint64(&sess.fecEncoded, 1)
 }
 
 func (sdc *stripeServerDC) resetFlushTimer() {
@@ -1931,6 +1944,7 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			rxCh:         rxCh,
 			txGroup:      make([][]byte, 0, ss.dataK),
 			lastActivity: time.Now(),
+			createdAt:    time.Now(),
 			logger:       ss.logger,
 		}
 		// Set initial adaptive M
@@ -2216,6 +2230,8 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 			pkt := make([]byte, hdr.DataLen)
 			copy(pkt, payload[2:2+hdr.DataLen])
 			atomic.AddUint64(&sess.rxDirectCount, 1)
+			atomic.AddUint64(&sess.rxPkts, 1)
+			atomic.AddUint64(&sess.rxBytes, uint64(hdr.DataLen))
 			select {
 			case sess.rxCh <- pkt:
 			default:
@@ -2323,6 +2339,8 @@ func (ss *stripeServer) deliverGroupToTUN(sess *stripeSession, grp *fecGroup) {
 		}
 		pkt := make([]byte, dataLen)
 		copy(pkt, grp.shards[i][2:2+dataLen])
+		atomic.AddUint64(&sess.rxPkts, 1)
+		atomic.AddUint64(&sess.rxBytes, uint64(dataLen))
 		select {
 		case sess.rxCh <- pkt:
 		default:
