@@ -1285,21 +1285,81 @@ diventa il fattore limitante.
 
 ---
 
-## Fase 5 — Metriche strutturate e Osservabilità ⬜ NON INIZIATA
+## Fase 5 — Metriche strutturate e Osservabilità 🔄 IN CORSO
 
 **Obiettivo (§20 PDF)**: metriche machine-readable per O&M e portale cliente.
 
 > "O&M with more visibility and control: More KPIs"
 
-### Steps
-1. Endpoint `/metrics` Prometheus-compatible:
-   - Per tunnel: RTT, loss rate, throughput, stato, errori, uptime
-   - Per classe: packets/bytes tx/rx, duplicazioni
-   - Globale: uptime, connessioni, riconnessioni
-2. Persistenza locale metriche (ring buffer o TSV rotato)
-3. Dashboard Grafana template
-4. Allarmi configurabili (loss > soglia, tunnel down prolungato)
-5. API REST per KPI portale cliente
+### Valutazione strategica (2026-03-13)
+
+Con v4.2 il throughput è al tetto Starlink (499 Mbps picco, 374 media) —
+il software non è più il bottleneck. Le ottimizzazioni residue di protocollo
+(Sliding Window FEC, UDP GRO) darebbero guadagni marginali.
+
+| Opzione residua | Impatto throughput | Impatto piattaforma | Effort | Verdetto |
+|---|---|---|---|---|
+| **Sliding Window FEC** (4.15) | Medio: recovery burst loss, ma M=0 adattivo raramente attiva FEC | Basso | 2-3 giorni | **Rimandare** |
+| **UDP GRO** (4.22) | Marginale: RX = 5.2% CPU | Nessuno | 1 giorno | **Scartare** |
+| **Metriche + Osservabilità** (Fase 5) | Nessuno diretto | **Altissimo**: prerequisito AI/ML, debug produzione, SLA cliente | 3-5 giorni (MVP) | **FARE ORA** |
+| **AI/ML feedback loop** (Fase 6) | Potenzialmente alto (tuning dinamico) | Alto: differenziante competitivo | 2+ settimane | **Dopo Fase 5** |
+
+**Decisione**: Fase 5 Metriche come prossimo step. Motivazioni:
+1. Il throughput è già al tetto Starlink — altre ottimizzazioni protocollo = marginali
+2. Le metriche sono prerequisito per tutto il resto (AI/ML, SLA, debug)
+3. L'architettura metriche costruisce le fondamenta per il feedback loop AI/ML
+
+### Architettura a 3 Layer
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Layer 3: Consumer (futuro)                             │
+│  ┌───────────┐  ┌───────────┐  ┌─────────────────────┐ │
+│  │  Grafana   │  │ Alerting  │  │  AI/ML Engine       │ │
+│  │ Dashboard  │  │ (rules)   │  │  (Quality on Demand)│ │
+│  └─────┬─────┘  └─────┬─────┘  └──────────┬──────────┘ │
+│        │              │                    │             │
+├────────┼──────────────┼────────────────────┼────────────┤
+│  Layer 2: Export                                        │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │  GET /metrics  (Prometheus text format)          │    │
+│  │  GET /api/v1/stats  (JSON, per portale cliente)  │    │
+│  └─────────────────────────────────────────────────┘    │
+│                                                         │
+├─────────────────────────────────────────────────────────┤
+│  Layer 1: Collection (nello stripe engine)              │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │  atomic counters + ring buffer per-session        │   │
+│  │  • tx_bytes, rx_bytes, tx_pkts, rx_pkts           │   │
+│  │  • rtt_min, rtt_avg, rtt_max (EMA)               │   │
+│  │  • loss_rate (sliding window 10s)                 │   │
+│  │  • fec_encoded, fec_recovered, arq_nack_sent      │   │
+│  │  • retransmit_count, dup_count                    │   │
+│  │  • session_uptime, reconnections                  │   │
+│  │  • per-pipe: throughput, rtt, loss                │   │
+│  └──────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Piano implementativo
+
+**Layer 1 — Collection** (3-4 giorni):
+- Contatori atomici (`atomic.Uint64`) nel hot path — zero-alloc, zero-lock
+- Per-session: tx/rx bytes/pkts, FEC encode/recover, ARQ nack/retransmit, dup
+- Per-pipe: throughput, RTT (EMA), loss rate (sliding window 10s)
+- Globale: uptime, sessioni attive, riconnessioni
+- Nessun impatto performance misurabile (solo `atomic.Add`)
+
+**Layer 2 — Export** (1-2 giorni):
+- Endpoint HTTP `/metrics` (Prometheus text format) sullo stesso server pprof (`:6060`)
+- Endpoint HTTP `/api/v1/stats` (JSON strutturato, per portale cliente)
+- Scrape-ready per Prometheus/Grafana senza toccare il binario
+
+**Layer 3 — Consumer** (futuro, Fase 6):
+- Dashboard Grafana template
+- Alerting (loss > soglia, tunnel down prolungato)
+- AI/ML Engine: legge telemetria → produce policy → applica via Control API
+- "Quality on Demand" come contratto API formalizzato
 
 ---
 
