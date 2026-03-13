@@ -32,9 +32,9 @@ find_go() {
 
 # Discover all enabled mpquic@ instances from systemd
 list_instances() {
+  # grep -oP extracts the instance name robustly, ignoring leading ● on failed units
   systemctl list-units --type=service --all --no-legend 'mpquic@*' \
-    | awk '{print $1}' \
-    | sed 's/mpquic@//;s/\.service//' \
+    | grep -oP 'mpquic@\K[^.]+' \
     | sort
 }
 
