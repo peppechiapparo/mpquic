@@ -1,6 +1,6 @@
 # Roadmap implementazione MPQUIC
 
-*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-03*
+*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-13*
 
 ### Nota manutenzione (2026-03-01)
 - Cleanup diagnostico completato in `cmd/mpquic/main.go` (commit `c15b235`):
@@ -1157,7 +1157,7 @@ eliminato dal batch-drain. Overhead tunWriter: 26.89% cum - 26.38% (os.File.Writ
 
 **Commit**: 688e952.
 
-### Step 4.23 — TUN Multiqueue (IFF_MULTI_QUEUE) ✅ IMPLEMENTATO
+### Step 4.23 — TUN Multiqueue (IFF_MULTI_QUEUE) ✅ COMPLETATO
 
 **Obiettivo**: eliminare la contention sul singolo file descriptor TUN condiviso
 tra TUN reader (goroutine dispatch) e N tunWriter (goroutine per-session).
@@ -1173,21 +1173,68 @@ TUN device. Il kernel mantiene una coda per fd:
 - **TX** (userspace → kernel): ogni fd scrive sulla propria coda senza lock globale
 
 **Implementazione**:
-1. `runServerMultiConn`: TUN creato con `MultiQueue: true` (fd #1 per TUN reader)
-2. `stripeSession`: nuovo campo `tunFd *water.Interface` — fd dedicato per-sessione
-3. Session creation: `water.New()` con `MultiQueue: true` e stesso nome TUN → nuovo fd
-4. `tunWriter`: usa `sess.tunFd.Write()` invece di `ss.tun.Write()` (fd condiviso)
-5. Session cleanup (GC + Close): chiusura del per-session fd
-6. Fallback: se multiqueue fd fails, usa fd condiviso (backward compatible)
+1. `openTUN()` helper: crea TUN con `MultiQueue: true`, fallback single-queue
+2. `ensure_tun.sh`: creazione con `multi_queue` flag, gestione EBUSY su restart
+3. `stripeSession`: nuovo campo `tunFd *water.Interface` — fd dedicato per-sessione
+4. Session creation (`handleRegister`): `water.New()` con `MultiQueue: true` → nuovo fd
+5. `tunWriter`: usa `sess.tunFd.Write()` invece di `ss.tun.Write()` (fd condiviso)
+6. `tunFdReader()`: goroutine di lettura per-session fd (vedi bug critico sotto)
+7. Session cleanup (GC + Close): chiusura del per-session fd
+8. Fallback: se multiqueue fd fails, usa fd condiviso (backward compatible)
 
-**Impatto atteso**:
-- Eliminazione kernel-level lock contention tra reader e writer su stesso fd
-- Con 2 sessioni (wan5+wan6): 3 fd paralleli (1 reader + 2 writer)
-- Stima: TUN write efficiency +10-20% (meno tempo in attesa del lock interno TUN)
+**Bug critico — RX distribution con IFF_MULTI_QUEUE**:
+Con `IFF_MULTI_QUEUE`, il kernel distribuisce i pacchetti RX (kernel → userspace)
+su **tutti** i fd aperti via hash-based queue selection. I per-session fd creati in
+`handleRegister` avevano solo `tunWriter` (goroutine write), **nessun reader**.
+Risultato: ~2/3 dei pacchetti di ritorno restavano bloccati in code non lette →
+**100% packet loss** (ping e iperf3 a zero).
 
-**Effort**: ~30 righe (modifiche a `main.go` + `stripe.go`).
+**Fix**: aggiunta goroutine `tunFdReader()` su ogni per-session fd. Legge pacchetti IP,
+estrae dst IP dall'header IPv4/IPv6, dispatcha via `connectionTable.dispatch()`.
+Esce quando `sess.tunFd.Close()` viene chiamato durante GC.
 
-**Commit**: da verificare con profiling post-deploy.
+**Catena bug-fix deploy** (5 bug sequenziali risolti):
+1. `ensure_tun.sh` senza `multi_queue` flag → commit `e9eb1b4`
+2. `openTUN()` helper mancante su 2 callsite → commit `128fc0b`
+3. EBUSY su ricreazione TUN durante restart → commit `b6c30fd`
+4. `mpquic-update.sh` parsava `●` come nome istanza → commit `261342b`, `353d966`
+5. Per-session fd senza reader → 100% packet loss → commit `5eeb2d4`
+
+**Risultati profiling (post-deploy, dual Starlink, 2026-03-13)**:
+
+| Area | Step 4.20+4.21 (pre-MQ) | Step 4.23 (multiqueue) | Delta |
+|---|---|---|---|
+| TX path (`drainSendCh`) | 41.0% | **42.3%** | +1.3 pp |
+| TUN write (`tunWriter`) | 26.9% | **27.2%** | +0.3 pp |
+| TUN per-session reader (`tunFdReader`) | — | **10.6%** | **+10.6 pp** (nuovo) |
+| Scheduling (`findRunnable`) | 10.1% | **9.6%** | -0.5 pp |
+| **CPU totale** | **108%** | **116%** | **+8 pp** |
+
+**Nota CPU**: l'aumento di +8 pp è dovuto ai `tunFdReader()` goroutine aggiuntivi
+(10.6% CPU). Senza di loro i pacchetti RX restano bloccati, quindi è overhead
+necessario e non eliminabile con IFF_MULTI_QUEUE. Il beneficio è la parallelizzazione
+delle write TUN su code kernel separate (no lock globale).
+
+**Benchmark throughput (dual Starlink, P20, -R)**:
+
+| Metrica | Step 4.17 (v4.1 baseline) | Step 4.20+4.21 (pioggia) | Step 4.23 (30s) | Step 4.23 (150s) |
+|---|---|---|---|---|
+| **Media** | **354 Mbps** | **296 Mbps** | **374 Mbps** | **333 Mbps** |
+| **Picco** | 390 Mbps | 458 Mbps | 451 Mbps | **499 Mbps** |
+| Retransmit | 3.189 | n/a | 2.952 | 19.818 |
+| CPU server | 144% | 108% | — | **116%** |
+| Meteo | buono | **pioggia** | buono | variabile |
+
+**Nuovo record assoluto: 499 Mbps** (t=76s del run 150s).
+
+Run 150s — pattern Starlink: forte variabilità (170-499 Mbps range) con 3 fasi
+distinte: warmup degradato (t=0-17, ~220 Mbps), fase ottimale (t=18-91, ~430 Mbps
+sostenuto), fase stabile (t=92-150, ~335 Mbps).
+
+**Confronto 30s fair-weather**: 374 Mbps (+5.6% vs baseline 354 Mbps).
+
+**Commits**: `804262d` (codice Go multiqueue), `e9eb1b4`-`b6c30fd` (deploy fixes),
+`261342b`-`353d966` (mpquic-update.sh), `5eeb2d4` (tunFdReader fix critico).
 
 ### Step 4.22 — UDP GRO per RX ⬜ DEPRIORITIZZATO
 
@@ -1231,10 +1278,10 @@ diventa il fattore limitante.
 - [x] pprof profiling support (Step 4.19) — flag `--pprof` per CPU/memory profiling
 - [x] Batch TX sendmmsg (Step 4.20) — **CPU -17%**, picco 434 Mbps (record), sendmmsg confermato in profile
 - [x] tunWriter batch-drain + reduce mutex (Step 4.21) — **CPU -19pp** (108%), picco 458 Mbps
-- [x] TUN Multiqueue IFF_MULTI_QUEUE (Step 4.23) — per-session TUN fd, elimina contention kernel
+- [x] TUN Multiqueue IFF_MULTI_QUEUE (Step 4.23) — **picco 499 Mbps** (record), 374 Mbps media 30s, CPU +8pp (116%)
 - [ ] UDP GRO per RX (Step 4.22) — deprioritizzato
 - [ ] Sliding window FEC (Step 4.15)
-- [ ] Throughput ≥ 400 Mbps su dual Starlink
+- [ ] Throughput ≥ 400 Mbps su dual Starlink — **picco 499 raggiunto**, media 374 (30s buono)
 
 ---
 
@@ -1298,7 +1345,7 @@ diventa il fattore limitante.
 | mpq1-3 | single-link | WAN1-3 | QUIC | — (no modem) |
 | mpq4-6 | single-link | WAN4-6 | QUIC reliable | ~50 Mbps |
 | cr5/df5/bk5 | multi-tunnel | WAN5 | QUIC reliable | ~50 Mbps (isolato) |
-| **mp1** | **multipath 2 WAN** | **WAN5+6** | **UDP stripe + FEC adaptive + ARQ** | **330 Mbps (picco 384)** |
+| **mp1** | **multipath 2 WAN** | **WAN5+6** | **UDP stripe + FEC adaptive + ARQ** | **374 Mbps (picco 499)** |
 
 ---
 
