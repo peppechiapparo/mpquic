@@ -499,6 +499,7 @@ delle istanze MPQUIC, organizzati per categoria.
 | `tun_name` | stringa (es. `mpq4`, `mp1`, `cr5`) | ✅ | Nome interfaccia TUN Linux |
 | `tun_cidr` | CIDR (es. `10.200.4.1/30`) | ✅ | Indirizzo IP e subnet della TUN |
 | `log_level` | `debug` / `info` / `error` | ✅ | Livello di logging |
+| `metrics_listen` | `auto` / `<ip>:<porta>` / (vuoto) | No | Indirizzo di ascolto server metriche. `auto` = deriva IP da `tun_cidr` + porta 9090. Espone `/metrics` (Prometheus) e `/api/v1/stats` (JSON) |
 
 ### 11.2 Attributi di rete e connessione
 
@@ -1435,3 +1436,188 @@ ss -lunp | egrep '4500|4601'
 # 6. Route di ritorno
 ip route show | egrep '172\.16\.[1-6]\.0/30|10\.200\.'
 ```
+
+## 21) Metriche e osservabilità (Fase 5)
+
+### 21.1 Architettura
+
+Ogni istanza mpquic può esporre metriche su un server HTTP dedicato, **vincolato
+all'IP tunnel** (non esposto su Internet). Gli endpoint disponibili sono:
+
+| Endpoint | Formato | Uso |
+|----------|---------|-----|
+| `/metrics` | Prometheus text exposition | Scraping da Prometheus/Grafana |
+| `/api/v1/stats` | JSON strutturato | Portali, script, AI/ML feedback |
+
+Il binding sull'IP tunnel garantisce che le metriche siano raggiungibili **solo
+attraverso il tunnel crittografato MPQUIC**, senza alcuna porta esposta su
+Internet.
+
+### 21.2 Configurazione
+
+Aggiungere `metrics_listen: auto` al file YAML dell'istanza:
+
+```yaml
+# Server (es. /etc/mpquic/instances/mt4.yaml.tpl)
+role: server
+bind_ip: 0.0.0.0
+remote_port: 45014
+multi_conn_enabled: true
+tun_name: mt4
+tun_cidr: 10.200.14.254/24
+metrics_listen: auto          # ← deriva 10.200.14.254:9090 da tun_cidr
+log_level: info
+tls_cert_file: /etc/mpquic/tls/server.crt
+tls_key_file: /etc/mpquic/tls/server.key
+```
+
+```yaml
+# Client (es. /etc/mpquic/instances/cr1.yaml.tpl)
+role: client
+bind_ip: if:enp7s6
+remote_addr: VPS_PUBLIC_IP
+remote_port: 45014
+tun_name: cr1
+tun_cidr: 10.200.14.1/24
+metrics_listen: auto          # ← deriva 10.200.14.1:9090 da tun_cidr
+log_level: info
+tls_ca_file: /etc/mpquic/tls/ca.crt
+tls_server_name: mpquic-server
+tls_insecure_skip_verify: false
+```
+
+**Valori possibili per `metrics_listen`:**
+
+| Valore | Risultato |
+|--------|-----------|
+| `auto` | Estrae l'IP da `tun_cidr` e usa porta 9090 (raccomandato) |
+| `10.200.14.254:9090` | Bind esplicito a IP e porta |
+| (vuoto/assente) | Metriche disabilitate per questa istanza |
+
+### 21.3 Installazione config sulle macchine
+
+Dopo aver modificato i template nel repository:
+
+```bash
+# 1. Push delle modifiche
+cd /opt/mpquic
+git add deploy/config/
+git commit -m "config: add metrics_listen to instances"
+git push origin main
+```
+
+**Sul server VPS:**
+```bash
+cd /opt/mpquic && git pull
+
+# Copia i config aggiornati (mt1 ha .tpl, mt4/5/6 hanno .yaml)
+for i in mt1; do
+  cp deploy/config/server/$i.yaml /etc/mpquic/instances/$i.yaml.tpl
+done
+for i in mt4 mt5 mt6; do
+  cp deploy/config/server/$i.yaml /etc/mpquic/instances/$i.yaml
+done
+
+# Rebuild + restart
+bash scripts/mpquic-update.sh /opt/mpquic
+```
+
+**Sul client:**
+```bash
+cd /opt/mpquic && git pull
+
+# Copia i config aggiornati
+for i in cr1 cr2 cr3 cr5; do
+  cp deploy/config/client/$i.yaml /etc/mpquic/instances/$i.yaml.tpl
+done
+
+# Rebuild + restart
+sudo bash scripts/mpquic-update.sh /opt/mpquic
+```
+
+### 21.4 Verifica
+
+```bash
+# Dal server → metriche server mt4 (Prometheus format)
+curl http://10.200.14.254:9090/metrics
+
+# Dal server → metriche server mt4 (JSON)
+curl http://10.200.14.254:9090/api/v1/stats
+
+# Verifica che la porta NON sia raggiungibile da Internet
+# (questo deve fallire — nessuna porta esposta)
+curl --connect-timeout 3 http://<VPS_PUBLIC_IP>:9090/metrics
+# curl: (28) Connection timed out  ← OK, corretto
+
+# Dal client → metriche server (attraverso il tunnel)
+curl http://10.200.14.254:9090/api/v1/stats
+
+# Dal server → metriche client cr1 (attraverso il tunnel)
+curl http://10.200.14.1:9090/api/v1/stats
+```
+
+**Output atteso (JSON):**
+```json
+{
+  "role": "server",
+  "version": "4.2",
+  "uptime_sec": 35.18,
+  "sessions": [...],
+  "total_tx_bytes": 123456,
+  "total_rx_bytes": 789012,
+  "total_tx_pkts": 100,
+  "total_rx_pkts": 200
+}
+```
+
+### 21.5 Metriche Prometheus esposte
+
+**Globali:**
+
+| Metrica | Tipo | Descrizione |
+|---------|------|-------------|
+| `mpquic_uptime_seconds` | gauge | Uptime del processo |
+| `mpquic_tx_bytes_total` | counter | Byte trasmessi totali |
+| `mpquic_rx_bytes_total` | counter | Byte ricevuti totali |
+| `mpquic_tx_packets_total` | counter | Pacchetti trasmessi totali |
+| `mpquic_rx_packets_total` | counter | Pacchetti ricevuti totali |
+
+**Per sessione (server, label: `session`, `peer`):**
+
+| Metrica | Tipo | Descrizione |
+|---------|------|-------------|
+| `mpquic_session_tx_bytes` | counter | Byte TX per sessione |
+| `mpquic_session_rx_bytes` | counter | Byte RX per sessione |
+| `mpquic_session_tx_packets` | counter | Pacchetti TX per sessione |
+| `mpquic_session_rx_packets` | counter | Pacchetti RX per sessione |
+| `mpquic_session_pipes` | gauge | Pipe attive per sessione |
+| `mpquic_session_adaptive_m` | gauge | Parità FEC corrente (M) |
+| `mpquic_session_fec_encoded` | counter | Gruppi FEC codificati (TX) |
+| `mpquic_session_fec_recovered` | counter | Gruppi FEC recuperati (RX) |
+| `mpquic_session_arq_nack_sent` | counter | NACK ARQ inviati |
+| `mpquic_session_arq_retx_recv` | counter | Ritrasmissioni ARQ ricevute |
+| `mpquic_session_arq_dup_filtered` | counter | Duplicati filtrati |
+| `mpquic_session_loss_rate_pct` | gauge | Loss rate riportata dal peer (0-100) |
+| `mpquic_session_uptime_seconds` | gauge | Uptime sessione |
+| `mpquic_session_decrypt_fail` | counter | Fallimenti decrittazione |
+
+**Per path (client, label: `path`, `bind`):**
+
+| Metrica | Tipo | Descrizione |
+|---------|------|-------------|
+| `mpquic_path_alive` | gauge | Path attivo (1) o down (0) |
+| `mpquic_path_tx_packets` | counter | Pacchetti TX per path |
+| `mpquic_path_rx_packets` | counter | Pacchetti RX per path |
+| `mpquic_path_stripe_tx_bytes` | counter | Byte stripe TX per path |
+| `mpquic_path_stripe_rx_bytes` | counter | Byte stripe RX per path |
+| `mpquic_path_stripe_fec_recovered` | counter | Recuperi FEC stripe per path |
+
+### 21.6 Note di sicurezza
+
+- Il server metriche è **separato** da pprof (che resta su `--pprof 127.0.0.1:6060`, solo per debug)
+- Il binding sull'IP tunnel (10.200.x.y) garantisce che **non** sia raggiungibile dall'esterno
+- Non è necessaria alcuna regola nftables aggiuntiva: il tunnel stesso è la protezione
+- Per ulteriore hardening, si può aggiungere una regola nftables:
+  ```bash
+  nft add rule inet filter input ip saddr != 10.200.0.0/16 tcp dport 9090 drop
+  ```
