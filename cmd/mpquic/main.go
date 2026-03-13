@@ -1171,6 +1171,33 @@ func runServer(ctx context.Context, cfg *Config, logger *Logger) error {
 	return runServerSingleConn(ctx, cfg, logger)
 }
 
+// openTUN opens a TUN device, trying IFF_MULTI_QUEUE first and falling back
+// to single-queue. Returns the interface, whether multiqueue succeeded, and error.
+func openTUN(name string, logger *Logger) (tun *water.Interface, multiQueue bool, err error) {
+	tun, err = water.New(water.Config{
+		DeviceType: water.TUN,
+		PlatformSpecificParams: water.PlatformSpecificParams{
+			Name:       name,
+			MultiQueue: true,
+		},
+	})
+	if err == nil {
+		logger.Infof("TUN %s opened with IFF_MULTI_QUEUE", name)
+		return tun, true, nil
+	}
+	logger.Infof("TUN %s: multiqueue not available (%v), falling back to single-queue", name, err)
+	tun, err = water.New(water.Config{
+		DeviceType: water.TUN,
+		PlatformSpecificParams: water.PlatformSpecificParams{
+			Name: name,
+		},
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return tun, false, nil
+}
+
 // runServerMultiConn accepts N concurrent QUIC connections on the same port,
 // all sharing a single TUN device. Each client registers its TUN peer IP by
 // sending it as the first datagram. The TUN reader dispatches return packets
@@ -1181,37 +1208,11 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 		return err
 	}
 
-	// Open TUN with IFF_MULTI_QUEUE so that additional file descriptors can be
-	// opened later for parallel write (one per stripe session). The first fd
-	// is used exclusively by the TUN reader goroutine below.
-	// Fallback: if the TUN device already exists without IFF_MULTI_QUEUE
-	// (e.g. created by systemd-networkd), the kernel rejects the ioctl.
-	// In that case, open without multiqueue and per-session fds will share it.
-	tunMultiQueue := true
-	tun, err := water.New(water.Config{
-		DeviceType: water.TUN,
-		PlatformSpecificParams: water.PlatformSpecificParams{
-			Name:       cfg.TunName,
-			MultiQueue: true,
-		},
-	})
+	tun, tunMultiQueue, err := openTUN(cfg.TunName, logger)
 	if err != nil {
-		logger.Infof("TUN %s: multiqueue not available (%v), falling back to single-queue", cfg.TunName, err)
-		tunMultiQueue = false
-		tun, err = water.New(water.Config{
-			DeviceType: water.TUN,
-			PlatformSpecificParams: water.PlatformSpecificParams{
-				Name: cfg.TunName,
-			},
-		})
-		if err != nil {
-			return err
-		}
+		return err
 	}
 	defer tun.Close()
-	if tunMultiQueue {
-		logger.Infof("TUN %s opened with IFF_MULTI_QUEUE", cfg.TunName)
-	}
 
 	ct := newConnectionTable()
 	defer ct.closeAll()
@@ -1425,7 +1426,7 @@ func runServerSingleConn(ctx context.Context, cfg *Config, logger *Logger) error
 	if err != nil {
 		return err
 	}
-	tun, err := water.New(water.Config{DeviceType: water.TUN, PlatformSpecificParams: water.PlatformSpecificParams{Name: cfg.TunName}})
+	tun, _, err := openTUN(cfg.TunName, logger)
 	if err != nil {
 		return err
 	}
@@ -2783,7 +2784,7 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 }
 
 func runTunnel(ctx context.Context, cfg *Config, conn datagramConn, logger *Logger) error {
-	tun, err := water.New(water.Config{DeviceType: water.TUN, PlatformSpecificParams: water.PlatformSpecificParams{Name: cfg.TunName}})
+	tun, _, err := openTUN(cfg.TunName, logger)
 	if err != nil {
 		return err
 	}
