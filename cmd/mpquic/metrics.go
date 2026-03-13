@@ -30,6 +30,7 @@ var globalMetrics metricsRegistry
 type metricsRegistry struct {
 	mu           sync.RWMutex
 	startTime    time.Time
+	role         string // "server" or "client"
 	server       *stripeServer
 	client       *multipathConn
 	clientPaths  func() []*multipathPathState // snapshot under lock
@@ -37,6 +38,12 @@ type metricsRegistry struct {
 
 func init() {
 	globalMetrics.startTime = time.Now()
+}
+
+func registerMetricsRole(role string) {
+	globalMetrics.mu.Lock()
+	globalMetrics.role = role
+	globalMetrics.mu.Unlock()
 }
 
 func registerMetricsServer(ss *stripeServer) {
@@ -211,18 +218,19 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 
 func buildGlobalStats() GlobalStats {
 	globalMetrics.mu.RLock()
+	role := globalMetrics.role
 	ss := globalMetrics.server
 	mc := globalMetrics.client
 	start := globalMetrics.startTime
 	globalMetrics.mu.RUnlock()
 
 	gs := GlobalStats{
+		Role:      role,
 		Version:   "4.2",
 		UptimeSec: time.Since(start).Seconds(),
 	}
 
 	if ss != nil {
-		gs.Role = "server"
 		gs.Sessions = snapshotServerSessions(ss)
 		for _, s := range gs.Sessions {
 			gs.TotalTxBytes += s.TxBytes
@@ -233,7 +241,6 @@ func buildGlobalStats() GlobalStats {
 	}
 
 	if mc != nil {
-		gs.Role = "client"
 		gs.Paths = snapshotClientPaths(mc)
 		for _, p := range gs.Paths {
 			gs.TotalTxPkts += p.TxPkts

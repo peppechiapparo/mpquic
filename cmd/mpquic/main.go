@@ -1290,6 +1290,7 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 
 	// Start metrics server (bound to tunnel IP for security)
 	if cfg.MetricsListen != "" {
+		registerMetricsRole(cfg.Role)
 		stopMetrics := startMetricsServer(ctx, cfg.MetricsListen, logger)
 		defer stopMetrics()
 	}
@@ -1705,6 +1706,7 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 
 	// Start metrics server (bound to tunnel IP for security)
 	if cfg.MetricsListen != "" {
+		registerMetricsRole(cfg.Role)
 		stopMetrics := startMetricsServer(ctx, cfg.MetricsListen, logger)
 		defer stopMetrics()
 	}
