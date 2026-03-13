@@ -1976,6 +1976,11 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 		// Open per-session TUN fd via IFF_MULTI_QUEUE for parallel writes.
 		// Each tunWriter goroutine gets its own kernel queue, avoiding
 		// contention on a single fd shared by all sessions.
+		//
+		// IMPORTANT: with IFF_MULTI_QUEUE the kernel distributes RX packets
+		// (kernel → userspace) across ALL open fds via hash-based queue
+		// selection. Every per-session fd MUST have a reader goroutine,
+		// otherwise packets routed to that fd's queue are stuck forever.
 		if ss.tunMultiQueue {
 			tunFd, tunErr := water.New(water.Config{
 				DeviceType: water.TUN,
@@ -1990,6 +1995,9 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			} else {
 				sess.tunFd = tunFd
 				ss.logger.Infof("stripe: multiqueue TUN fd opened for session %08x", sessionID)
+				// Start reader for per-session fd so RX packets routed
+				// to this queue by the kernel are dispatched correctly.
+				go ss.tunFdReader(sess)
 			}
 		} else {
 			sess.tunFd = ss.tun
@@ -2086,6 +2094,46 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 	})
 	reply = stripeEncrypt(sess.txCipher, reply)
 	_, _ = ss.conn.WriteToUDP(reply, from)
+}
+
+// tunFdReader reads IP packets from a per-session multiqueue TUN fd and
+// dispatches them via the connectionTable. With IFF_MULTI_QUEUE the kernel
+// distributes RX packets across all open fds; without a reader on each fd,
+// packets routed to unread queues are silently stuck. This goroutine exits
+// when sess.tunFd is closed (during session GC or server shutdown).
+func (ss *stripeServer) tunFdReader(sess *stripeSession) {
+	buf := make([]byte, 65535)
+	var lastDispatchFail time.Time
+	for {
+		n, err := sess.tunFd.Read(buf)
+		if err != nil {
+			// Normal exit when fd is closed during session cleanup.
+			return
+		}
+		pkt := buf[:n]
+		if len(pkt) < 20 {
+			continue
+		}
+		version := pkt[0] >> 4
+		var dstIP netip.Addr
+		if version == 4 && len(pkt) >= 20 {
+			dstIP = netip.AddrFrom4([4]byte{pkt[16], pkt[17], pkt[18], pkt[19]})
+		} else if version == 6 && len(pkt) >= 40 {
+			var b [16]byte
+			copy(b[:], pkt[24:40])
+			dstIP = netip.AddrFrom16(b)
+		} else {
+			continue
+		}
+		pktCopy := append([]byte(nil), pkt...)
+		if !ss.ct.dispatch(dstIP, pktCopy) {
+			now := time.Now()
+			if now.Sub(lastDispatchFail) > time.Second {
+				lastDispatchFail = now
+				ss.logger.Infof("stripe: per-session fd dispatch failed for dst=%s", dstIP)
+			}
+		}
+	}
 }
 
 func (ss *stripeServer) tunWriter(sess *stripeSession) {
