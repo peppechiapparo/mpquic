@@ -79,7 +79,7 @@
       "targets": [
         {
           "expr": "mpquic_uptime_seconds{job=~\"$job\"}",
-          "legendFormat": "{{instance_name}}",
+          "legendFormat": "{{instance_name}} ({{job}})",
           "refId": "A"
         }
       ],
@@ -247,7 +247,7 @@
       "targets": [
         {
           "expr": "mpquic_tx_bytes_total{job=~\"$job\"}",
-          "legendFormat": "{{instance_name}}",
+          "legendFormat": "{{instance_name}} ({{job}})",
           "refId": "A"
         }
       ],
@@ -301,7 +301,7 @@
       "targets": [
         {
           "expr": "mpquic_rx_bytes_total{job=~\"$job\"}",
-          "legendFormat": "{{instance_name}}",
+          "legendFormat": "{{instance_name}} ({{job}})",
           "refId": "A"
         }
       ],
