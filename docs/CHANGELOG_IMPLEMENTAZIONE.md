@@ -2,7 +2,7 @@
 
 ## 2026-03-14
 
-### Step 2.5: Multi-tunnel VLAN — install script e deploy completo
+### Step 2.5: Multi-tunnel VLAN — install script, deploy e verifica end-to-end
 - **`install_mpquic.sh` aggiornato** per installazione completa Step 2.5 su nuove TBOX:
   - Client: installa VLAN `.netdev`/`.network` in `/etc/systemd/network/`, config
     multi-tunnel (cr1-3/br1-3/df1-3), classifier, e abilita tutti i servizi
@@ -13,6 +13,15 @@
 - **VPS nftables** (`mpquic-vps.nft`): forward per `mt*` tunnel + NAT per subnet
   multi-tunnel e VLAN transit
 - **Config fix**: aggiunto `metrics_listen: auto` a br1, df1, br2, df2, br3, df3
+- **Deploy client**: VLAN networkd (9 .netdev + 9 .network), LAN trunk con VLAN= lines,
+  ip rules 800-808, rt_tables 120-128, VLAN classifier applicato
+- **Deploy VPS**: forward rules mt1/mt4/mt5/mt6 ↔ eth0, VLAN transit routes (9 subnets),
+  nftables salvato in `/etc/nftables.conf`, `mpquic-vps-routes.service` riavviato
+- **Verifica end-to-end**: 9/9 class tunnel UP + ping peer VPS OK:
+  - WAN4 (SL4, terrestrial): cr1/br1/df1 → 10.200.14.254 — ~110ms RTT
+  - WAN5 (SL5, Starlink): cr2/br2/df2 → 10.200.15.254 — ~13ms RTT
+  - WAN6 (SL6, Starlink): cr3/br3/df3 → 10.200.16.254 — ~19ms RTT
+- **Fix rt_tables**: corretto entry stale `120 bd1` → `120 mt_cr1`
 - **Documentazione**: sezione 23 in INSTALLAZIONE_TEST.md (procedura completa)
 
 ### Fase 5 Metriche: completata

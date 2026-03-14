@@ -259,11 +259,11 @@ giusta (mwan3, firewall zone, DSCP→VLAN map, ecc.)
 2. ✅ Creare 9 configurazioni client YAML (cr1/br1/df1, cr2/br2/df2, cr3/br3/df3)
 3. ✅ Creare 3 configurazioni server YAML (mt4, mt5, mt6 multi-conn)
 4. ✅ Creare classifier per-VLAN (evoluzione di mpquic-mt-classifier.sh)
-5. ✅ Deploy server: 3 istanze multi-conn su porte 45014-45016
-6. ✅ Deploy client: 9 istanze + VLAN interfaces + classifier
+5. ✅ Deploy server: 3 istanze multi-conn su porte 45014-45016 + nftables forward/NAT
+6. ✅ Deploy client: 9 istanze + VLAN interfaces + classifier + ip rules 800-808
 7. ✅ Integrare in install_mpquic.sh (ripetibile su nuove TBOX)
 8. ⬜ Configurare OpenWrt: VLAN trunking + mwan3 policy
-9. ⬜ Test end-to-end: 9 flussi indipendenti verso internet
+9. ✅ Test end-to-end: 9 tunnel UP + ping peer VPS bidirezionale verificato (2026-03-14)
 
 ### Done criteria Fase 2
 - [x] Server accetta N connessioni concorrenti sulla stessa porta
@@ -273,7 +273,7 @@ giusta (mwan3, firewall zone, DSCP→VLAN map, ecc.)
 - [x] 9 tunnel VLAN: config + VLAN networkd + classifier nel repo
 - [x] install_mpquic.sh copre l'intero flusso (client + server)
 - [ ] OpenWrt VLAN trunking configurato
-- [ ] Test end-to-end 9 flussi verificato
+- [x] Test end-to-end: 9 tunnel UP, ping peer OK su tutti (WAN4 ~110ms, WAN5 ~13ms, WAN6 ~19ms)
 - [x] Isolamento dimostrato: loss su un tunnel non impatta gli altri (netem + iperf3)
 - [x] Risultati documentati con metriche (RTT + throughput tables)
 
