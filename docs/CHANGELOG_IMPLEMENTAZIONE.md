@@ -1,5 +1,25 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-03-14
+
+### Step 2.5: Multi-tunnel VLAN — install script e deploy completo
+- **`install_mpquic.sh` aggiornato** per installazione completa Step 2.5 su nuove TBOX:
+  - Client: installa VLAN `.netdev`/`.network` in `/etc/systemd/network/`, config
+    multi-tunnel (cr1-3/br1-3/df1-3), classifier, e abilita tutti i servizi
+  - Server: installa config mt1/mt4/mt5/mt6, apre porte NFT (45010/45014-45016),
+    configura forward e NAT per `mt*` tunnel e subnet 10.200.{10,14,15,16}.0/24
+- **VPS routes** (`mpquic-vps-routes.sh`): aggiunte route di ritorno per VLAN transit
+  subnets 172.16.{11-13,21-23,31-33}.0/30 via mt4/mt5/mt6
+- **VPS nftables** (`mpquic-vps.nft`): forward per `mt*` tunnel + NAT per subnet
+  multi-tunnel e VLAN transit
+- **Config fix**: aggiunto `metrics_listen: auto` a br1, df1, br2, df2, br3, df3
+- **Documentazione**: sezione 23 in INSTALLAZIONE_TEST.md (procedura completa)
+
+### Fase 5 Metriche: completata
+- Roadmap aggiornata: Fase 5 ✅ COMPLETATA (Prometheus CT 201 + Grafana CT 202)
+- Fase 5.2 documentata con dettagli deployment, 9 scrape target, bug fix
+- Fix `mpquic_session_pipes`: gauge corretto (non più contatore cumulativo)
+
 ## 2025-03-12
 
 ### Step 4.23: TUN Multiqueue (IFF_MULTI_QUEUE) — per-session fd

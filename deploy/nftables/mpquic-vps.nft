@@ -14,6 +14,7 @@ table inet filter {
 
     ct state established,related accept
 
+    # Single-link tunnels (1:1 WAN↔tunnel)
     iifname "mpq1" oifname "eth0" accept
     iifname "mpq2" oifname "eth0" accept
     iifname "mpq3" oifname "eth0" accept
@@ -27,6 +28,17 @@ table inet filter {
     iifname "eth0" oifname "mpq4" ct state established,related accept
     iifname "eth0" oifname "mpq5" ct state established,related accept
     iifname "eth0" oifname "mpq6" ct state established,related accept
+
+    # Multi-tunnel per link (Step 2.5: mt1=WAN5-test, mt4=WAN4, mt5=WAN5, mt6=WAN6)
+    iifname "mt1" oifname "eth0" accept
+    iifname "mt4" oifname "eth0" accept
+    iifname "mt5" oifname "eth0" accept
+    iifname "mt6" oifname "eth0" accept
+
+    iifname "eth0" oifname "mt1" ct state established,related accept
+    iifname "eth0" oifname "mt4" ct state established,related accept
+    iifname "eth0" oifname "mt5" ct state established,related accept
+    iifname "eth0" oifname "mt6" ct state established,related accept
   }
 }
 
@@ -35,11 +47,29 @@ table ip nat {
     type nat hook postrouting priority srcnat;
     policy accept;
 
+    # Single-link transit LANs
     oifname "eth0" ip saddr 172.16.1.0/30 masquerade
     oifname "eth0" ip saddr 172.16.2.0/30 masquerade
     oifname "eth0" ip saddr 172.16.3.0/30 masquerade
     oifname "eth0" ip saddr 172.16.4.0/30 masquerade
     oifname "eth0" ip saddr 172.16.5.0/30 masquerade
     oifname "eth0" ip saddr 172.16.6.0/30 masquerade
+
+    # Multi-tunnel subnets (Step 2.5)
+    oifname "eth0" ip saddr 10.200.10.0/24 masquerade
+    oifname "eth0" ip saddr 10.200.14.0/24 masquerade
+    oifname "eth0" ip saddr 10.200.15.0/24 masquerade
+    oifname "eth0" ip saddr 10.200.16.0/24 masquerade
+
+    # VLAN transit subnets (Step 2.5)
+    oifname "eth0" ip saddr 172.16.11.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.12.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.13.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.21.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.22.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.23.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.31.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.32.0/30 masquerade
+    oifname "eth0" ip saddr 172.16.33.0/30 masquerade
   }
 }

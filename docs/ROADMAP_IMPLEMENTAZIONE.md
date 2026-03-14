@@ -73,7 +73,7 @@ MAC/rekey, eliminati i parametri `stripe_auth_key` e `stripe_rekey_seconds`.
 | Step | Descrizione | Nostro concetto | Stato |
 |------|-------------|-----------------|-------|
 | **1** | QUIC tunnels multi-link 1:1 | Multi-link | **✅ DONE** |
-| **2** | Traffico distribuito per applicazione, non per pacchetto | Multi-tunnel per link | **🔄 IN PROGRESS** (2.1-2.4 ✅, 2.5 in pausa) |
+| **2** | Traffico distribuito per applicazione, non per pacchetto | Multi-tunnel per link | **🔄 IN PROGRESS** (2.1-2.4 ✅, 2.5 🔄 deploy OK, OpenWrt pending) |
 | **3** | BBR + Reliable Transport | CC per tunnel + transport mode | **✅ DONE** (BBRv1, reliable streams, benchmarkato) |
 | **4** | Bonding, Backup, Duplicazione | Multi-path per tunnel | **✅ DONE** |
 | **5** | AI/ML-Ready (Quality on Demand) | Decision layer | **⬜ NOT STARTED** |
@@ -212,7 +212,7 @@ della separazione per classe di traffico.
 usa la prima route (cr2). Per test isolati è necessario il binding esplicito
 `iperf3 -B IP%dev`. In produzione il VLAN classifier instrada correttamente.
 
-### Step 2.5 — Generalizzazione: 3 WAN × 3 classi = 9 tunnel con VLAN ⬜
+### Step 2.5 — Generalizzazione: 3 WAN × 3 classi = 9 tunnel con VLAN 🔄 IN CORSO
 
 **Architettura**: ogni WAN attiva (SL4/SL5/SL6) ottiene 3 tunnel di classe
 (critical/bulk/default). La classificazione avviene lato OpenWrt tramite VLAN tagging.
@@ -255,21 +255,25 @@ OpenWrt → VLAN 23 (default LAN2)  → enp6s21.23 → ip rule → df2 TUN → W
 giusta (mwan3, firewall zone, DSCP→VLAN map, ecc.)
 
 **Passi implementativi**:
-1. Creare VLAN sub-interfaces su client VM (systemd-networkd .netdev + .network)
-2. Creare 9 configurazioni client YAML (cr1/br1/df1, cr2/br2/df2, cr3/br3/df3)
-3. Creare 3 configurazioni server YAML (mt4, mt5, mt6 multi-conn)
-4. Creare classifier per-VLAN (evoluzione di mpquic-mt-classifier.sh)
-5. Deploy server: 3 istanze multi-conn su porte 45010-45012
-6. Deploy client: 9 istanze + VLAN interfaces + classifier
-7. Configurare OpenWrt: VLAN trunking + mwan3 policy
-8. Test end-to-end: 9 flussi indipendenti verso internet
+1. ✅ Creare VLAN sub-interfaces su client VM (systemd-networkd .netdev + .network)
+2. ✅ Creare 9 configurazioni client YAML (cr1/br1/df1, cr2/br2/df2, cr3/br3/df3)
+3. ✅ Creare 3 configurazioni server YAML (mt4, mt5, mt6 multi-conn)
+4. ✅ Creare classifier per-VLAN (evoluzione di mpquic-mt-classifier.sh)
+5. ✅ Deploy server: 3 istanze multi-conn su porte 45014-45016
+6. ✅ Deploy client: 9 istanze + VLAN interfaces + classifier
+7. ✅ Integrare in install_mpquic.sh (ripetibile su nuove TBOX)
+8. ⬜ Configurare OpenWrt: VLAN trunking + mwan3 policy
+9. ⬜ Test end-to-end: 9 flussi indipendenti verso internet
 
 ### Done criteria Fase 2
 - [x] Server accetta N connessioni concorrenti sulla stessa porta
 - [x] 3 classi traffico (critical/default/bulk) su TUN separate
 - [x] nftables classifier funzionante con routing per-classe
 - [x] Traffico applicativo smistato correttamente (verificato con tcpdump)
-- [ ] Generalizzazione 3 WAN × 3 classi = 9 tunnel con VLAN
+- [x] 9 tunnel VLAN: config + VLAN networkd + classifier nel repo
+- [x] install_mpquic.sh copre l'intero flusso (client + server)
+- [ ] OpenWrt VLAN trunking configurato
+- [ ] Test end-to-end 9 flussi verificato
 - [x] Isolamento dimostrato: loss su un tunnel non impatta gli altri (netem + iperf3)
 - [x] Risultati documentati con metriche (RTT + throughput tables)
 

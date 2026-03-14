@@ -1935,3 +1935,175 @@ pct exec 202 -- systemctl restart grafana-server
 | 202 | grafana | 10.10.11.202 | Grafana OSS | local-zfs:4GB | 512 MB |
 
 Gateway per entrambi: `10.10.11.100` (VM 200 — client MPQUIC)
+
+## 23) Multi-tunnel per link con VLAN (Step 2.5)
+
+### 23.1 Panoramica
+
+Ogni WAN attiva ottiene 3 tunnel QUIC, uno per classe di traffico (critical/bulk/default).
+La classificazione avviene tramite VLAN tagging lato OpenWrt: il traffico arriva su
+sub-interface VLAN dedicati nel client VM, e il classifier instrada nel tunnel corretto
+in base all'interfaccia di ingresso.
+
+```
+OpenWrt → VLAN 21 (critical LAN2) → enp7s1.21 → ip rule iif → cr2 TUN → WAN5 → VPS:45015
+OpenWrt → VLAN 22 (bulk LAN2)     → enp7s1.22 → ip rule iif → br2 TUN → WAN5 → VPS:45015
+OpenWrt → VLAN 23 (default LAN2)  → enp7s1.23 → ip rule iif → df2 TUN → WAN5 → VPS:45015
+```
+
+### 23.2 Schema VLAN → Tunnel → Server
+
+| LAN trunk | VLAN | Classe | Tunnel | Server TUN | Server porta |
+|-----------|------|--------|--------|------------|-------------|
+| enp6s23 (LAN4) | 11 | critical | cr1 | mt4 | 45014 |
+| enp6s23 (LAN4) | 12 | bulk | br1 | mt4 | 45014 |
+| enp6s23 (LAN4) | 13 | default | df1 | mt4 | 45014 |
+| enp7s1 (LAN5) | 21 | critical | cr2 | mt5 | 45015 |
+| enp7s1 (LAN5) | 22 | bulk | br2 | mt5 | 45015 |
+| enp7s1 (LAN5) | 23 | default | df2 | mt5 | 45015 |
+| enp7s2 (LAN6) | 31 | critical | cr3 | mt6 | 45016 |
+| enp7s2 (LAN6) | 32 | bulk | br3 | mt6 | 45016 |
+| enp7s2 (LAN6) | 33 | default | df3 | mt6 | 45016 |
+
+### 23.3 Installazione automatica (consigliata)
+
+L'installazione è integrata in `install_mpquic.sh`. Su una macchina nuova:
+
+**Client:**
+```bash
+cd /opt/mpquic
+sudo ./scripts/install_client.sh
+# Installa automaticamente:
+#   - VLAN .netdev/.network in /etc/systemd/network/
+#   - Config cr1-3/br1-3/df1-3 in /etc/mpquic/instances/
+#   - VLAN classifier in /usr/local/sbin/
+#   - Abilita tutti i servizi (1-6, cr/br/df, mp1)
+#   - Applica il VLAN classifier
+```
+
+**Server:**
+```bash
+cd /opt/mpquic
+sudo ./scripts/install_server.sh
+# Installa automaticamente:
+#   - Config mt1/mt4/mt5/mt6 in /etc/mpquic/instances/
+#   - NFT: porte 45010/45014-45016, forward mt*, NAT subnet
+#   - VPS routes per VLAN transit subnets
+```
+
+### 23.4 Installazione manuale (passo-passo)
+
+#### 23.4.1 Client: VLAN sub-interfaces
+
+```bash
+# Copia VLAN netdev e network files
+sudo cp deploy/networkd/vlan/*.netdev deploy/networkd/vlan/*.network /etc/systemd/network/
+
+# Ricarica networkd
+sudo networkctl reload
+
+# Verifica VLAN interfaces
+ip -br link show type vlan
+# Atteso: enp6s23.11, enp6s23.12, enp6s23.13, enp7s1.21, ... enp7s2.33
+```
+
+#### 23.4.2 Client: config multi-tunnel
+
+```bash
+# Copia configs (il .yaml diventa .yaml.tpl; render_config.sh sostituisce VPS_PUBLIC_IP)
+for inst in cr1 br1 df1 cr2 br2 df2 cr3 br3 df3; do
+  sudo cp deploy/config/client/${inst}.yaml /etc/mpquic/instances/${inst}.yaml.tpl
+  sudo cp deploy/config/client/${inst}.env  /etc/mpquic/instances/${inst}.env
+done
+
+# Abilita e avvia i servizi
+for inst in cr1 br1 df1 cr2 br2 df2 cr3 br3 df3; do
+  sudo systemctl enable --now mpquic@${inst}.service
+done
+```
+
+#### 23.4.3 Client: VLAN classifier
+
+```bash
+# Applica tutte le regole di routing per-VLAN
+sudo /usr/local/sbin/mpquic-vlan-classifier.sh apply all
+
+# Verifica
+sudo /usr/local/sbin/mpquic-vlan-classifier.sh status
+```
+
+#### 23.4.4 Server: config multi-tunnel
+
+```bash
+# Copia server configs
+for inst in mt4 mt5 mt6; do
+  sudo cp deploy/config/server/${inst}.yaml /etc/mpquic/instances/${inst}.yaml.tpl
+  sudo cp deploy/config/server/${inst}.env  /etc/mpquic/instances/${inst}.env
+done
+
+# Abilita e avvia
+for inst in mt4 mt5 mt6; do
+  sudo systemctl enable --now mpquic@${inst}.service
+done
+```
+
+#### 23.4.5 Server: nftables e routing
+
+```bash
+# Apri porte multi-tunnel
+sudo nft add rule inet filter input udp dport 45014 accept
+sudo nft add rule inet filter input udp dport 45015 accept
+sudo nft add rule inet filter input udp dport 45016 accept
+
+# Forward per mt* tunnel
+for tun in mt4 mt5 mt6; do
+  sudo nft add rule inet filter forward iifname "$tun" oifname "eth0" accept
+  sudo nft add rule inet filter forward iifname "eth0" oifname "$tun" ct state established,related accept
+done
+
+# NAT per subnet multi-tunnel
+for subnet in 10.200.14.0/24 10.200.15.0/24 10.200.16.0/24; do
+  sudo nft add rule ip nat postrouting oifname "eth0" ip saddr "$subnet" masquerade
+done
+
+# Salva
+sudo nft list ruleset > /etc/nftables.conf
+
+# Route di ritorno per VLAN transit
+sudo bash scripts/mpquic-vps-routes.sh
+```
+
+### 23.5 Verifica end-to-end
+
+```bash
+# Client: verifica tutti i 9 tunnel UP
+for t in cr1 br1 df1 cr2 br2 df2 cr3 br3 df3; do
+  printf "%-4s: " "$t"
+  ip -4 addr show dev "$t" 2>/dev/null | awk '/inet/{print $2}' || echo "DOWN"
+done
+
+# Client: ping peer per ogni classe
+for t in cr1 br1 df1; do ping -c1 -W2 -I "$t" 10.200.14.254 && echo "$t OK"; done
+for t in cr2 br2 df2; do ping -c1 -W2 -I "$t" 10.200.15.254 && echo "$t OK"; done
+for t in cr3 br3 df3; do ping -c1 -W2 -I "$t" 10.200.16.254 && echo "$t OK"; done
+
+# Client: verifica VLAN classifier
+sudo /usr/local/sbin/mpquic-vlan-classifier.sh status
+
+# Client: verifica ip rules
+ip rule show | grep -E "prio(rity)? 80[0-8]"
+```
+
+### 23.6 Configurazione OpenWrt (lato router)
+
+Il router OpenWrt deve essere configurato per taggare il traffico con le VLAN corrette.
+Ogni VLAN trunk arriva su una porta LAN del client VM:
+
+| Porta fisica | LAN trunk | VLANs | Destinazione |
+|--|--|--|--|
+| LAN4 | enp6s23 | 11 (cr), 12 (br), 13 (df) | WAN4 tunnels |
+| LAN5 | enp7s1  | 21 (cr), 22 (br), 23 (df) | WAN5 tunnels |
+| LAN6 | enp7s2  | 31 (cr), 32 (br), 33 (df) | WAN6 tunnels |
+
+Su OpenWrt (LuCI o CLI), creare i VLAN trunk sulle porte LAN corrispondenti
+e assegnare le zone firewall/policy mwan3 per classificare il traffico.
