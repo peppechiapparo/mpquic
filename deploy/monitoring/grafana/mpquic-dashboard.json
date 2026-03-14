@@ -378,7 +378,7 @@
               }
             ]
           },
-          "unit": "bitsps"
+          "unit": "bps"
         },
         "overrides": []
       },
@@ -473,7 +473,7 @@
               }
             ]
           },
-          "unit": "bitsps"
+          "unit": "bps"
         },
         "overrides": []
       },
@@ -568,7 +568,7 @@
               }
             ]
           },
-          "unit": "bitsps"
+          "unit": "bps"
         },
         "overrides": []
       },
@@ -663,7 +663,7 @@
               }
             ]
           },
-          "unit": "bitsps"
+          "unit": "bps"
         },
         "overrides": []
       },
@@ -1063,7 +1063,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "decimals": 0
         },
         "overrides": []
       },
