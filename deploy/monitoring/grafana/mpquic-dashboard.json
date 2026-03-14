@@ -265,7 +265,7 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "max by (instance_name, job) (mpquic_uptime_seconds{job=~\"$job\"})",
+          "expr": "max by (instance_name, job) (mpquic_uptime_seconds{job=~\"$job\", instance_name=\"mp1\"})",
           "instant": true,
           "legendFormat": "{{instance_name}} ({{job}})",
           "refId": "A"
@@ -440,7 +440,7 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "max by (instance_name, job) (mpquic_tx_bytes_total{job=~\"$job\"})",
+          "expr": "max by (instance_name, job) (mpquic_tx_bytes_total{job=~\"$job\", instance_name=\"mp1\"})",
           "instant": true,
           "legendFormat": "{{instance_name}} ({{job}})",
           "refId": "A"
@@ -497,7 +497,7 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "max by (instance_name, job) (mpquic_rx_bytes_total{job=~\"$job\"})",
+          "expr": "max by (instance_name, job) (mpquic_rx_bytes_total{job=~\"$job\", instance_name=\"mp1\"})",
           "instant": true,
           "legendFormat": "{{instance_name}} ({{job}})",
           "refId": "A"
