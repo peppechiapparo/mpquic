@@ -407,7 +407,7 @@
       },
       "targets": [
         {
-          "expr": "rate(mpquic_session_tx_bytes{job=\"mpquic-server\"}[$__rate_interval])",
+          "expr": "irate(mpquic_session_tx_bytes{job=\"mpquic-server\"}[10s])",
           "legendFormat": "{{session}} ({{peer}})",
           "refId": "A"
         }
@@ -502,7 +502,7 @@
       },
       "targets": [
         {
-          "expr": "rate(mpquic_session_rx_bytes{job=\"mpquic-server\"}[$__rate_interval])",
+          "expr": "irate(mpquic_session_rx_bytes{job=\"mpquic-server\"}[10s])",
           "legendFormat": "{{session}} ({{peer}})",
           "refId": "A"
         }
@@ -597,7 +597,7 @@
       },
       "targets": [
         {
-          "expr": "rate(mpquic_path_stripe_tx_bytes{job=\"mpquic-client\"}[$__rate_interval])",
+          "expr": "irate(mpquic_path_stripe_tx_bytes{job=\"mpquic-client\"}[10s])",
           "legendFormat": "{{path}} ({{bind}})",
           "refId": "A"
         }
@@ -692,7 +692,7 @@
       },
       "targets": [
         {
-          "expr": "rate(mpquic_path_stripe_rx_bytes{job=\"mpquic-client\"}[$__rate_interval])",
+          "expr": "irate(mpquic_path_stripe_rx_bytes{job=\"mpquic-client\"}[10s])",
           "legendFormat": "{{path}} ({{bind}})",
           "refId": "A"
         }
