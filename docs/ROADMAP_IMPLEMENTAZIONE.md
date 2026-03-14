@@ -1,6 +1,6 @@
 # Roadmap implementazione MPQUIC
 
-*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2025-07-15*
+*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2025-07-17*
 
 ### Nota manutenzione (2026-03-01)
 - Cleanup diagnostico completato in `cmd/mpquic/main.go` (commit `c15b235`):
@@ -1285,7 +1285,7 @@ diventa il fattore limitante.
 
 ---
 
-## Fase 5 — Metriche strutturate e Osservabilità 🔄 IN CORSO (5.1 ✅)
+## Fase 5 — Metriche strutturate e Osservabilità ✅ COMPLETATA
 
 **Obiettivo (§20 PDF)**: metriche machine-readable per O&M e portale cliente.
 
@@ -1361,7 +1361,7 @@ il software non è più il bottleneck. Le ottimizzazioni residue di protocollo
 > **Documentazione completa**: vedi `docs/METRICS.md` per catalogo metriche,
 > struttura JSON, label Prometheus, query PromQL e pannelli Grafana suggeriti.
 
-### Fase 5.2 — Stack di monitoraggio Prometheus + Grafana 🔄 IN CORSO
+### Fase 5.2 — Stack di monitoraggio Prometheus + Grafana ✅ COMPLETATA (2025-07-17)
 
 **Obiettivo**: deployment di Prometheus e Grafana su container LXC Proxmox
 per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
@@ -1390,6 +1390,9 @@ per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
 │  │  10.200.15.1:9090  (cr5/df5/bk5 client)              │   │
 │  │  10.200.16.1:9090  (cr2 client)                      │   │
 │  │  10.200.10.1:9090  (cr3 client)                      │   │
+│  │  10.200.4.1:9090   (mpq4 client)                     │   │
+│  │  10.200.5.1:9090   (mpq5 client)                     │   │
+│  │  10.200.6.1:9090   (mpq6 client)                     │   │
 │  └──────────────────────────────────────────────────────┘   │
 │         ▲                                                   │
 │         │  scrape via tunnel route                           │
@@ -1402,16 +1405,34 @@ per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Piano deployment**:
-1. Creare LXC Prometheus (CT 201) su Proxmox — Debian 12, 1 vCPU, 512 MB RAM, 8 GB disk
-2. Creare LXC Grafana (CT 202) su Proxmox — Debian 12, 1 vCPU, 512 MB RAM, 8 GB disk
-3. Configurare routing: i container devono raggiungere le subnet 10.200.x.0/24 via VM 200
-4. Installare e configurare Prometheus con scrape targets MPQUIC
-5. Installare Grafana, collegare datasource Prometheus
-6. Creare dashboard MPQUIC con pannelli: throughput, loss, FEC, ARQ, path status
-7. Configurare alerting rules (loss > soglia, tunnel down, decrypt failures)
+**Piano deployment** — tutti completati ✅:
+1. ✅ Creare LXC Prometheus (CT 201) su Proxmox — Debian 12, 1 vCPU, 512 MB RAM, 8 GB disk
+2. ✅ Creare LXC Grafana (CT 202) su Proxmox — Debian 12, 1 vCPU, 512 MB RAM, 8 GB disk
+3. ✅ Configurare routing: containers raggiungono subnet 10.200.x.0/24 via VM 200
+4. ✅ Installare e configurare Prometheus con scrape targets MPQUIC (tutti: mp1, cr1-cr5, mpq4-mpq6)
+5. ✅ Installare Grafana 12.4.1, collegare datasource Prometheus
+6. ✅ Creare dashboard "MPQUIC Overview" (uid: `adsnpmk`) con pannelli:
+   - Overview: Uptime, Sessioni attive, Path attivi, TX totale, RX totale
+   - Throughput: bps per sessione e per path
+   - Qualità: FEC recovery rate, ARQ NACK/retransmit, loss rate, decrypt failures
+   - Infrastruttura: Pipe per sessione (gauge corretto, non cumulativo)
+7. ⬜ Configurare alerting rules (loss > soglia, tunnel down, decrypt failures) — rimandato a Fase 6
+
+**Bug risolti durante deployment**:
+- Fix `mpquic_session_pipes`: era contatore cumulativo (`sess.registered`), corretto in gauge che conta entry non-nil in `sess.pipes`
+- Fix pannelli stat vuoti: aggiunto `"instant": true` + aggregazione `max by (instance_name, job)`
+- Abilitato `metrics_listen: auto` nei template `.yaml.tpl` per mpq4, mpq5, mpq6
+- Dashboard gestito via API (provisioning file disabilitato per evitare conflitti UI/file)
+
+**Configurazione Prometheus** (`deploy/monitoring/prometheus/prometheus.yml`):
+- Scrape interval: 15s
+- Job `mpquic-server`: mp1 (10.200.17.254:9090)
+- Job `mpquic-client`: mp1, cr1-cr5, mpq4, mpq5, mpq6 (9 target totali)
+- Transport datagram per mpq4-mpq6
 
 **Layer 3 — Consumer** (futuro, Fase 6):
+- Grafana Dashboard: ✅ operativo (MPQUIC Overview, uid `adsnpmk`)
+- Alerting rules: ⬜ da implementare con Fase 6
 - AI/ML Engine: legge telemetria → produce policy → applica via Control API
 - "Quality on Demand" come contratto API formalizzato
 
