@@ -28,6 +28,7 @@
         "x": 0,
         "y": 0
       },
+      "id": 1,
       "panels": [],
       "title": "Overview",
       "type": "row"
@@ -59,6 +60,7 @@
         "x": 0,
         "y": 1
       },
+      "id": 2,
       "options": {
         "colorMode": "value",
         "graphMode": "none",
@@ -76,6 +78,7 @@
         "textMode": "auto",
         "wideLayout": true
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "mpquic_uptime_seconds{job=~\"$job\"}",
@@ -116,6 +119,7 @@
         "x": 5,
         "y": 1
       },
+      "id": 3,
       "options": {
         "colorMode": "value",
         "graphMode": "none",
@@ -133,6 +137,7 @@
         "textMode": "auto",
         "wideLayout": true
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "count(mpquic_session_pipes{job=\"mpquic-server\"})",
@@ -173,6 +178,7 @@
         "x": 8,
         "y": 1
       },
+      "id": 4,
       "options": {
         "colorMode": "value",
         "graphMode": "none",
@@ -190,6 +196,7 @@
         "textMode": "auto",
         "wideLayout": true
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "sum(mpquic_path_alive{job=\"mpquic-client\"})",
@@ -227,6 +234,7 @@
         "x": 12,
         "y": 1
       },
+      "id": 5,
       "options": {
         "colorMode": "value",
         "graphMode": "area",
@@ -244,6 +252,7 @@
         "textMode": "auto",
         "wideLayout": true
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "mpquic_tx_bytes_total{job=~\"$job\"}",
@@ -281,6 +290,7 @@
         "x": 18,
         "y": 1
       },
+      "id": 6,
       "options": {
         "colorMode": "value",
         "graphMode": "area",
@@ -298,6 +308,7 @@
         "textMode": "auto",
         "wideLayout": true
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "mpquic_rx_bytes_total{job=~\"$job\"}",
@@ -309,13 +320,198 @@
       "type": "stat"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
+      "id": 19,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.4.1",
+      "targets": [
+        {
+          "expr": "mpquic_session_pipes{job=\"mpquic-server\"}",
+          "legendFormat": "{{session}} ({{peer}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Pipe per session",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "DOWN"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "UP"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 5
+      },
+      "id": 20,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.4.1",
+      "targets": [
+        {
+          "expr": "mpquic_path_alive{job=\"mpquic-client\"}",
+          "legendFormat": "{{path}} ({{bind}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Path status (client)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "id": 21,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.4.1",
+      "targets": [
+        {
+          "expr": "mpquic_session_uptime_seconds{job=\"mpquic-server\"}",
+          "legendFormat": "{{session}} ({{peer}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Session uptime",
+      "type": "stat"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 11
       },
+      "id": 7,
       "panels": [],
       "title": "Throughput",
       "type": "row"
@@ -386,8 +582,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 6
+        "y": 12
       },
+      "id": 8,
       "options": {
         "legend": {
           "calcs": [
@@ -405,6 +602,7 @@
           "sort": "desc"
         }
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "irate(mpquic_session_tx_bytes{job=\"mpquic-server\"}[10s]) * 8",
@@ -481,8 +679,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 6
+        "y": 12
       },
+      "id": 9,
       "options": {
         "legend": {
           "calcs": [
@@ -500,6 +699,7 @@
           "sort": "desc"
         }
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "irate(mpquic_session_rx_bytes{job=\"mpquic-server\"}[10s]) * 8",
@@ -576,8 +776,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 14
+        "y": 20
       },
+      "id": 10,
       "options": {
         "legend": {
           "calcs": [
@@ -595,6 +796,7 @@
           "sort": "desc"
         }
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "irate(mpquic_path_stripe_tx_bytes{job=\"mpquic-client\"}[10s]) * 8",
@@ -671,8 +873,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 14
+        "y": 20
       },
+      "id": 11,
       "options": {
         "legend": {
           "calcs": [
@@ -690,6 +893,7 @@
           "sort": "desc"
         }
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "irate(mpquic_path_stripe_rx_bytes{job=\"mpquic-client\"}[10s]) * 8",
@@ -706,8 +910,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 28
       },
+      "id": 12,
       "panels": [],
       "title": "Quality — FEC / ARQ / Loss",
       "type": "row"
@@ -784,8 +989,9 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 23
+        "y": 29
       },
+      "id": 13,
       "options": {
         "legend": {
           "calcs": [],
@@ -799,6 +1005,7 @@
           "sort": "desc"
         }
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "mpquic_session_loss_rate_pct{job=\"mpquic-server\"}",
@@ -875,8 +1082,9 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 23
+        "y": 29
       },
+      "id": 14,
       "options": {
         "legend": {
           "calcs": [],
@@ -890,6 +1098,7 @@
           "sort": "desc"
         }
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "rate(mpquic_session_fec_recovered{job=\"mpquic-server\"}[$__rate_interval])",
@@ -971,8 +1180,9 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 23
+        "y": 29
       },
+      "id": 15,
       "options": {
         "legend": {
           "calcs": [],
@@ -986,6 +1196,7 @@
           "sort": "desc"
         }
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "rate(mpquic_session_arq_nack_sent{job=\"mpquic-server\"}[$__rate_interval])",
@@ -1050,6 +1261,7 @@
               "mode": "off"
             }
           },
+          "decimals": 0,
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -1063,8 +1275,7 @@
                 "value": 80
               }
             ]
-          },
-          "decimals": 0
+          }
         },
         "overrides": []
       },
@@ -1072,8 +1283,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 31
+        "y": 37
       },
+      "id": 16,
       "options": {
         "legend": {
           "calcs": [],
@@ -1087,6 +1299,7 @@
           "sort": "desc"
         }
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "mpquic_session_adaptive_m{job=\"mpquic-server\"}",
@@ -1162,8 +1375,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 31
+        "y": 37
       },
+      "id": 17,
       "options": {
         "legend": {
           "calcs": [],
@@ -1177,6 +1391,7 @@
           "sort": "desc"
         }
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "increase(mpquic_session_decrypt_fail_total{job=\"mpquic-server\"}[30s])",
@@ -1193,8 +1408,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 45
       },
+      "id": 18,
       "panels": [],
       "title": "Infrastructure",
       "type": "row"
@@ -1206,6 +1422,43 @@
       },
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -1213,181 +1466,12 @@
               {
                 "color": "green",
                 "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 0,
-        "y": 40
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "horizontal",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "targets": [
-        {
-          "expr": "mpquic_session_pipes{job=\"mpquic-server\"}",
-          "legendFormat": "{{session}} ({{peer}})",
-          "refId": "A"
-        }
-      ],
-      "title": "Pipe per session",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "red",
-                  "text": "DOWN"
-                },
-                "1": {
-                  "color": "green",
-                  "text": "UP"
-                }
               },
-              "type": "value"
-            }
-          ],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
               {
                 "color": "red",
-                "value": 0
-              },
-              {
-                "color": "green",
-                "value": 1
+                "value": 80
               }
             ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 8,
-        "y": 40
-      },
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "horizontal",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "value_and_name",
-        "wideLayout": true
-      },
-      "targets": [
-        {
-          "expr": "mpquic_path_alive{job=\"mpquic-client\"}",
-          "legendFormat": "{{path}} ({{bind}})",
-          "refId": "A"
-        }
-      ],
-      "title": "Path status (client)",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 16,
-        "y": 40
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "horizontal",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "targets": [
-        {
-          "expr": "mpquic_session_uptime_seconds{job=\"mpquic-server\"}",
-          "legendFormat": "{{session}} ({{peer}})",
-          "refId": "A"
-        }
-      ],
-      "title": "Session uptime",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
           },
           "unit": "ops"
         },
@@ -1399,6 +1483,7 @@
         "x": 0,
         "y": 46
       },
+      "id": 22,
       "options": {
         "legend": {
           "calcs": [
@@ -1407,13 +1492,16 @@
             "lastNotNull"
           ],
           "displayMode": "table",
-          "placement": "bottom"
+          "placement": "bottom",
+          "showLegend": true
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "multi",
           "sort": "desc"
         }
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "rate(mpquic_path_stripe_fec_recovered{job=\"mpquic-client\"}[$__rate_interval])",
@@ -1431,10 +1519,56 @@
       },
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
           "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
             "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
             "lineWidth": 2,
-            "showPoints": "never"
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
           },
           "unit": "pps"
         },
@@ -1446,6 +1580,7 @@
         "x": 12,
         "y": 46
       },
+      "id": 23,
       "options": {
         "legend": {
           "calcs": [
@@ -1454,13 +1589,16 @@
             "lastNotNull"
           ],
           "displayMode": "table",
-          "placement": "bottom"
+          "placement": "bottom",
+          "showLegend": true
         },
         "tooltip": {
+          "hideZeros": false,
           "mode": "multi",
           "sort": "desc"
         }
       },
+      "pluginVersion": "12.4.1",
       "targets": [
         {
           "expr": "rate(mpquic_path_tx_packets{job=\"mpquic-client\"}[$__rate_interval])",
@@ -1514,11 +1652,13 @@
     ]
   },
   "time": {
-    "from": "now-1h",
+    "from": "now-15m",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "MPQUIC Overview",
+  "uid": "adsnpmk",
+  "version": 3,
   "weekStart": ""
 }
