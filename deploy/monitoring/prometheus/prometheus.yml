@@ -83,11 +83,27 @@ scrape_configs:
           site: "client"
           transport: "quic"
 
-  # ── NOTE: istanze mpq4-6, df5, bk5 ─────────────────────
-  # Se abilitate con metrics_listen: auto, aggiungere qui:
-  # - targets: ["10.200.4.1:9090"]
-  #   labels: { instance_name: "mpq4", role: "client", ... }
-  # - targets: ["10.200.5.1:9090"]
-  #   labels: { instance_name: "mpq5", role: "client", ... }
-  # - targets: ["10.200.6.1:9090"]
-  #   labels: { instance_name: "mpq6", role: "client", ... }
+      # Single-conn datagram tunnels (mpq4-6)
+      - targets:
+          - "10.200.4.1:9090"
+        labels:
+          instance_name: "mpq4"
+          role: "client"
+          site: "client"
+          transport: "datagram"
+
+      - targets:
+          - "10.200.5.1:9090"
+        labels:
+          instance_name: "mpq5"
+          role: "client"
+          site: "client"
+          transport: "datagram"
+
+      - targets:
+          - "10.200.6.1:9090"
+        labels:
+          instance_name: "mpq6"
+          role: "client"
+          site: "client"
+          transport: "datagram"
