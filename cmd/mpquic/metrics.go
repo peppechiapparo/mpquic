@@ -167,10 +167,16 @@ func snapshotServerSessions(ss *stripeServer) []SessionStats {
 	stats := make([]SessionStats, 0, len(ss.sessions))
 	now := time.Now()
 	for _, sess := range ss.sessions {
+		activePipes := 0
+		for _, p := range sess.pipes {
+			if p != nil {
+				activePipes++
+			}
+		}
 		s := SessionStats{
 			SessionID: fmt.Sprintf("%08x", sess.sessionID),
 			PeerIP:    sess.peerIP.String(),
-			Pipes:     sess.registered,
+			Pipes:     activePipes,
 			TxBytes:   atomic.LoadUint64(&sess.txBytes),
 			TxPkts:    atomic.LoadUint64(&sess.txPkts),
 			RxBytes:   atomic.LoadUint64(&sess.rxBytes),
