@@ -265,7 +265,7 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "mpquic_uptime_seconds{job=~\"mpquic-.*\"}",
+          "expr": "mpquic_uptime_seconds",
           "legendFormat": "{{instance_name}} ({{job}})",
           "refId": "A"
         }
@@ -439,7 +439,7 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "mpquic_tx_bytes_total{job=~\"mpquic-.*\"}",
+          "expr": "mpquic_tx_bytes_total",
           "legendFormat": "{{instance_name}} ({{job}})",
           "refId": "A"
         }
@@ -495,7 +495,7 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "mpquic_rx_bytes_total{job=~\"mpquic-.*\"}",
+          "expr": "mpquic_rx_bytes_total",
           "legendFormat": "{{instance_name}} ({{job}})",
           "refId": "A"
         }
