@@ -378,7 +378,7 @@
               }
             ]
           },
-          "unit": "Bps"
+          "unit": "bitsps"
         },
         "overrides": []
       },
@@ -407,7 +407,7 @@
       },
       "targets": [
         {
-          "expr": "irate(mpquic_session_tx_bytes{job=\"mpquic-server\"}[10s])",
+          "expr": "irate(mpquic_session_tx_bytes{job=\"mpquic-server\"}[10s]) * 8",
           "legendFormat": "{{session}} ({{peer}})",
           "refId": "A"
         }
@@ -473,7 +473,7 @@
               }
             ]
           },
-          "unit": "Bps"
+          "unit": "bitsps"
         },
         "overrides": []
       },
@@ -502,7 +502,7 @@
       },
       "targets": [
         {
-          "expr": "irate(mpquic_session_rx_bytes{job=\"mpquic-server\"}[10s])",
+          "expr": "irate(mpquic_session_rx_bytes{job=\"mpquic-server\"}[10s]) * 8",
           "legendFormat": "{{session}} ({{peer}})",
           "refId": "A"
         }
@@ -568,7 +568,7 @@
               }
             ]
           },
-          "unit": "Bps"
+          "unit": "bitsps"
         },
         "overrides": []
       },
@@ -597,7 +597,7 @@
       },
       "targets": [
         {
-          "expr": "irate(mpquic_path_stripe_tx_bytes{job=\"mpquic-client\"}[10s])",
+          "expr": "irate(mpquic_path_stripe_tx_bytes{job=\"mpquic-client\"}[10s]) * 8",
           "legendFormat": "{{path}} ({{bind}})",
           "refId": "A"
         }
@@ -663,7 +663,7 @@
               }
             ]
           },
-          "unit": "Bps"
+          "unit": "bitsps"
         },
         "overrides": []
       },
@@ -692,7 +692,7 @@
       },
       "targets": [
         {
-          "expr": "irate(mpquic_path_stripe_rx_bytes{job=\"mpquic-client\"}[10s])",
+          "expr": "irate(mpquic_path_stripe_rx_bytes{job=\"mpquic-client\"}[10s]) * 8",
           "legendFormat": "{{path}} ({{bind}})",
           "refId": "A"
         }
