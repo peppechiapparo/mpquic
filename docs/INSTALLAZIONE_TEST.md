@@ -1621,3 +1621,317 @@ curl http://10.200.14.1:9090/api/v1/stats
   ```bash
   nft add rule inet filter input ip saddr != 10.200.0.0/16 tcp dport 9090 drop
   ```
+
+---
+
+## 22) Stack di monitoraggio: Prometheus + Grafana (LXC Proxmox)
+
+### 22.1 Architettura
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Proxmox Host (10.10.11.2)                                  │
+│                                                             │
+│  ┌──────────────────┐    ┌──────────────────────────────┐   │
+│  │ CT 201 Prometheus │    │  CT 202 Grafana              │   │
+│  │ 10.10.11.201      │    │  10.10.11.202                │   │
+│  │ :9090 (web+scrape)│◄───│  :3000 (dashboard)           │   │
+│  └────────┬─────────┘    └──────────────────────────────┘   │
+│           │                                                 │
+│           │ scrape ogni 5s                                  │
+│           ▼                                                 │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  VM 200 (10.10.11.100) — Client MPQUIC               │   │
+│  │  Gateway per subnet tunnel 10.200.x.0/24             │   │
+│  │                                                      │   │
+│  │  10.200.17.1:9090  (mp1 client)                      │   │
+│  │  10.200.14.1:9090  (cr1)   10.200.15.1:9090 (cr5)   │   │
+│  │  10.200.16.1:9090  (cr2)   10.200.10.1:9090 (cr3)   │   │
+│  └──────────────────────────────────────────────────────┘   │
+│           │                                                 │
+│           │ tunnel QUIC/stripe                              │
+│           ▼                                                 │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  VPS Server (172.238.232.223)                        │   │
+│  │  10.200.17.254:9090 (mp1 server)                     │   │
+│  └──────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Decisione chiave**: il gateway dei container è VM 200 (`10.10.11.100`), non il Proxmox host.
+Questo permette ai container di raggiungere le subnet tunnel `10.200.x.0/24` senza route statiche.
+
+### 22.2 Prerequisiti
+
+- Proxmox VE 8.x con bridge `vmbr1` su rete `10.10.11.0/24`
+- VM 200 (client MPQUIC) operativa su `10.10.11.100` con IP forwarding abilitato
+- Tunnel MPQUIC attivi con `metrics_listen: auto` nei YAML
+
+### 22.3 Creazione container LXC
+
+I file di deployment sono in `deploy/monitoring/`. Lo script automatizza tutto:
+
+```bash
+# Da Proxmox come root (oppure via SSH)
+ssh root@10.10.11.2
+
+# Scaricare il template Debian 12 (se non presente)
+pveam download local debian-12-standard_12.12-1_amd64.tar.zst
+
+# Creare CT 201 (Prometheus) — 1 vCPU, 512 MB RAM, 8 GB disk (ZFS)
+pct create 201 local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst \
+  --hostname prometheus \
+  --cores 1 --memory 512 --swap 256 \
+  --rootfs local-zfs:8 \
+  --net0 name=eth0,bridge=vmbr1,ip=10.10.11.201/24,gw=10.10.11.100 \
+  --nameserver 10.10.11.2 \
+  --password 'mpquic2025!' \
+  --unprivileged 1 --features nesting=1 --onboot 1
+
+# Creare CT 202 (Grafana) — 1 vCPU, 512 MB RAM, 4 GB disk (ZFS)
+pct create 202 local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst \
+  --hostname grafana \
+  --cores 1 --memory 512 --swap 256 \
+  --rootfs local-zfs:4 \
+  --net0 name=eth0,bridge=vmbr1,ip=10.10.11.202/24,gw=10.10.11.100 \
+  --nameserver 10.10.11.2 \
+  --password 'mpquic2025!' \
+  --unprivileged 1 --features nesting=1 --onboot 1
+
+# Avviare
+pct start 201 && pct start 202
+```
+
+### 22.4 Installazione Prometheus (CT 201)
+
+```bash
+# Dall'host Proxmox
+pct exec 201 -- bash << 'SETUP'
+apt-get update -qq && apt-get install -y -qq curl tar ca-certificates >/dev/null
+
+# Download Prometheus 2.53.4
+cd /tmp
+curl -sSLO https://github.com/prometheus/prometheus/releases/download/v2.53.4/prometheus-2.53.4.linux-amd64.tar.gz
+tar xzf prometheus-2.53.4.linux-amd64.tar.gz
+
+# Installazione
+useradd --system --no-create-home --shell /usr/sbin/nologin prometheus 2>/dev/null || true
+mkdir -p /opt/prometheus /var/lib/prometheus /etc/prometheus
+cp prometheus-2.53.4.linux-amd64/{prometheus,promtool} /opt/prometheus/
+chmod +x /opt/prometheus/{prometheus,promtool}
+chown -R prometheus:prometheus /var/lib/prometheus
+SETUP
+```
+
+**Configurazione** (`/etc/prometheus/prometheus.yml`):
+```yaml
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  scrape_timeout: 4s
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: "mpquic-server"
+    static_configs:
+      - targets: ["10.200.17.254:9090"]
+        labels:
+          instance_name: "mp1"
+          role: "server"
+          site: "vps"
+
+  - job_name: "mpquic-client"
+    static_configs:
+      - targets: ["10.200.17.1:9090"]
+        labels:
+          instance_name: "mp1"
+          role: "client"
+          site: "client"
+          transport: "stripe"
+      - targets: ["10.200.14.1:9090"]
+        labels:
+          instance_name: "cr1"
+          role: "client"
+          site: "client"
+          transport: "quic"
+      - targets: ["10.200.16.1:9090"]
+        labels:
+          instance_name: "cr2"
+          role: "client"
+          site: "client"
+          transport: "quic"
+      - targets: ["10.200.10.1:9090"]
+        labels:
+          instance_name: "cr3"
+          role: "client"
+          site: "client"
+          transport: "quic"
+      - targets: ["10.200.15.1:9090"]
+        labels:
+          instance_name: "cr5"
+          role: "client"
+          site: "client"
+          transport: "quic"
+```
+
+**Systemd unit** (`/etc/systemd/system/prometheus.service`):
+```ini
+[Unit]
+Description=Prometheus Monitoring
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=prometheus
+Group=prometheus
+ExecStart=/opt/prometheus/prometheus \
+    --config.file=/etc/prometheus/prometheus.yml \
+    --storage.tsdb.path=/var/lib/prometheus \
+    --storage.tsdb.retention.time=30d \
+    --web.listen-address=0.0.0.0:9090 \
+    --web.enable-lifecycle \
+    --log.level=info
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+pct exec 201 -- bash -c "systemctl daemon-reload && systemctl enable prometheus && systemctl start prometheus"
+```
+
+**Verifica**:
+```bash
+# Da Proxmox
+pct exec 201 -- systemctl is-active prometheus    # → active
+pct exec 201 -- curl -s http://localhost:9090/api/v1/targets | grep -o '"health":"[^"]*"' | sort | uniq -c
+# Output atteso: N "health":"down"  (tunnel inattivi) + M "health":"up" (tunnel attivi)
+```
+
+### 22.5 Installazione Grafana (CT 202)
+
+```bash
+pct exec 202 -- bash << 'SETUP'
+apt-get update -qq && apt-get install -y -qq curl ca-certificates gnupg >/dev/null
+
+# Repository Grafana APT
+curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o /usr/share/keyrings/grafana-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/grafana-archive-keyring.gpg] https://apt.grafana.com stable main" \
+    > /etc/apt/sources.list.d/grafana.list
+apt-get update -qq && apt-get install -y -qq grafana >/dev/null
+
+# Datasource Prometheus (auto-provisioning)
+mkdir -p /etc/grafana/provisioning/datasources
+cat > /etc/grafana/provisioning/datasources/prometheus.yml << 'DS'
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://10.10.11.201:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: "5s"
+      httpMethod: POST
+DS
+
+# Dashboard provider
+mkdir -p /etc/grafana/provisioning/dashboards /var/lib/grafana/dashboards
+cat > /etc/grafana/provisioning/dashboards/mpquic.yml << 'DPROV'
+apiVersion: 1
+providers:
+  - name: "MPQUIC"
+    orgId: 1
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
+DPROV
+
+systemctl daemon-reload && systemctl enable grafana-server && systemctl start grafana-server
+SETUP
+```
+
+**Dashboard MPQUIC**: copiare il file JSON nel container:
+```bash
+# Da Proxmox — il file è in deploy/monitoring/grafana/mpquic-dashboard.json
+pct push 202 mpquic-dashboard.json /var/lib/grafana/dashboards/mpquic-dashboard.json
+# Oppure:
+pct exec 202 -- systemctl restart grafana-server
+```
+
+**Credenziali Grafana**: `admin` / `mpquic2025!` (da cambiare al primo accesso)
+
+**Verifica**:
+```bash
+# Datasource
+pct exec 202 -- curl -s -u admin:mpquic2025! http://localhost:3000/api/datasources | grep -o '"name":"[^"]*"'
+# → "name":"Prometheus"
+
+# Dashboard
+pct exec 202 -- curl -s -u admin:mpquic2025! http://localhost:3000/api/search?type=dash-db | grep -o '"title":"[^"]*"'
+# → "title":"MPQUIC Overview"
+```
+
+### 22.6 Accesso alle interfacce web
+
+| Servizio | URL | Credenziali |
+|----------|-----|-------------|
+| **Prometheus** | http://10.10.11.201:9090 | — (nessuna auth) |
+| **Prometheus Targets** | http://10.10.11.201:9090/targets | — |
+| **Grafana** | http://10.10.11.202:3000 | `admin` / `mpquic2025!` |
+| **Dashboard MPQUIC** | http://10.10.11.202:3000/d/mpquic-overview | — |
+
+### 22.7 Manutenzione
+
+```bash
+# Aggiungere un nuovo target (es. mpq4)
+# Editare /etc/prometheus/prometheus.yml nel CT 201, poi:
+pct exec 201 -- curl -s -X POST http://localhost:9090/-/reload
+
+# Reload Prometheus senza restart (hot-reload via lifecycle API)
+pct exec 201 -- curl -X POST http://localhost:9090/-/reload
+
+# Verificare scrape status
+pct exec 201 -- curl -s http://localhost:9090/api/v1/targets | python3 -m json.tool
+
+# Backup dati Prometheus (snapshot)
+pct exec 201 -- curl -s -X POST http://localhost:9090/api/v1/admin/tsdb/snapshot
+# Lo snapshot viene salvato in /var/lib/prometheus/snapshots/
+
+# Restart servizi
+pct exec 201 -- systemctl restart prometheus
+pct exec 202 -- systemctl restart grafana-server
+```
+
+### 22.8 Parametri di scraping
+
+| Parametro | Valore | Note |
+|-----------|--------|------|
+| `scrape_interval` | **5s** | Bilancio tra reattività e carico |
+| `scrape_timeout` | 4s | Deve essere < scrape_interval |
+| `evaluation_interval` | 5s | Valutazione regole/alert |
+| `retention` | 30d | Storico dati su disco |
+| Grafana `timeInterval` | 5s | Allineato allo scrape_interval |
+| Dashboard `refresh` | 5s | Auto-refresh pannelli |
+
+### 22.9 Riepilogo infrastruttura monitoring
+
+| CTID | Hostname | IP | Servizio | Storage | RAM |
+|------|----------|------|----------|---------|-----|
+| 201 | prometheus | 10.10.11.201 | Prometheus 2.53.4 | local-zfs:8GB | 512 MB |
+| 202 | grafana | 10.10.11.202 | Grafana OSS | local-zfs:4GB | 512 MB |
+
+Gateway per entrambi: `10.10.11.100` (VM 200 — client MPQUIC)

@@ -1,6 +1,6 @@
 # Roadmap implementazione MPQUIC
 
-*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-13*
+*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2025-07-15*
 
 ### Nota manutenzione (2026-03-01)
 - Cleanup diagnostico completato in `cmd/mpquic/main.go` (commit `c15b235`):
@@ -483,11 +483,11 @@ Nuovo layer di trasporto che sostituisce QUIC sulle connettività Starlink:
 ┌─────────────────────────────────────────────────────────────────────┐
 │ Stripe Transport (per link Starlink)                                │
 │                                                                     │
-│  TUN reader ──▶ FEC encoder (K data + M parity shards)             │
+│  TUN reader ──▶ FEC encoder (K data + M parity shards)              │
 │              ──▶ round-robin across N UDP sockets                   │
-│              ──▶ each socket = independent Starlink session          │
+│              ──▶ each socket = independent Starlink session         │
 │                                                                     │
-│  N UDP sockets ──▶ FEC decoder (reconstruct if K of K+M received)  │
+│  N UDP sockets ──▶ FEC decoder (reconstruct if K of K+M received)   │
 │                ──▶ TUN writer                                       │
 │                                                                     │
 │  NO congestion control per pipe (rate limited by TCP inside tunnel) │
@@ -527,9 +527,9 @@ Il stripe transport è **solo per connettività Starlink**. Le altre connettivit
 ┌────────────────────────────────────────────────────────────────┐
 │ mp1 — multipath tunnel                                         │
 │                                                                │
-│  wan5 (Starlink enp7s7) ─── transport: stripe ─── 4 UDP pipes │
-│  wan6 (Starlink enp7s8) ─── transport: stripe ─── 4 UDP pipes │
-│  wan4 (Fibra enp7s6)    ─── transport: quic   ─── 1 QUIC conn │
+│  wan5 (Starlink enp7s7) ─── transport: stripe ─── 4 UDP pipes  │
+│  wan6 (Starlink enp7s8) ─── transport: stripe ─── 4 UDP pipes  │
+│  wan4 (Fibra enp7s6)    ─── transport: quic   ─── 1 QUIC conn  │
 │                                                                │
 │  multipath_policy: balanced (round-robin across all paths)     │
 └────────────────────────────────────────────────────────────────┘
@@ -1285,7 +1285,7 @@ diventa il fattore limitante.
 
 ---
 
-## Fase 5 — Metriche strutturate e Osservabilità 🔄 IN CORSO
+## Fase 5 — Metriche strutturate e Osservabilità 🔄 IN CORSO (5.1 ✅)
 
 **Obiettivo (§20 PDF)**: metriche machine-readable per O&M e portale cliente.
 
@@ -1314,50 +1314,104 @@ il software non è più il bottleneck. Le ottimizzazioni residue di protocollo
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Layer 3: Consumer (futuro)                             │
-│  ┌───────────┐  ┌───────────┐  ┌─────────────────────┐ │
-│  │  Grafana   │  │ Alerting  │  │  AI/ML Engine       │ │
-│  │ Dashboard  │  │ (rules)   │  │  (Quality on Demand)│ │
-│  └─────┬─────┘  └─────┬─────┘  └──────────┬──────────┘ │
-│        │              │                    │             │
-├────────┼──────────────┼────────────────────┼────────────┤
+│  ┌───────────┐  ┌───────────┐  ┌─────────────────────┐  │
+│  │  Grafana  │  │ Alerting  │  │  AI/ML Engine       │  │
+│  │ Dashboard │  │ (rules)   │  │  (Quality on Demand)│  │
+│  └─────┬─────┘  └─────┬─────┘  └──────────┬──────────┘  │
+│        │              │                   │             │
+├────────┼──────────────┼───────────────────┼─────────────┤
 │  Layer 2: Export                                        │
 │  ┌─────────────────────────────────────────────────┐    │
-│  │  GET /metrics  (Prometheus text format)          │    │
-│  │  GET /api/v1/stats  (JSON, per portale cliente)  │    │
+│  │  GET /metrics  (Prometheus text format)         │    │
+│  │  GET /api/v1/stats  (JSON, per portale cliente) │    │
 │  └─────────────────────────────────────────────────┘    │
 │                                                         │
 ├─────────────────────────────────────────────────────────┤
 │  Layer 1: Collection (nello stripe engine)              │
 │  ┌──────────────────────────────────────────────────┐   │
-│  │  atomic counters + ring buffer per-session        │   │
-│  │  • tx_bytes, rx_bytes, tx_pkts, rx_pkts           │   │
+│  │  atomic counters + ring buffer per-session       │   │
+│  │  • tx_bytes, rx_bytes, tx_pkts, rx_pkts          │   │
 │  │  • rtt_min, rtt_avg, rtt_max (EMA)               │   │
-│  │  • loss_rate (sliding window 10s)                 │   │
-│  │  • fec_encoded, fec_recovered, arq_nack_sent      │   │
-│  │  • retransmit_count, dup_count                    │   │
-│  │  • session_uptime, reconnections                  │   │
-│  │  • per-pipe: throughput, rtt, loss                │   │
+│  │  • loss_rate (sliding window 10s)                │   │
+│  │  • fec_encoded, fec_recovered, arq_nack_sent     │   │
+│  │  • retransmit_count, dup_count                   │   │
+│  │  • session_uptime, reconnections                 │   │
+│  │  • per-pipe: throughput, rtt, loss               │   │
 │  └──────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ### Piano implementativo
 
-**Layer 1 — Collection** (3-4 giorni):
-- Contatori atomici (`atomic.Uint64`) nel hot path — zero-alloc, zero-lock
-- Per-session: tx/rx bytes/pkts, FEC encode/recover, ARQ nack/retransmit, dup
-- Per-pipe: throughput, RTT (EMA), loss rate (sliding window 10s)
-- Globale: uptime, sessioni attive, riconnessioni
+**Layer 1 — Collection** ✅ COMPLETATO (v4.2, commit `9cfebdd`):
+- Contatori atomici (`sync/atomic`) nel hot path — zero-alloc, zero-lock
+- Per-session (server): tx/rx bytes/pkts, FEC encode/recover, ARQ nack/retransmit, dup, loss rate, decrypt failures
+- Per-path (client): tx/rx pkts, stripe tx/rx bytes/pkts, stripe FEC recovered, alive status
+- Globale: uptime, totali tx/rx aggregati
 - Nessun impatto performance misurabile (solo `atomic.Add`)
 
-**Layer 2 — Export** (1-2 giorni):
-- Endpoint HTTP `/metrics` (Prometheus text format) sullo stesso server pprof (`:6060`)
+**Layer 2 — Export** ✅ COMPLETATO (v4.2, commit `9cfebdd`):
+- Endpoint HTTP `/metrics` (Prometheus text exposition format) su `<tunnel_ip>:9090`
 - Endpoint HTTP `/api/v1/stats` (JSON strutturato, per portale cliente)
-- Scrape-ready per Prometheus/Grafana senza toccare il binario
+- Server metriche dedicato bound all'IP del tunnel (non esposto a Internet)
+- Scrape-ready per Prometheus/Grafana — operativo su tutte le istanze attive
+- Configurazione YAML: `metrics_listen: auto`
+- Fix: `startMetricsServer()` spostato in `main()` per coprire tutti i 4 code path
+
+> **Documentazione completa**: vedi `docs/METRICS.md` per catalogo metriche,
+> struttura JSON, label Prometheus, query PromQL e pannelli Grafana suggeriti.
+
+### Fase 5.2 — Stack di monitoraggio Prometheus + Grafana 🔄 IN CORSO
+
+**Obiettivo**: deployment di Prometheus e Grafana su container LXC Proxmox
+per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
+
+**Architettura target**:
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Proxmox Host                                               │
+│                                                             │
+│  ┌──────────────────┐    ┌──────────────────────────────┐   │
+│  │ LXC Prometheus   │    │  LXC Grafana                 │   │
+│  │ (CT 201)         │    │  (CT 202)                    │   │
+│  │                  │    │                              │   │
+│  │ prometheus:9091  │◄───│  grafana:3000                │   │
+│  │                  │    │  datasource: prometheus:9091 │   │
+│  │ scrape targets:  │    │  dashboard: MPQUIC Overview  │   │
+│  │  10.200.x.y:9090 │    │                              │   │
+│  └──────────────────┘    └──────────────────────────────┘   │
+│         │                                                   │
+│         │  scrape ogni 15s via route tunnel                  │
+│         ▼                                                   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  VM 200 (Client MPQUIC)                              │   │
+│  │  10.200.17.1:9090  (mp1 client)                      │   │
+│  │  10.200.14.1:9090  (cr1 client)                      │   │
+│  │  10.200.15.1:9090  (cr5/df5/bk5 client)              │   │
+│  │  10.200.16.1:9090  (cr2 client)                      │   │
+│  │  10.200.10.1:9090  (cr3 client)                      │   │
+│  └──────────────────────────────────────────────────────┘   │
+│         ▲                                                   │
+│         │  scrape via tunnel route                           │
+│         │                                                   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  VPS Server (172.238.232.223)                        │   │
+│  │  10.200.17.254:9090  (mp1 server)                    │   │
+│  │  ... altri server endpoint                           │   │
+│  └──────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Piano deployment**:
+1. Creare LXC Prometheus (CT 201) su Proxmox — Debian 12, 1 vCPU, 512 MB RAM, 8 GB disk
+2. Creare LXC Grafana (CT 202) su Proxmox — Debian 12, 1 vCPU, 512 MB RAM, 8 GB disk
+3. Configurare routing: i container devono raggiungere le subnet 10.200.x.0/24 via VM 200
+4. Installare e configurare Prometheus con scrape targets MPQUIC
+5. Installare Grafana, collegare datasource Prometheus
+6. Creare dashboard MPQUIC con pannelli: throughput, loss, FEC, ARQ, path status
+7. Configurare alerting rules (loss > soglia, tunnel down, decrypt failures)
 
 **Layer 3 — Consumer** (futuro, Fase 6):
-- Dashboard Grafana template
-- Alerting (loss > soglia, tunnel down prolungato)
 - AI/ML Engine: legge telemetria → produce policy → applica via Control API
 - "Quality on Demand" come contratto API formalizzato
 

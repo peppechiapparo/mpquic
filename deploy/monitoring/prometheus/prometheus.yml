@@ -1,0 +1,93 @@
+# /etc/prometheus/prometheus.yml
+# Configurazione Prometheus per scraping metriche MPQUIC
+#
+# Deployment: CT 201 (10.10.11.201)
+# Gateway: VM 200 (10.10.11.100) — instrada verso le subnet tunnel 10.200.x.0/24
+# Nessuna route statica aggiuntiva necessaria nei container.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  scrape_timeout: 4s
+
+# ── Alerting (opzionale, per futuro Alertmanager) ────────
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["localhost:9093"]
+
+# ── Rule files (opzionale) ────────────────────────────────
+# rule_files:
+#   - "/etc/prometheus/rules/*.yml"
+
+scrape_configs:
+  # ── Prometheus self-monitoring ──────────────────────────
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ── MPQUIC Server (VPS 172.238.232.223) ─────────────────
+  # Il server multipath mp1 espone metriche sull'IP tunnel .254
+  - job_name: "mpquic-server"
+    static_configs:
+      - targets:
+          - "10.200.17.254:9090"
+        labels:
+          instance_name: "mp1"
+          role: "server"
+          site: "vps"
+
+  # ── MPQUIC Client (VM 200, Proxmox) ────────────────────
+  # Ogni istanza client espone metriche sull'IP tunnel .1
+  - job_name: "mpquic-client"
+    static_configs:
+      # Multipath bonding (WAN5+WAN6)
+      - targets:
+          - "10.200.17.1:9090"
+        labels:
+          instance_name: "mp1"
+          role: "client"
+          site: "client"
+          transport: "stripe"
+
+      # Single-conn QUIC reliable
+      - targets:
+          - "10.200.14.1:9090"
+        labels:
+          instance_name: "cr1"
+          role: "client"
+          site: "client"
+          transport: "quic"
+
+      - targets:
+          - "10.200.16.1:9090"
+        labels:
+          instance_name: "cr2"
+          role: "client"
+          site: "client"
+          transport: "quic"
+
+      - targets:
+          - "10.200.10.1:9090"
+        labels:
+          instance_name: "cr3"
+          role: "client"
+          site: "client"
+          transport: "quic"
+
+      - targets:
+          - "10.200.15.1:9090"
+        labels:
+          instance_name: "cr5"
+          role: "client"
+          site: "client"
+          transport: "quic"
+
+  # ── NOTE: istanze mpq4-6, df5, bk5 ─────────────────────
+  # Se abilitate con metrics_listen: auto, aggiungere qui:
+  # - targets: ["10.200.4.1:9090"]
+  #   labels: { instance_name: "mpq4", role: "client", ... }
+  # - targets: ["10.200.5.1:9090"]
+  #   labels: { instance_name: "mpq5", role: "client", ... }
+  # - targets: ["10.200.6.1:9090"]
+  #   labels: { instance_name: "mpq6", role: "client", ... }

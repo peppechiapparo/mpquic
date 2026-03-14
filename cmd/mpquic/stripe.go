@@ -1135,11 +1135,11 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 // computeRxLoss computes the client-side RX loss rate (loss on data FROM server)
 // over the last keepalive window. Returns loss percentage 0-100.
 //
-// Loss is measured only when the peer sends with M>0 (FEC groups), using the
-// ratio of groups that needed reconstruction vs total groups. When the peer
-// sends with M=0 (no FEC), we cannot reliably detect loss from sequence numbers
-// because txSeq is shared between M=0/M>0 modes and creates false gaps after
-// mode transitions. In that case we report 0% (safe: no parity to add).
+// Two detection modes:
+//   - M>0 (FEC active): ratio of groups that needed reconstruction vs total groups.
+//   - M=0 (no FEC): sequence-gap based — compare highest seq seen vs packets received.
+//     This is essential for adaptive FEC bootstrap: without it, M=0→M>0 transition
+//     never happens because loss is never detected (chicken-and-egg problem).
 func (scc *stripeClientConn) computeRxLoss() uint8 {
 	fecRecov := atomic.LoadUint64(&scc.fecRecov)
 	fecGroups := atomic.LoadUint64(&scc.rxFECGroups)
@@ -1150,8 +1150,30 @@ func (scc *stripeClientConn) computeRxLoss() uint8 {
 	scc.rxLossPrevFECRecov = fecRecov
 	scc.rxLossPrevFECGroups = fecGroups
 
+	// Prefer FEC-group based loss when available (more accurate)
 	if dFECGroups > 10 {
 		rate := dFECRecov * 100 / dFECGroups
+		if rate > 100 {
+			rate = 100
+		}
+		return uint8(rate)
+	}
+
+	// M=0 fallback: sequence-gap based loss detection.
+	// expected = delta in highest seq seen, received = delta in direct-delivered packets.
+	seqHigh := atomic.LoadUint64(&scc.rxSeqHighest)
+	directCnt := atomic.LoadUint64(&scc.rxDirectCount)
+
+	dSeq := seqHigh - scc.rxLossPrevSeqHigh
+	dRecv := directCnt - scc.rxLossPrevDirectCnt
+
+	scc.rxLossPrevSeqHigh = seqHigh
+	scc.rxLossPrevDirectCnt = directCnt
+
+	// Need a minimum sample size to avoid false positives from jitter/reordering
+	if dSeq > 20 && dRecv <= dSeq {
+		lost := dSeq - dRecv
+		rate := lost * 100 / dSeq
 		if rate > 100 {
 			rate = 100
 		}
@@ -2354,8 +2376,11 @@ func (ss *stripeServer) deliverGroupToTUN(sess *stripeSession, grp *fecGroup) {
 // computeSessionRxLoss computes server-side RX loss for a session (loss on data FROM client).
 // Returns loss percentage 0-100.
 //
-// Only measurable when client sends with M>0 (FEC groups). When M=0, we report 0%
-// (sequence-based detection is unreliable due to shared txSeq across M modes).
+// Two detection modes:
+//   - M>0 (FEC active): ratio of groups that needed reconstruction vs total groups.
+//   - M=0 (no FEC): sequence-gap based — compare highest seq seen vs packets received.
+//     This is essential for adaptive FEC bootstrap: without it, M=0→M>0 transition
+//     never happens because loss is never detected (chicken-and-egg problem).
 func (ss *stripeServer) computeSessionRxLoss(sess *stripeSession) uint8 {
 	fecRecov := atomic.LoadUint64(&sess.rxFECRecov)
 	fecGroups := atomic.LoadUint64(&sess.rxFECGroups)
@@ -2366,8 +2391,28 @@ func (ss *stripeServer) computeSessionRxLoss(sess *stripeSession) uint8 {
 	sess.rxLossPrevFECRecov = fecRecov
 	sess.rxLossPrevFECGroups = fecGroups
 
+	// Prefer FEC-group based loss when available (more accurate)
 	if dFECGroups > 10 {
 		rate := dFECRecov * 100 / dFECGroups
+		if rate > 100 {
+			rate = 100
+		}
+		return uint8(rate)
+	}
+
+	// M=0 fallback: sequence-gap based loss detection.
+	seqHigh := atomic.LoadUint64(&sess.rxSeqHighest)
+	directCnt := atomic.LoadUint64(&sess.rxDirectCount)
+
+	dSeq := seqHigh - sess.rxLossPrevSeqHigh
+	dRecv := directCnt - sess.rxLossPrevDirectCnt
+
+	sess.rxLossPrevSeqHigh = seqHigh
+	sess.rxLossPrevDirectCnt = directCnt
+
+	if dSeq > 20 && dRecv <= dSeq {
+		lost := dSeq - dRecv
+		rate := lost * 100 / dSeq
 		if rate > 100 {
 			rate = 100
 		}
