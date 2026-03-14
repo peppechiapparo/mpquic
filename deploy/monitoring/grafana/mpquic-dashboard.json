@@ -407,7 +407,7 @@
       },
       "targets": [
         {
-          "expr": "rate(mpquic_session_tx_bytes{job=\"mpquic-server\"}[10s])",
+          "expr": "rate(mpquic_session_tx_bytes{job=\"mpquic-server\"}[$__rate_interval])",
           "legendFormat": "{{session}} ({{peer}})",
           "refId": "A"
         }
@@ -502,7 +502,7 @@
       },
       "targets": [
         {
-          "expr": "rate(mpquic_session_rx_bytes{job=\"mpquic-server\"}[10s])",
+          "expr": "rate(mpquic_session_rx_bytes{job=\"mpquic-server\"}[$__rate_interval])",
           "legendFormat": "{{session}} ({{peer}})",
           "refId": "A"
         }
@@ -597,7 +597,7 @@
       },
       "targets": [
         {
-          "expr": "rate(mpquic_path_stripe_tx_bytes{job=\"mpquic-client\"}[10s])",
+          "expr": "rate(mpquic_path_stripe_tx_bytes{job=\"mpquic-client\"}[$__rate_interval])",
           "legendFormat": "{{path}} ({{bind}})",
           "refId": "A"
         }
@@ -692,7 +692,7 @@
       },
       "targets": [
         {
-          "expr": "rate(mpquic_path_stripe_rx_bytes{job=\"mpquic-client\"}[10s])",
+          "expr": "rate(mpquic_path_stripe_rx_bytes{job=\"mpquic-client\"}[$__rate_interval])",
           "legendFormat": "{{path}} ({{bind}})",
           "refId": "A"
         }
@@ -892,12 +892,12 @@
       },
       "targets": [
         {
-          "expr": "rate(mpquic_session_fec_recovered{job=\"mpquic-server\"}[10s])",
+          "expr": "rate(mpquic_session_fec_recovered{job=\"mpquic-server\"}[$__rate_interval])",
           "legendFormat": "recovered {{session}}",
           "refId": "A"
         },
         {
-          "expr": "rate(mpquic_session_fec_encoded{job=\"mpquic-server\"}[10s])",
+          "expr": "rate(mpquic_session_fec_encoded{job=\"mpquic-server\"}[$__rate_interval])",
           "legendFormat": "encoded {{session}}",
           "refId": "B"
         }
@@ -988,17 +988,17 @@
       },
       "targets": [
         {
-          "expr": "rate(mpquic_session_arq_nack_sent{job=\"mpquic-server\"}[10s])",
+          "expr": "rate(mpquic_session_arq_nack_sent{job=\"mpquic-server\"}[$__rate_interval])",
           "legendFormat": "nack {{session}}",
           "refId": "A"
         },
         {
-          "expr": "rate(mpquic_session_arq_retx_recv{job=\"mpquic-server\"}[10s])",
+          "expr": "rate(mpquic_session_arq_retx_recv{job=\"mpquic-server\"}[$__rate_interval])",
           "legendFormat": "retx {{session}}",
           "refId": "B"
         },
         {
-          "expr": "rate(mpquic_session_arq_dup_filtered{job=\"mpquic-server\"}[10s])",
+          "expr": "rate(mpquic_session_arq_dup_filtered{job=\"mpquic-server\"}[$__rate_interval])",
           "legendFormat": "dup {{session}}",
           "refId": "C"
         }
@@ -1415,7 +1415,7 @@
       },
       "targets": [
         {
-          "expr": "rate(mpquic_path_stripe_fec_recovered{job=\"mpquic-client\"}[10s])",
+          "expr": "rate(mpquic_path_stripe_fec_recovered{job=\"mpquic-client\"}[$__rate_interval])",
           "legendFormat": "{{path}} ({{bind}})",
           "refId": "A"
         }
@@ -1462,12 +1462,12 @@
       },
       "targets": [
         {
-          "expr": "rate(mpquic_path_tx_packets{job=\"mpquic-client\"}[10s])",
+          "expr": "rate(mpquic_path_tx_packets{job=\"mpquic-client\"}[$__rate_interval])",
           "legendFormat": "TX {{path}}",
           "refId": "A"
         },
         {
-          "expr": "rate(mpquic_path_rx_packets{job=\"mpquic-client\"}[10s])",
+          "expr": "rate(mpquic_path_rx_packets{job=\"mpquic-client\"}[$__rate_interval])",
           "legendFormat": "RX {{path}}",
           "refId": "B"
         }
