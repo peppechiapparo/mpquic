@@ -259,6 +259,10 @@
           "values": false
         },
         "showPercentChange": false,
+        "text": {
+          "titleSize": 12,
+          "valueSize": 18
+        },
         "textMode": "auto",
         "wideLayout": true
       },
@@ -434,6 +438,10 @@
           "values": false
         },
         "showPercentChange": false,
+        "text": {
+          "titleSize": 12,
+          "valueSize": 18
+        },
         "textMode": "auto",
         "wideLayout": true
       },
@@ -491,6 +499,10 @@
           "values": false
         },
         "showPercentChange": false,
+        "text": {
+          "titleSize": 12,
+          "valueSize": 18
+        },
         "textMode": "auto",
         "wideLayout": true
       },
