@@ -368,10 +368,10 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "mpquic_session_uptime_seconds{session=\"%s\",peer=\"%s\"} %f\n", s.SessionID, s.PeerIP, s.UptimeSec)
 		}
 
-		fmt.Fprintf(w, "\n# HELP mpquic_session_decrypt_fail Decryption failures per session.\n")
-		fmt.Fprintf(w, "# TYPE mpquic_session_decrypt_fail counter\n")
+		fmt.Fprintf(w, "\n# HELP mpquic_session_decrypt_fail_total Decryption failures per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_decrypt_fail_total counter\n")
 		for _, s := range gs.Sessions {
-			fmt.Fprintf(w, "mpquic_session_decrypt_fail{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.DecryptFail)
+			fmt.Fprintf(w, "mpquic_session_decrypt_fail_total{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.DecryptFail)
 		}
 		fmt.Fprintln(w)
 	}

@@ -1179,7 +1179,7 @@
       },
       "targets": [
         {
-          "expr": "increase(mpquic_session_decrypt_fail{job=\"mpquic-server\"}[30s])",
+          "expr": "increase(mpquic_session_decrypt_fail_total{job=\"mpquic-server\"}[30s])",
           "legendFormat": "{{session}} ({{peer}})",
           "refId": "A"
         }
