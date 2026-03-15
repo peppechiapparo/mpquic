@@ -84,7 +84,7 @@ MAC/rekey, eliminati i parametri `stripe_auth_key` e `stripe_rekey_seconds`.
 | **1** | QUIC tunnels multi-link 1:1 | Multi-link | **✅ DONE** |
 | **2** | Traffico distribuito per applicazione, non per pacchetto | Multi-tunnel per link | **🔄 IN PROGRESS** (2.1-2.4 ✅, 2.5 🔄 deploy OK, OpenWrt net+fw ✅, mwan3 pending) |
 | **3** | BBR + Reliable Transport | CC per tunnel + transport mode | **✅ DONE** (BBRv1, reliable streams, benchmarkato) |
-| **4** | Bonding, Backup, Duplicazione | Multi-path per tunnel | **✅ DONE** |
+| **4** | Bonding, Backup, Duplicazione | Multi-path per tunnel | **✅ DONE** (4b ottimizzazioni ✅, 4c stabilizzazione 🔄) |
 | **5** | AI/ML-Ready (Quality on Demand) | Decision layer | **⬜ NOT STARTED** |
 
 ---
@@ -1281,11 +1281,11 @@ diventa il fattore limitante.
 ### Piano operativo ottimizzazioni (aggiornato post-profiling)
 
 1. ~~**Step 4.19 — pprof profiling**~~ ✅ Completato — bottleneck identificati: TX syscall 45%, TUN write 23%
-2. **Step 4.20 — Batch TX (sendmmsg)** → attacca il 45% del tempo CPU (priorità massima)
+2. ~~**Step 4.20 — Batch TX (sendmmsg)**~~ ✅ Completato — CPU -17%, picco 434 Mbps
 3. ~~**Step 4.21 — tunWriter batch-drain + reduce mutex**~~ ✅ Completato — CPU -19pp (108%), picco 458 Mbps
-4. ~~**Step 4.23 — TUN Multiqueue (IFF_MULTI_QUEUE)**~~ ✅ Completato — per-session TUN fd
+4. ~~**Step 4.23 — TUN Multiqueue (IFF_MULTI_QUEUE)**~~ ✅ Completato — per-session TUN fd, picco 499 Mbps
 5. **Step 4.22 — UDP GRO** → deprioritizzato (RX path solo 5.2%)
-5. **Step 4.15 — Sliding Window FEC** → se loss recovery diventa il fattore limitante
+6. **Step 4.15 — Sliding Window FEC** → evoluto in Step 4.26 (XOR parity)
 
 ### Done criteria Fase 4b (aggiornati)
 - [x] UDP Stripe + FEC transport implementato e deployato
@@ -1303,8 +1303,147 @@ diventa il fattore limitante.
 - [x] tunWriter batch-drain + reduce mutex (Step 4.21) — **CPU -19pp** (108%), picco 458 Mbps
 - [x] TUN Multiqueue IFF_MULTI_QUEUE (Step 4.23) — **picco 499 Mbps** (record), 374 Mbps media 30s, CPU +8pp (116%)
 - [ ] UDP GRO per RX (Step 4.22) — deprioritizzato
-- [ ] Sliding window FEC (Step 4.15)
 - [ ] Throughput ≥ 400 Mbps su dual Starlink — **picco 499 raggiunto**, media 374 (30s buono)
+
+---
+
+## Fase 4c — Stabilizzazione Data Plane: da picco a media ≥400 Mbps 🔄 IN CORSO
+
+**Versione base**: v4.3 (tag `v4.3`, commit `1a87429`)
+
+**Obiettivo**: trasformare il picco dimostrato (499 Mbps) in media stabile ≥400 Mbps
+su finestre 30-60s. Il bottleneck non è più capacità del codice né del link, ma
+**burstiness e variabilità del sender/receiver** che deprimono la media.
+
+### Valutazione strategica (2026-03-15)
+
+Con v4.3 il throughput ha raggiunto 499 Mbps di picco e 374 Mbps di media (30s buono).
+Il software può performare ben oltre il target, ma la media è 25% sotto il picco.
+L'analisi mostra che le cause principali sono:
+
+1. **Micro-burstiness TX**: `sendmmsg` riduce syscall ma emette batch in burst
+   → code switch congestionate → NACK indotti dal software
+2. **Assenza di pacing**: `time.Sleep` fallito (Step 4.12), nessun sostituto kernel-level
+3. **FEC overhead nei transitori**: RS block-based con padding 26%+ attivo solo >2% loss
+   → nei momenti di beam handoff Starlink il recovery è lento
+
+| Step | Intervento | Target | Effort | Impatto atteso |
+|------|-----------|--------|--------|---------------|
+| **4.24** | UDP GSO (`UDP_SEGMENT`) | Ridurre overhead/pkt, stabilizzare TX | 1 giorno | Media +5-10% |
+| **4.25** | Kernel pacing `SO_TXTIME` + `sch_fq` | Eliminare burstiness software | 1.5 giorni | Media +5-15% |
+| **4.26** | Sliding Window FEC (XOR parity, N=8) | Recovery burst loss senza overhead RS | 2 giorni | Ridurre retransmit in transitorio |
+| **Target** | **Media ≥ 400 Mbps** su 30-60s dual Starlink | | | |
+
+### Ottimizzazione valutata e scartata (Fase 4c)
+
+| Ottimizzazione | Motivo esclusione |
+|---|---|
+| `SO_REUSEPORT` + per-core sharding | Architettura ha già 24 socket indipendenti + TUN multiqueue per-session. Profiling non mostra lock contention nel top 40. Go scheduler non supporta affinity statica. Guadagno atteso <2%. |
+
+### Step 4.24 — UDP GSO (`UDP_SEGMENT`) nel TX path ⬜ DA IMPLEMENTARE
+
+**Obiettivo**: sostituire `sendmmsg` (N syscall per batch) con `UDP_SEGMENT`
+(1 syscall per batch, kernel segmenta) sul TX path. Riduce overhead per pacchetto
+e stabilizza il ritmo di emissione delegando segmentazione al kernel.
+
+**Perché GSO dopo sendmmsg**:
+- `sendmmsg` riduce syscall da N a N/8, ma ogni datagramma è ancora costruito e
+  passato singolarmente al kernel
+- `UDP_SEGMENT` passa un buffer grande e lascia al kernel la segmentazione in
+  datagrammi di `segment_size` byte — 1 sola traversata dello stack di rete
+- Cloudflare e quic-go usano `UDP_SEGMENT` per trasmissione UDP ad alto rate
+- Il codice GSO esiste già in `local-quic-go/sys_conn_helper_linux.go`
+  (`appendUDPSegmentSizeMsg`, `isGSOEnabled`, `isGSOError`)
+
+**Vincolo architetturale**: GSO richiede stessa destinazione per tutti i segmenti
+in un singolo `sendmsg`. Impatto:
+- **Client TX**: GSO puro — ogni pipe ha destinazione fissa (server endpoint)
+- **Server TX**: raggruppare pacchetti per destinazione → GSO per-gruppo,
+  fallback `sendmmsg` per pacchetti isolati
+
+**Implementazione pianificata**:
+1. `gsoSendDatagram()`: accumula shard criptati in buffer contiguo (max 64KB)
+2. Calcola `segment_size` = dimensione shard fissa (1402 bytes)
+3. `sendmsg()` con ancillary `UDP_SEGMENT` = segment_size
+4. Fallback: se `isGSOError()` → disable GSO, torna a `sendmmsg`
+5. Flag runtime `--disable-gso` per A/B test
+6. Server: `gsoTxGroups` — raggruppa batch per `*net.UDPAddr` prima di GSO
+
+**Effort stimato**: ~1 giorno (plumbing esiste in local-quic-go).
+
+### Step 4.25 — Kernel Pacing con `SO_TXTIME` + `sch_fq` ⬜ DA IMPLEMENTARE
+
+**Obiettivo**: eliminare la burstiness software delegando il pacing al kernel.
+Invece di emettere batch in burst e sperare che la NIC li distanzi, si assegna
+a ogni pacchetto un **timestamp di partenza** (EDT — Earliest Departure Time)
+e il qdisc `sch_fq` lo trattiene fino a quel momento.
+
+**Perché kernel pacing dopo Step 4.12 (fallito)**:
+- Step 4.12 usava `time.Sleep` in Go → granularità ~1ms, a 400 Mbps serve ~28µs
+  inter-packet gap per 1402B shard. Impossibile con timer userspace.
+- `SO_TXTIME` + `sch_fq` ha granularità nanosecondo nel kernel, è lo stesso
+  approccio usato da implementazioni QUIC moderne (Google, Cloudflare)
+- Il pacing riduce burstiness software → meno congestione → meno NACK
+  self-inflicted → throughput netto più stabile
+
+**Aspettativa calibrata**: la variabilità dominante è Starlink (beam handoff,
+scheduling LEO), non software. Il pacing attacca solo la componente software.
+Stima: media +5-15% (da ~374 a ~400-430 Mbps), non miracolo.
+
+**Implementazione pianificata**:
+1. Setup `sch_fq` su interfacce WAN: `tc qdisc replace dev enp7sX root fq`
+2. Socket option: `setsockopt(fd, SOL_SOCKET, SO_TXTIME, ...)` con
+   `clockid=CLOCK_MONOTONIC`, `flags=0` (no error reporting)
+3. Per ogni `sendmsg`: ancillary `SCM_TXTIME` con timestamp calcolato:
+   `txtime = max(now, last_txtime + inter_packet_gap)`
+4. `inter_packet_gap` calcolato da target rate: `pkt_size * 8 / target_bps * 1e9` ns
+5. Target rate iniziale = banda stimata per pipe (da telemetria Fase 5)
+6. Flag `--pacing` per enable/disable runtime (default: enabled)
+7. Fallback: se `SO_TXTIME` non supportato, emissione senza pacing
+
+**Prerequisiti deploy**:
+- `sch_fq` qdisc attivo sulle WAN (client + server VPS)
+- Kernel ≥4.19 (supporto `SO_TXTIME`) — OK su Debian 12 (6.1) e Ubuntu 24.04 (6.8)
+
+**Effort stimato**: ~1.5 giorni (syscall Cmsghdr manuali in Go + tc setup).
+
+### Step 4.26 — Sliding Window FEC (XOR parity) ⬜ DA IMPLEMENTARE
+
+**Obiettivo**: sostituire il FEC Reed-Solomon block-based (Step 4.8, heavyweight) con
+un FEC minimal basato su XOR parity su finestra scorrevole. Copre il caso comune
+(1 loss per finestra) con overhead minimo, lasciando NACK per loss multipli.
+
+**Perché XOR parity invece di RS evoluto (Step 4.15)**:
+- RS block-based richiede accumulo di K shard + padding → latenza di gruppo
+- XOR su finestra scorrevole: parity = XOR degli ultimi N shard, emessa ogni N
+- Overhead: 1/N (es. N=8 → 12.5%) vs RS K=6 M=2 (33%)
+- Recovery: copre esattamente 1 loss su N. Per >1, NACK copre già
+- Nessun padding: ogni shard mantiene la sua dimensione originale
+- Compatibile con FEC adattivo M=0: parity calcolata ma emessa solo se M>0
+
+**Perché è coerente con l'architettura**:
+- NACK (Step 4.13) gestisce i casi rari (burst loss >1) con retransmit
+- XOR copre il caso frequente (single loss, beam handoff) senza latenza
+- Hybrid ARQ: FEC lightweight per le perdite comuni, ARQ per il resto
+- Transizione trasparente: il receiver distingue shard data da shard parity
+  tramite flag nel header
+
+**Implementazione pianificata**:
+1. Sender: ring di N shard, XOR running calcolato incrementalmente
+2. Ogni N shard emessi, emetti 1 shard parity (XOR dei precedenti N)
+3. Receiver: se manca 1 shard su N+1, XOR degli N presenti = shard mancante
+4. Se mancano >1: NACK come oggi
+5. Parametro `stripe_fec_window: 8` (default), configurabile 4-16
+6. Contatori telemetria: `xorRecovered`, `xorEmitted`
+
+**Effort stimato**: ~2 giorni (encoder XOR banale, complessità nel window tracking).
+
+### Done criteria Fase 4c
+- [ ] UDP GSO implementato e testato (Step 4.24)
+- [ ] Kernel pacing SO_TXTIME operativo (Step 4.25)
+- [ ] Sliding window XOR FEC implementato (Step 4.26)
+- [ ] **Media ≥ 400 Mbps su 30-60s, dual Starlink, tempo buono**
+- [ ] Profiling CPU confronto con v4.3 baseline
 
 ---
 
@@ -1322,15 +1461,16 @@ il software non è più il bottleneck. Le ottimizzazioni residue di protocollo
 
 | Opzione residua | Impatto throughput | Impatto piattaforma | Effort | Verdetto |
 |---|---|---|---|---|
-| **Sliding Window FEC** (4.15) | Medio: recovery burst loss, ma M=0 adattivo raramente attiva FEC | Basso | 2-3 giorni | **Rimandare** |
+| **Sliding Window FEC** (4.15) | Medio: recovery burst loss, ma M=0 adattivo raramente attiva FEC | Basso | 2-3 giorni | **Evoluto in Step 4.26 (XOR parity)** |
 | **UDP GRO** (4.22) | Marginale: RX = 5.2% CPU | Nessuno | 1 giorno | **Scartare** |
-| **Metriche + Osservabilità** (Fase 5) | Nessuno diretto | **Altissimo**: prerequisito AI/ML, debug produzione, SLA cliente | 3-5 giorni (MVP) | **FARE ORA** |
-| **AI/ML feedback loop** (Fase 6) | Potenzialmente alto (tuning dinamico) | Alto: differenziante competitivo | 2+ settimane | **Dopo Fase 5** |
+| **Metriche + Osservabilità** (Fase 5) | Nessuno diretto | **Altissimo**: prerequisito AI/ML, debug produzione, SLA cliente | 3-5 giorni (MVP) | **✅ COMPLETATA** |
+| **Stabilizzazione data plane** (Fase 4c) | Alto: picco→media | **Alto**: prerequisito per SLA reale | 4-5 giorni | **FARE ORA** |
+| **AI/ML feedback loop** (Fase 6) | Potenzialmente alto (tuning dinamico) | Alto: differenziante competitivo | 2+ settimane | **Dopo Fase 4c** |
 
-**Decisione**: Fase 5 Metriche come prossimo step. Motivazioni:
-1. Il throughput è già al tetto Starlink — altre ottimizzazioni protocollo = marginali
-2. Le metriche sono prerequisito per tutto il resto (AI/ML, SLA, debug)
-3. L'architettura metriche costruisce le fondamenta per il feedback loop AI/ML
+**Decisione (aggiornata 2026-03-15)**: Fase 4c Stabilizzazione data plane come prossimo step.
+Il picco 499 Mbps dimostra che capacità e codice ci sono. Il gap picco→media (374 Mbps)
+è causato da burstiness software e overhead FEC, non dal link. Tre interventi mirati
+(GSO, kernel pacing, XOR FEC) per portare la media stabile sopra 400 Mbps.
 
 ### Architettura a 3 Layer
 
@@ -1469,6 +1609,9 @@ per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
 **Obiettivo (Step 5 PDF)**: layer AI/ML che adatta le policy QoS in base a telemetria real-time.
 
 > "The characteristics of the tunnel can be adapted based on decisions coming from an AI/ML layer"
+
+**Prerequisiti**: Fase 4c completata (data plane stabile ≥400 Mbps media),
+Fase 5 completata (metriche operative per feedback loop).
 
 ### Steps
 1. API bidirezionale: AI legge telemetria → produce policy → applica via Control API

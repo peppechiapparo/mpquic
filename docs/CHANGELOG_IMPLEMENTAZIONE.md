@@ -2,6 +2,22 @@
 
 ## 2026-03-15
 
+### Tag v4.3 — Monitoring stack completo
+- **Tag**: `v4.3` su commit `1a87429` — baseline prima di Fase 4c
+- Monitoring stack end-to-end operativo: Prometheus (17/18 UP) + Grafana dashboard v8
+- Fase 5 (Metriche + Osservabilità) completata
+
+### Roadmap: Fase 4c — Stabilizzazione data plane
+- **Obiettivo**: trasformare picco 499 Mbps in media stabile ≥400 Mbps su 30-60s
+- **Analisi**: il gap picco→media è causato da burstiness software e overhead FEC,
+  non da limiti di link o codice
+- **Piano** (3 step):
+  - Step 4.24: UDP GSO (`UDP_SEGMENT`) — kernel segmentation, riduce overhead/pkt
+  - Step 4.25: Kernel pacing `SO_TXTIME` + `sch_fq` — elimina burstiness software
+  - Step 4.26: Sliding Window FEC (XOR parity, N=8) — recovery minimal senza RS overhead
+- **Scartato**: `SO_REUSEPORT` + per-core sharding — 24 socket indipendenti già presenti,
+  profiling non mostra lock contention, Go scheduler non supporta affinity statica
+
 ### Rename tunnel: numero = WAN
 - **Convenzione**: il suffisso numerico del tunnel ora corrisponde alla WAN:
   - WAN4: cr4/br4/df4 (erano cr1/br1/df1)
