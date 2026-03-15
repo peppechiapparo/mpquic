@@ -73,7 +73,7 @@ MAC/rekey, eliminati i parametri `stripe_auth_key` e `stripe_rekey_seconds`.
 | Step | Descrizione | Nostro concetto | Stato |
 |------|-------------|-----------------|-------|
 | **1** | QUIC tunnels multi-link 1:1 | Multi-link | **✅ DONE** |
-| **2** | Traffico distribuito per applicazione, non per pacchetto | Multi-tunnel per link | **🔄 IN PROGRESS** (2.1-2.4 ✅, 2.5 🔄 deploy OK, OpenWrt pending) |
+| **2** | Traffico distribuito per applicazione, non per pacchetto | Multi-tunnel per link | **🔄 IN PROGRESS** (2.1-2.4 ✅, 2.5 🔄 deploy OK, OpenWrt net+fw ✅, mwan3 pending) |
 | **3** | BBR + Reliable Transport | CC per tunnel + transport mode | **✅ DONE** (BBRv1, reliable streams, benchmarkato) |
 | **4** | Bonding, Backup, Duplicazione | Multi-path per tunnel | **✅ DONE** |
 | **5** | AI/ML-Ready (Quality on Demand) | Decision layer | **⬜ NOT STARTED** |
@@ -267,8 +267,9 @@ giusta (mwan3, firewall zone, DSCP→VLAN map, ecc.)
 5. ✅ Deploy server: 3 istanze multi-conn su porte 45014-45016 + nftables forward/NAT
 6. ✅ Deploy client: 9 istanze + VLAN interfaces + classifier + ip rules 800-808
 7. ✅ Integrare in install_mpquic.sh (ripetibile su nuove TBOX)
-8. ⬜ Configurare OpenWrt: VLAN trunking + mwan3 policy
+8. 🔄 Configurare OpenWrt: VLAN trunking + firewall ✅ (2026-03-15), mwan3 posticipato a fase test
 9. ✅ Test end-to-end: 9 tunnel UP + ping peer VPS bidirezionale verificato (2026-03-14)
+10. ✅ Script UCI in `deploy/openwrt/`: 01-network, 02-firewall, 03-mwan3, 04-dscp, 99-remove
 
 ### Done criteria Fase 2
 - [x] Server accetta N connessioni concorrenti sulla stessa porta
@@ -277,7 +278,8 @@ giusta (mwan3, firewall zone, DSCP→VLAN map, ecc.)
 - [x] Traffico applicativo smistato correttamente (verificato con tcpdump)
 - [x] 9 tunnel VLAN: config + VLAN networkd + classifier nel repo
 - [x] install_mpquic.sh copre l'intero flusso (client + server)
-- [ ] OpenWrt VLAN trunking configurato
+- [x] OpenWrt VLAN network + firewall zones configurati (2026-03-15)
+- [ ] OpenWrt mwan3 classificazione traffico (posticipato a fase test)
 - [x] Test end-to-end: 9 tunnel UP, ping peer OK su tutti (WAN4 ~110ms, WAN5 ~13ms, WAN6 ~19ms)
 - [x] Isolamento dimostrato: loss su un tunnel non impatta gli altri (netem + iperf3)
 - [x] Risultati documentati con metriche (RTT + throughput tables)

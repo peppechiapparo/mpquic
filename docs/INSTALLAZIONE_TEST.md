@@ -2096,14 +2096,87 @@ ip rule show | grep -E "prio(rity)? 80[0-8]"
 
 ### 23.6 Configurazione OpenWrt (lato router)
 
-Il router OpenWrt deve essere configurato per taggare il traffico con le VLAN corrette.
-Ogni VLAN trunk arriva su una porta LAN del client VM:
+Il router OpenWrt classifica il traffico LAN tramite VLAN tagging. Ogni trunk
+fisico (SL4/SL5/SL6) porta 3 VLAN (critical/bulk/default) verso il client TBOX.
 
-| Porta fisica | LAN trunk | VLANs | Destinazione |
-|--|--|--|--|
-| LAN4 | enp6s23 | 11 (cr), 12 (br), 13 (df) | WAN4 tunnels |
-| LAN5 | enp7s1  | 21 (cr), 22 (br), 23 (df) | WAN5 tunnels |
-| LAN6 | enp7s2  | 31 (cr), 32 (br), 33 (df) | WAN6 tunnels |
+#### Mapping interfacce OpenWrt ↔ TBOX
 
-Su OpenWrt (LuCI o CLI), creare i VLAN trunk sulle porte LAN corrispondenti
-e assegnare le zone firewall/policy mwan3 per classificare il traffico.
+| OpenWrt IF | Device | TBOX LAN | TBOX Device | Subnet transit |
+|------------|--------|----------|-------------|----------------|
+| SL4        | eth11  | LAN4     | enp6s23     | 172.16.4.0/30  |
+| SL5        | eth12  | LAN5     | enp7s1      | 172.16.5.0/30  |
+| SL6        | eth13  | LAN6     | enp7s2      | 172.16.6.0/30  |
+
+#### VLAN → Classe → Tunnel
+
+| VLAN | Classe   | OpenWrt IF | IP OpenWrt  | IP TBOX (gw)  | Tunnel | Metric |
+|------|----------|------------|-------------|---------------|--------|--------|
+| 11   | critical | eth11.11   | 172.16.11.2 | 172.16.11.1   | cr1    | 10     |
+| 12   | bulk     | eth11.12   | 172.16.12.2 | 172.16.12.1   | br1    | 30     |
+| 13   | default  | eth11.13   | 172.16.13.2 | 172.16.13.1   | df1    | 20     |
+| 21   | critical | eth12.21   | 172.16.21.2 | 172.16.21.1   | cr2    | 10     |
+| 22   | bulk     | eth12.22   | 172.16.22.2 | 172.16.22.1   | br2    | 30     |
+| 23   | default  | eth12.23   | 172.16.23.2 | 172.16.23.1   | df2    | 20     |
+| 31   | critical | eth13.31   | 172.16.31.2 | 172.16.31.1   | cr3    | 10     |
+| 32   | bulk     | eth13.32   | 172.16.32.2 | 172.16.32.1   | br3    | 30     |
+| 33   | default  | eth13.33   | 172.16.33.2 | 172.16.33.1   | df3    | 20     |
+
+#### Script UCI automatici
+
+Gli script sono in `deploy/openwrt/` e vanno eseguiti in ordine:
+
+```bash
+# Copiare su OpenWrt
+scp deploy/openwrt/*.sh root@openwrt:/tmp/
+
+# 1. VLAN devices + interfacce statiche (obbligatorio)
+ssh root@openwrt 'sh /tmp/01-network-vlan.sh'
+
+# 2. Firewall zones + forwarding da LAN (obbligatorio)
+ssh root@openwrt 'sh /tmp/02-firewall-zones.sh'
+
+# 3. mwan3 per classificazione traffico (quando richiesto)
+ssh root@openwrt 'sh /tmp/03-mwan3-policy.sh'
+
+# 4. DSCP marking nftables (opzionale, se si usa DSCP)
+ssh root@openwrt 'sh /tmp/04-nft-dscp-mark.sh'
+
+# Cleanup completo (rimuove tutto)
+ssh root@openwrt 'sh /tmp/99-remove-vlan.sh'
+```
+
+I trunk interface sono configurabili in `01-network-vlan.sh` (variabili
+`TRUNK_SL4`, `TRUNK_SL5`, `TRUNK_SL6`). Il resto è identico per ogni TBOX.
+
+**Stato attuale (2026-03-15)**: step 1 (network VLAN) e step 2 (firewall zones)
+applicati. mwan3 posticipato a fase test/produzione.
+
+#### Verifica da OpenWrt
+
+```bash
+# VLAN devices creati
+uci show network | grep vlan
+
+# Interfacce attive
+ifstatus cr1    # deve mostrare up: true, ipv4-address: 172.16.11.2
+
+# Ping verso TBOX gateway (verifica connettività VLAN)
+ping -c3 172.16.11.1   # cr1 via eth11.11
+ping -c3 172.16.21.1   # cr2 via eth12.21
+ping -c3 172.16.31.1   # cr3 via eth13.31
+
+# Firewall zones
+uci show firewall | grep wan_cr
+```
+
+#### Classificazione traffico (mwan3)
+
+Quando mwan3 verrà attivato:
+
+| Classe       | Policy        | Protocolli                                       |
+|--------------|---------------|--------------------------------------------------|
+| **critical** | pol_critical  | SIP (UDP 5060), RTP (10000-20000), DNS, SSH      |
+| **default**  | pol_default   | HTTP (80), HTTPS (443), HTTPS-alt (8443)         |
+| **bulk**     | pol_bulk      | Tutto il resto (catch-all)                       |
+
+Ogni policy bilancia su 3 tunnel (uno per WAN) con failover automatico.
