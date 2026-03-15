@@ -1,4 +1,4 @@
-# Multi-conn server for WAN5 (SL5) — accepts cr2 + br2 + df2
+# Multi-conn server for WAN5 (SL5) — accepts cr5 + br5 + df5
 role: server
 bind_ip: 0.0.0.0
 remote_port: 45015

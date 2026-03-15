@@ -4,7 +4,7 @@ role: client
 bind_ip: if:enp7s8
 remote_addr: VPS_PUBLIC_IP
 remote_port: 45016
-tun_name: cr3
+tun_name: cr6
 tun_cidr: 10.200.16.1/24
 metrics_listen: auto
 log_level: info

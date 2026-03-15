@@ -1,4 +1,4 @@
-# Multi-conn server for WAN4 (SL4) — accepts cr1 + br1 + df1
+# Multi-conn server for WAN4 (SL4) — accepts cr4 + br4 + df4
 role: server
 bind_ip: 0.0.0.0
 remote_port: 45014

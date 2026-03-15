@@ -360,10 +360,9 @@ scrape_configs:
     static_configs:
       - targets:
           - "10.200.17.1:9090"     # mp1 client
-          - "10.200.14.1:9090"     # cr1 client
-          - "10.200.15.1:9090"     # cr5 / df5 / bk5 client
-          - "10.200.16.1:9090"     # cr2 client
-          - "10.200.10.1:9090"     # cr3 client
+          - "10.200.14.1:9090"     # cr4 client (WAN4)
+          - "10.200.15.1:9090"     # cr5 client (WAN5)
+          - "10.200.16.1:9090"     # cr6 client (WAN6)
         labels:
           site: "client"
 ```
@@ -491,11 +490,10 @@ rate(mpquic_session_arq_dup_filtered[5m]) > 100
 |---------|-------|-----------|-------------------|
 | mp1 | server | 10.200.17.254 | `http://10.200.17.254:9090` |
 | mp1 | client | 10.200.17.1 | `http://10.200.17.1:9090` |
-| cr1 | client | 10.200.14.1 | `http://10.200.14.1:9090` |
-| cr5/df5/bk5 | client | 10.200.15.1 | `http://10.200.15.1:9090` |
-| cr2 | client | 10.200.16.1 | `http://10.200.16.1:9090` |
-| cr3 | client | 10.200.10.1 | `http://10.200.10.1:9090` |
+| cr4 | client | 10.200.14.1 | `http://10.200.14.1:9090` |
+| cr5 | client | 10.200.15.1 | `http://10.200.15.1:9090` |
+| cr6 | client | 10.200.16.1 | `http://10.200.16.1:9090` |
 
-> **Nota**: I target server per le istanze single-conn (cr1-3, cr5, df5, bk5, mpq4-6)
+> **Nota**: I target server per le istanze multi-conn (mt4/mt5/mt6, mpq4-6)
 > espongono metriche sugli IP `.254` del rispettivo tunnel ma con `role=server`
 > e `sessions[]` invece di `paths[]`.

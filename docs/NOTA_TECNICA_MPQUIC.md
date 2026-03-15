@@ -90,7 +90,7 @@ il 1 marzo 2026, organizzati per fase di sviluppo.
 > **La degradazione di un tunnel (packet loss fino al 30%) ha impatto ZERO sui
 > tunnel adiacenti che condividono lo stesso link fisico.**
 
-| Metrica | Tunnel degradato (br2) | Tunnel adiacenti (cr2, df2) |
+| Metrica | Tunnel degradato (br5) | Tunnel adiacenti (cr5, df5) |
 |---------|------------------------|------------------------------|
 | **Throughput con 10% loss** | 2.3 Mbps (−95%) | 50.2 Mbps (±0%) |
 | **Throughput con 30% loss** | 0.4 Mbps (−99%) | 50.0 Mbps (±0%) |
@@ -257,13 +257,13 @@ RETE CLIENTE                    VM MPQUIC (Client)                     VPS (Serv
   OpenWrt ──LAN──▶              │(VLAN / nftables)│
                                 │                 │
                                 ├─┬───────────────┤       WAN (Starlink)        ┌──────────────┐
-                  VoIP ────────▶│ │ TUN cr2       │─── QUIC tunnel ────────────▶│              │
+                  VoIP ────────▶│ │ TUN cr5       │─── QUIC tunnel ────────────▶│              │
                                 │ │ (critical)    │    (indipendente)           │              │
                                 ├─┼───────────────┤                             │   Server     │
-                  HTTPS ───────▶│ │ TUN br2       │─── QUIC tunnel ────────────▶│   Multi-conn │
+                  HTTPS ───────▶│ │ TUN br5       │─── QUIC tunnel ────────────▶│   Multi-conn │
                                 │ │ (bulk)        │    (indipendente)           │   mt5        │
                                 ├─┼───────────────┤                             │              │
-                  Backup ──────▶│ │ TUN df2       │─── QUIC tunnel ────────────▶│              │──▶ Internet
+                  Backup ──────▶│ │ TUN df5       │─── QUIC tunnel ────────────▶│              │──▶ Internet
                                 │ │ (default)     │    (indipendente)           │              │
                                 └─┴───────────────┘                             └──────────────┘
                                         │
@@ -284,9 +284,9 @@ L'architettura finale prevede **9 tunnel** indipendenti distribuiti su 3 link sa
 
 | WAN | Link | Porta Server | Tunnel | IP Tunnel |
 |-----|------|-------------|--------|-----------|
-| WAN4 (SL4) | Starlink #4 (~108 ms) | 45014 | cr1, br1, df1 | 10.200.14.{1,5,9} |
-| WAN5 (SL5) | Starlink #5 (~13 ms) | 45015 | cr2, br2, df2 | 10.200.15.{1,5,9} |
-| WAN6 (SL6) | Starlink #6 (~34 ms) | 45016 | cr3, br3, df3 | 10.200.16.{1,5,9} |
+| WAN4 (SL4) | Starlink #4 (~108 ms) | 45014 | cr4, br4, df4 | 10.200.14.{1,5,9} |
+| WAN5 (SL5) | Starlink #5 (~13 ms) | 45015 | cr5, br5, df5 | 10.200.15.{1,5,9} |
+| WAN6 (SL6) | Starlink #6 (~34 ms) | 45016 | cr6, br6, df6 | 10.200.16.{1,5,9} |
 
 Tutti e 9 i tunnel sono stati verificati operativi e bidirezionali al momento del test.
 
@@ -313,9 +313,9 @@ utilizzando 3 tunnel che condividono lo stesso link fisico:
 
 | Tunnel | Classe | IP TUN Client | IP TUN Server | Device |
 |--------|--------|---------------|---------------|--------|
-| **cr2** | Critical | 10.200.15.1 | 10.200.15.254 | cr2 |
-| **br2** | Bulk | 10.200.15.5 | 10.200.15.254 | br2 |
-| **df2** | Default | 10.200.15.9 | 10.200.15.254 | df2 |
+| **cr5** | Critical | 10.200.15.1 | 10.200.15.254 | cr5 |
+| **br5** | Bulk | 10.200.15.5 | 10.200.15.254 | br5 |
+| **df5** | Default | 10.200.15.9 | 10.200.15.254 | df5 |
 
 Tutti e tre i tunnel condividono:
 - Lo stesso link fisico (enp7s7 / WAN5)
@@ -323,15 +323,15 @@ Tutti e tre i tunnel condividono:
 - La stessa subnet lato server (10.200.15.0/24, TUN mt5)
 
 I tunnel differiscono per:
-- Interfaccia TUN dedicata (cr2, br2, df2) con IP distinto
+- Interfaccia TUN dedicata (cr5, br5, df5) con IP distinto
 - Connessione QUIC indipendente (Connection ID QUIC separato)
 - Stack congestion control separato
 
 ### 4.3 Principio del test
 
-Il test inietta **packet loss artificiale** su una singola interfaccia TUN (br2) usando
+Il test inietta **packet loss artificiale** su una singola interfaccia TUN (br5) usando
 il modulo kernel `netem` (Network Emulator) del Linux Traffic Control. Le altre interfacce
-TUN (cr2, df2) **non vengono toccate**. Si misurano quindi latenza e throughput su tutti
+TUN (cr5, df5) **non vengono toccate**. Si misurano quindi latenza e throughput su tutti
 e 3 i tunnel per verificare che la degradazione resti confinata al solo tunnel affetto.
 
 Questo simula una situazione reale in cui una classe di traffico (es. backup) sta
@@ -348,7 +348,7 @@ Per prima cosa è stato verificato che tutti e 9 i tunnel fossero attivi e bidir
 
 ```bash
 # Verifica servizi attivi
-systemctl is-active mpquic@{cr1,br1,df1,cr2,br2,df2,cr3,br3,df3}.service
+systemctl is-active mpquic@{cr4,br4,df4,cr5,br5,df5,cr6,br6,df6}.service
 
 # Verifica interfacce TUN
 ip -br addr show | grep -E 'cr[1-3]|br[1-3]|df[1-3]'
@@ -436,7 +436,7 @@ Il server iperf3 è stato lasciato in ascolto per tutta la durata dei test.
 Prima di procedere ai test di throughput, è stata verificata la raggiungibilità TCP:
 
 ```bash
-# Dal client, attraverso il tunnel cr2
+# Dal client, attraverso il tunnel cr5
 iperf3 -c 10.200.15.254 -B 10.200.15.1 -t 2
 ```
 
@@ -449,23 +449,23 @@ e tre i tunnel anche con netem attivo. L'analisi ha rivelato la causa:
 
 ```bash
 $ ip route get 10.200.15.254 from 10.200.15.1
-10.200.15.254 from 10.200.15.1 dev cr2   # ← tutti via cr2!
+10.200.15.254 from 10.200.15.1 dev cr5   # ← tutti via cr5!
 
 $ ip route get 10.200.15.254 from 10.200.15.5
-10.200.15.254 from 10.200.15.5 dev cr2   # ← anche br2 va via cr2!
+10.200.15.254 from 10.200.15.5 dev cr5   # ← anche br5 va via cr5!
 
 $ ip route get 10.200.15.254 from 10.200.15.9
-10.200.15.254 from 10.200.15.9 dev cr2   # ← anche df2 va via cr2!
+10.200.15.254 from 10.200.15.9 dev cr5   # ← anche df5 va via cr5!
 ```
 
 **Causa**: i 3 tunnel condividono la subnet 10.200.15.0/24. Il kernel Linux seleziona
-la prima interfaccia con route matching (cr2), ignorando le altre. Risultato: il netem
-applicato su br2 non aveva effetto perché il traffico di br2 passava comunque da cr2.
+la prima interfaccia con route matching (cr5), ignorando le altre. Risultato: il netem
+applicato su br5 non aveva effetto perché il traffico di br5 passava comunque da cr5.
 
 **Soluzione**: binding esplicito al device con la sintassi `iperf3 -B IP%device`:
 
 ```bash
-iperf3 -c 10.200.15.254 -B 10.200.15.5%br2 -t 5   # forza uso device br2
+iperf3 -c 10.200.15.254 -B 10.200.15.5%br5 -t 5   # forza uso device br5
 ```
 
 Questo garantisce che il traffico iperf3 attraversi effettivamente l'interfaccia TUN
@@ -484,64 +484,64 @@ corretta, rendendo il test valido.
 Misura della latenza (RTT) e del packet loss su ciascun tunnel usando `ping`:
 - **20 pacchetti** per ogni misura, intervallo 0.2 secondi
 - **Strumento**: `ping -I <device> -c 20 -i 0.2 -W 2 10.200.15.254`
-- **Loss injection**: `tc qdisc add dev br2 root netem loss X%`
-- **Target loss**: esclusivamente interfaccia br2 (bulk)
+- **Loss injection**: `tc qdisc add dev br5 root netem loss X%`
+- **Target loss**: esclusivamente interfaccia br5 (bulk)
 - Misure effettuate su **tutti e 3 i tunnel** per ogni scenario
 
 ### 6.2 Scenario Baseline (nessun loss iniettato)
 
 ```bash
 # Per ciascun tunnel
-for tun in cr2 br2 df2; do
+for tun in cr5 br5 df5; do
   ping -I $tun -c 20 -i 0.2 -W 2 10.200.15.254
 done
 ```
 
 | Tunnel | RTT medio | RTT min | RTT max | Packet Loss |
 |--------|-----------|---------|---------|-------------|
-| cr2 (critical) | 13.026 ms | 12.862 ms | 13.302 ms | **0%** |
-| br2 (bulk) | 13.212 ms | 12.989 ms | 13.568 ms | **0%** |
-| df2 (default) | 13.074 ms | 12.891 ms | 13.287 ms | **0%** |
+| cr5 (critical) | 13.026 ms | 12.862 ms | 13.302 ms | **0%** |
+| br5 (bulk) | 13.212 ms | 12.989 ms | 13.568 ms | **0%** |
+| df5 (default) | 13.074 ms | 12.891 ms | 13.287 ms | **0%** |
 
 Tutti i tunnel presentano RTT omogeneo (~13 ms) e zero packet loss. La baseline è stabile.
 
-### 6.3 Scenario: 10% packet loss su br2
+### 6.3 Scenario: 10% packet loss su br5
 
 ```bash
-sudo tc qdisc add dev br2 root netem loss 10%
+sudo tc qdisc add dev br5 root netem loss 10%
 ```
 
 Misura su tutti e 3 i tunnel:
 
 | Tunnel | RTT medio | Packet Loss | Variazione vs baseline |
 |--------|-----------|-------------|------------------------|
-| **cr2** (critical) | 13.0 ms | **0%** | Nessuna |
-| **br2** (bulk) | 13.1 ms | **15%** | +15% loss (atteso: ~10%) |
-| **df2** (default) | 13.1 ms | **0%** | Nessuna |
+| **cr5** (critical) | 13.0 ms | **0%** | Nessuna |
+| **br5** (bulk) | 13.1 ms | **15%** | +15% loss (atteso: ~10%) |
+| **df5** (default) | 13.1 ms | **0%** | Nessuna |
 
-### 6.4 Scenario: 30% packet loss su br2
+### 6.4 Scenario: 30% packet loss su br5
 
 ```bash
-sudo tc qdisc replace dev br2 root netem loss 30%
+sudo tc qdisc replace dev br5 root netem loss 30%
 ```
 
 | Tunnel | RTT medio | Packet Loss | Variazione vs baseline |
 |--------|-----------|-------------|------------------------|
-| **cr2** (critical) | 13.0 ms | **0%** | Nessuna |
-| **br2** (bulk) | 13.1 ms | **35%** | +35% loss (atteso: ~30%) |
-| **df2** (default) | 13.1 ms | **0%** | Nessuna |
+| **cr5** (critical) | 13.0 ms | **0%** | Nessuna |
+| **br5** (bulk) | 13.1 ms | **35%** | +35% loss (atteso: ~30%) |
+| **df5** (default) | 13.1 ms | **0%** | Nessuna |
 
 ### 6.5 Risultato Test 1
 
 ```
-          BASELINE          10% netem br2       30% netem br2
-cr2 ████████████ 0%    ████████████ 0%    ████████████ 0%
-br2 ████████████ 0%    ████░░░░░░░ 15%   ███░░░░░░░░ 35%
-df2 ████████████ 0%    ████████████ 0%    ████████████ 0%
+          BASELINE          10% netem br5       30% netem br5
+cr5 ████████████ 0%    ████████████ 0%    ████████████ 0%
+br5 ████████████ 0%    ████░░░░░░░ 15%   ███░░░░░░░░ 35%
+df5 ████████████ 0%    ████████████ 0%    ████████████ 0%
 ```
 
-**Isolamento RTT: PERFETTO.** I tunnel cr2 e df2 non mostrano alcuna variazione di
-latenza o packet loss, nonostante br2 stia subendo fino al 35% di perdita pacchetti.
+**Isolamento RTT: PERFETTO.** I tunnel cr5 e df5 non mostrano alcuna variazione di
+latenza o packet loss, nonostante br5 stia subendo fino al 35% di perdita pacchetti.
 
 ---
 
@@ -554,52 +554,52 @@ Misura del throughput su ciascun tunnel usando `iperf3`:
 - **Binding**: esplicito per-device (`-B IP%device`) per garantire routing corretto
 - **Strumento**: `iperf3 -c 10.200.15.254 -B <IP>%<dev> -t 5`
 - **Server**: iperf3 in ascolto sulla VPS porta 5201 (singola istanza, test sequenziali)
-- **Loss injection**: `tc qdisc` netem su interfaccia br2
+- **Loss injection**: `tc qdisc` netem su interfaccia br5
 
 ### 7.2 Scenario Baseline (nessun loss iniettato)
 
 ```bash
 # Cleanup preventivo
-sudo tc qdisc del dev br2 root 2>/dev/null
+sudo tc qdisc del dev br5 root 2>/dev/null
 
 # Misura sequenziale (iperf3 single-server)
-iperf3 -c 10.200.15.254 -B 10.200.15.1%cr2 -t 5
-iperf3 -c 10.200.15.254 -B 10.200.15.5%br2 -t 5
-iperf3 -c 10.200.15.254 -B 10.200.15.9%df2 -t 5
+iperf3 -c 10.200.15.254 -B 10.200.15.1%cr5 -t 5
+iperf3 -c 10.200.15.254 -B 10.200.15.5%br5 -t 5
+iperf3 -c 10.200.15.254 -B 10.200.15.9%df5 -t 5
 ```
 
 | Tunnel | TX (Sender) | RX (Receiver) | Retransmits |
 |--------|-------------|---------------|-------------|
-| cr2 (critical) | 53.9 Mbps | **50.2 Mbps** | 244 |
-| br2 (bulk) | 51.3 Mbps | **48.1 Mbps** | 230 |
-| df2 (default) | 52.5 Mbps | **50.0 Mbps** | 239 |
+| cr5 (critical) | 53.9 Mbps | **50.2 Mbps** | 244 |
+| br5 (bulk) | 51.3 Mbps | **48.1 Mbps** | 230 |
+| df5 (default) | 52.5 Mbps | **50.0 Mbps** | 239 |
 
 Throughput baseline omogeneo: ~50 Mbps per tutti i tunnel. I retransmit sono normali
 per un link Starlink con RTT ~13 ms (Cubic congestion control).
 
-### 7.3 Scenario: 10% packet loss su br2
+### 7.3 Scenario: 10% packet loss su br5
 
 ```bash
-sudo tc qdisc add dev br2 root netem loss 10%
+sudo tc qdisc add dev br5 root netem loss 10%
 ```
 
 | Tunnel | TX (Sender) | RX (Receiver) | Retransmits | Variazione |
 |--------|-------------|---------------|-------------|------------|
-| **cr2** (critical) | 53.1 Mbps | **50.2 Mbps** | 237 | **±0%** |
-| **br2** (bulk) | 2.65 Mbps | **2.3 Mbps** | 104 | **−95%** |
-| **df2** (default) | 53.5 Mbps | **50.2 Mbps** | 259 | **±0%** |
+| **cr5** (critical) | 53.1 Mbps | **50.2 Mbps** | 237 | **±0%** |
+| **br5** (bulk) | 2.65 Mbps | **2.3 Mbps** | 104 | **−95%** |
+| **df5** (default) | 53.5 Mbps | **50.2 Mbps** | 259 | **±0%** |
 
-### 7.4 Scenario: 30% packet loss su br2
+### 7.4 Scenario: 30% packet loss su br5
 
 ```bash
-sudo tc qdisc replace dev br2 root netem loss 30%
+sudo tc qdisc replace dev br5 root netem loss 30%
 ```
 
 | Tunnel | TX (Sender) | RX (Receiver) | Retransmits | Variazione |
 |--------|-------------|---------------|-------------|------------|
-| **cr2** (critical) | 53.0 Mbps | **50.2 Mbps** | 180 | **±0%** |
-| **br2** (bulk) | 567 Kbps | **401 Kbps** | 93 | **−99%** |
-| **df2** (default) | 53.2 Mbps | **49.8 Mbps** | 236 | **±0%** |
+| **cr5** (critical) | 53.0 Mbps | **50.2 Mbps** | 180 | **±0%** |
+| **br5** (bulk) | 567 Kbps | **401 Kbps** | 93 | **−99%** |
+| **df5** (default) | 53.2 Mbps | **49.8 Mbps** | 236 | **±0%** |
 
 ### 7.5 Riepilogo comparativo Throughput
 
@@ -607,27 +607,27 @@ sudo tc qdisc replace dev br2 root netem loss 30%
 Throughput RX (Mbps) — Scala lineare 0-55
 
 BASELINE (0% loss):
-  cr2 ██████████████████████████████████████████████████ 50.2
-  br2 ████████████████████████████████████████████████   48.1
-  df2 ██████████████████████████████████████████████████ 50.0
+  cr5 ██████████████████████████████████████████████████ 50.2
+  br5 ████████████████████████████████████████████████   48.1
+  df5 ██████████████████████████████████████████████████ 50.0
 
-10% LOSS su br2:
-  cr2 ██████████████████████████████████████████████████ 50.2  ← INALTERATO
-  br2 ██                                                 2.3  ← −95%
-  df2 ██████████████████████████████████████████████████ 50.2  ← INALTERATO
+10% LOSS su br5:
+  cr5 ██████████████████████████████████████████████████ 50.2  ← INALTERATO
+  br5 ██                                                 2.3  ← −95%
+  df5 ██████████████████████████████████████████████████ 50.2  ← INALTERATO
 
-30% LOSS su br2:
-  cr2 ██████████████████████████████████████████████████ 50.2  ← INALTERATO
-  br2 ░                                                  0.4  ← −99%
-  df2 █████████████████████████████████████████████████  49.8  ← INALTERATO
+30% LOSS su br5:
+  cr5 ██████████████████████████████████████████████████ 50.2  ← INALTERATO
+  br5 ░                                                  0.4  ← −99%
+  df5 █████████████████████████████████████████████████  49.8  ← INALTERATO
 ```
 
 ### 7.6 Risultato Test 2
 
-**Isolamento throughput: PERFETTO.** Con 30% di packet loss su br2:
-- br2 crolla da 48.1 a 0.4 Mbps (−99%)
-- cr2 mantiene 50.2 Mbps (variazione 0%)
-- df2 mantiene 49.8 Mbps (variazione -0.4%, nel margine di misura)
+**Isolamento throughput: PERFETTO.** Con 30% di packet loss su br5:
+- br5 crolla da 48.1 a 0.4 Mbps (−99%)
+- cr5 mantiene 50.2 Mbps (variazione 0%)
+- df5 mantiene 49.8 Mbps (variazione -0.4%, nel margine di misura)
 
 ---
 
@@ -641,8 +641,8 @@ L'isolamento è una conseguenza diretta dell'architettura:
    con Connection ID separato. Non esiste condivisione di stato tra tunnel.
 
 2. **Congestion control isolato**: ogni tunnel QUIC ha la propria istanza di Cubic
-   (congestion control). Quando br2 subisce loss, solo il Cubic di br2 riduce la
-   finestra di congestione. I Cubic di cr2 e df2 non vedono alcun loss.
+   (congestion control). Quando br5 subisce loss, solo il Cubic di br5 riduce la
+   finestra di congestione. I Cubic di cr5 e df5 non vedono alcun loss.
 
 3. **Interfacce TUN separate**: ogni tunnel scrive su un device TUN dedicato.
    Il netem applicato su un device TUN non ha alcun effetto sugli altri device.
@@ -664,7 +664,7 @@ L'isolamento è una conseguenza diretta dell'architettura:
 
 ### 8.3 Impatto della loss sul singolo tunnel
 
-La degradazione osservata su br2 segue le aspettative teoriche per TCP-over-QUIC
+La degradazione osservata su br5 segue le aspettative teoriche per TCP-over-QUIC
 con Cubic congestion control:
 
 | Packet Loss | Throughput | Riduzione | Note |
@@ -722,7 +722,7 @@ caratteristiche:
 La configurazione è per-tunnel via YAML:
 
 ```yaml
-# Esempio: br3.yaml (BBR su Starlink)
+# Esempio: br6.yaml (BBR su Starlink)
 congestion_algorithm: bbr
 transport_mode: reliable
 ```
@@ -764,9 +764,9 @@ Con stream reliable:
 |------------|----------|
 | **Link fisico** | Starlink (antenna terminale enp7s8, IP CGNAT 100.64.86.226/10) |
 | **RTT medio** | 25-40 ms (Starlink LEO) |
-| **Tunnel test** | cr3 (Cubic), br3 (BBR), df3 (Cubic) — tutti su WAN6 porta 45016 |
+| **Tunnel test** | cr6 (Cubic), br6 (BBR), df6 (Cubic) — tutti su WAN6 porta 45016 |
 | **Server** | VPS mt6 (multi-conn, `transport_mode: reliable`, Cubic) |
-| **Subnet** | 10.200.16.0/24 (cr3=.1, br3=.5, df3=.9, mt6=.254) |
+| **Subnet** | 10.200.16.0/24 (cr6=.1, br6=.5, df6=.9, mt6=.254) |
 | **Loss injection** | `tc qdisc netem loss X%` su interfaccia Starlink enp7s8 |
 | **Durata test** | 10 secondi per ciascun iperf3 |
 | **Commit** | 2d903ab — feat: reliable transport mode |
@@ -779,9 +779,9 @@ dal congestion control:
 
 | Tunnel | CC | 0% loss | 10% loss | Degradazione |
 |--------|--------|---------|----------|-------------|
-| cr3 | Cubic | 15.1 Mbps | 0.5 Mbps | **−97%** |
-| br3 | BBR | 14.5 Mbps | 0.5 Mbps | **−97%** |
-| df3 | Cubic | 14.9 Mbps | 0.9 Mbps | **−94%** |
+| cr6 | Cubic | 15.1 Mbps | 0.5 Mbps | **−97%** |
+| br6 | BBR | 14.5 Mbps | 0.5 Mbps | **−97%** |
+| df6 | Cubic | 14.9 Mbps | 0.9 Mbps | **−94%** |
 
 Risultato: BBR identico a Cubic. Il congestion control QUIC è irrilevante
 quando il transport è unreliable.
@@ -792,9 +792,9 @@ quando il transport è unreliable.
 
 | Tunnel | CC | Mbps (sender) | Retransmit | vs Datagram mode |
 |--------|--------|-------|------------|------------------|
-| cr3 | Cubic | 45.2 | 74 | **+199%** |
-| br3 | **BBR** | **47.4** | 120 | **+227%** |
-| df3 | Cubic | 55.8 | 194 | **+274%** |
+| cr6 | Cubic | 45.2 | 74 | **+199%** |
+| br6 | **BBR** | **47.4** | 120 | **+227%** |
+| df6 | Cubic | 55.8 | 194 | **+274%** |
 
 Il passaggio a stream reliable ha **triplicato** il throughput base rispetto ai
 DATAGRAM frames. Questo perché lo stream beneficia del flow control QUIC e del
@@ -804,9 +804,9 @@ buffering più efficiente (coalescing di pacchetti piccoli in segmenti più gran
 
 | Tunnel | CC | Mbps | Degradazione vs baseline | Confronto |
 |--------|--------|------|------------------------|--------|
-| cr3 | Cubic | 41.9 | −7% | Riferimento |
-| br3 | **BBR** | 28.5 | −40% | BBR più conservativo |
-| df3 | Cubic | 39.7 | −29% | Conferma Cubic |
+| cr6 | Cubic | 41.9 | −7% | Riferimento |
+| br6 | **BBR** | 28.5 | −40% | BBR più conservativo |
+| df6 | Cubic | 39.7 | −29% | Conferma Cubic |
 
 Con 10% loss, Cubic si dimostra sorprendentemente resiliente grazie al loss
 recovery interno di quic-go (RACK, TLP, retransmission timeout). BBR degrada
@@ -817,9 +817,9 @@ sulle ritrasmissioni frequenti.
 
 | Tunnel | CC | Mbps | Degradazione vs baseline | Confronto |
 |--------|--------|------|------------------------|--------|
-| cr3 | Cubic | 15.5 | **−66%** | Riferimento |
-| br3 | **BBR** | **26.1** | **−45%** | **+68% vs Cubic (cr3)** |
-| df3 | Cubic | 13.6 | **−76%** | Conferma Cubic |
+| cr6 | Cubic | 15.5 | **−66%** | Riferimento |
+| br6 | **BBR** | **26.1** | **−45%** | **+68% vs Cubic (cr6)** |
+| df6 | Cubic | 13.6 | **−76%** | Conferma Cubic |
 
 **Con 30% loss, BBR mantiene 26 Mbps contro i 14-15 Mbps di Cubic — quasi il
 doppio del throughput.** Questo è il risultato atteso dalla teoria: BBR non
@@ -2809,7 +2809,7 @@ con sendmmsg batch TX, TUN multiqueue e riduzione CPU del 19%.
 
 ```bash
 # Client — tutti i 9 tunnel attivi
-for svc in cr1 br1 df1 cr2 br2 df2 cr3 br3 df3; do
+for svc in cr4 br4 df4 cr5 br5 df5 cr6 br6 df6; do
   printf "%-4s " "$svc"
   systemctl is-active mpquic@${svc}.service
 done
@@ -2826,29 +2826,29 @@ done
 ### A.2 Applicazione packet loss con netem
 
 ```bash
-# Applicare 10% loss su br2
-sudo tc qdisc add dev br2 root netem loss 10%
+# Applicare 10% loss su br5
+sudo tc qdisc add dev br5 root netem loss 10%
 
 # Verificare
-sudo tc qdisc show dev br2
+sudo tc qdisc show dev br5
 # Output: qdisc netem 8003: root refcnt 2 limit 1000 loss 10%
 
 # Modificare a 30%
-sudo tc qdisc replace dev br2 root netem loss 30%
+sudo tc qdisc replace dev br5 root netem loss 30%
 
 # Rimuovere
-sudo tc qdisc del dev br2 root
+sudo tc qdisc del dev br5 root
 ```
 
 ### A.3 Misure iperf3 con device binding
 
 ```bash
 # Baseline (senza loss)
-iperf3 -c 10.200.15.254 -B 10.200.15.1%cr2 -t 5
-iperf3 -c 10.200.15.254 -B 10.200.15.5%br2 -t 5
-iperf3 -c 10.200.15.254 -B 10.200.15.9%df2 -t 5
+iperf3 -c 10.200.15.254 -B 10.200.15.1%cr5 -t 5
+iperf3 -c 10.200.15.254 -B 10.200.15.5%br5 -t 5
+iperf3 -c 10.200.15.254 -B 10.200.15.9%df5 -t 5
 
-# Con loss su br2 — stessi comandi, risultati cambiano solo per br2
+# Con loss su br5 — stessi comandi, risultati cambiano solo per br5
 ```
 
 ### A.4 Configurazione firewall VPS
@@ -2918,7 +2918,7 @@ iperf3 -c 10.200.17.254 -p 5201 -t 15 -P 4 -R --bind-dev mp1
 ### A.7 Note di riproducibilità
 
 Per riprodurre i test è necessario:
-1. Avere almeno 3 tunnel attivi sullo stesso link (es. cr2/br2/df2 su WAN5)
+1. Avere almeno 3 tunnel attivi sullo stesso link (es. cr5/br5/df5 su WAN5)
 2. `iperf3` installato su client e server
 3. Firewall VPS aperto per interfacce TUN e porta iperf3
 4. Usare `-B IP%device` nell'iperf3 per garantire routing device-bound

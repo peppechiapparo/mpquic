@@ -6,9 +6,9 @@
 # Configura mwan3 per distribuire il traffico LAN verso i 9 tunnel MPQUIC
 # in base alla classe di traffico:
 #
-#   critical → cr1 + cr2 + cr3 (VoIP, telemetria, DSCP EF)
-#   default  → df1 + df2 + df3 (web, HTTPS, API)
-#   bulk     → br1 + br2 + br3 (backup, sync, download)
+#   critical → cr4 + cr5 + cr6 (VoIP, telemetria, DSCP EF)
+#   default  → df4 + df5 + df6 (web, HTTPS, API)
+#   bulk     → br4 + br5 + br6 (backup, sync, download)
 #
 # Ogni classe usa 3 interfacce (una per WAN) in load-balance.
 # Failover: se un tunnel è DOWN, il traffico migra sugli altri 2.
@@ -55,19 +55,19 @@ add_mwan3_iface() {
 }
 
 # WAN4 / SL4
-add_mwan3_iface cr1 172.16.11.1 10
-add_mwan3_iface br1 172.16.12.1 30
-add_mwan3_iface df1 172.16.13.1 20
+add_mwan3_iface cr4 172.16.11.1 10
+add_mwan3_iface br4 172.16.12.1 30
+add_mwan3_iface df4 172.16.13.1 20
 
 # WAN5 / SL5
-add_mwan3_iface cr2 172.16.21.1 10
-add_mwan3_iface br2 172.16.22.1 30
-add_mwan3_iface df2 172.16.23.1 20
+add_mwan3_iface cr5 172.16.21.1 10
+add_mwan3_iface br5 172.16.22.1 30
+add_mwan3_iface df5 172.16.23.1 20
 
 # WAN6 / SL6
-add_mwan3_iface cr3 172.16.31.1 10
-add_mwan3_iface br3 172.16.32.1 30
-add_mwan3_iface df3 172.16.33.1 20
+add_mwan3_iface cr6 172.16.31.1 10
+add_mwan3_iface br6 172.16.32.1 30
+add_mwan3_iface df6 172.16.33.1 20
 
 
 # =============================================================================
@@ -88,19 +88,19 @@ add_member() {
 }
 
 # Critical class members (load-balanced, same priority)
-add_member m_cr1 cr1 1 10
-add_member m_cr2 cr2 1 10
-add_member m_cr3 cr3 1 10
+add_member m_cr1 cr4 1 10
+add_member m_cr2 cr5 1 10
+add_member m_cr3 cr6 1 10
 
 # Default class members
-add_member m_df1 df1 1 10
-add_member m_df2 df2 1 10
-add_member m_df3 df3 1 10
+add_member m_df1 df4 1 10
+add_member m_df2 df5 1 10
+add_member m_df3 df6 1 10
 
 # Bulk class members
-add_member m_br1 br1 1 10
-add_member m_br2 br2 1 10
-add_member m_br3 br3 1 10
+add_member m_br1 br4 1 10
+add_member m_br2 br5 1 10
+add_member m_br3 br6 1 10
 
 
 # =============================================================================

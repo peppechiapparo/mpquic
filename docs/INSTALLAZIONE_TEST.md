@@ -638,7 +638,13 @@ tls_cert_file: /etc/mpquic/tls/server.crt
 tls_key_file: /etc/mpquic/tls/server.key
 ```
 
-### 11.11 Esempio completo: client multi-tunnel per link (cr5/df5/bk5)
+### 11.11 ~~Esempio completo: client multi-tunnel per link (cr5/df5/bk5)~~ — DECOMMISSIONATO
+
+> **Nota**: Questo esempio usava la subnet 10.200.10.0/24 (Step 2.3) con server mt1.
+> È stato **decommissionato** il 15/03/2026. I tunnel WAN5 sono ora cr5/br5/df5
+> sulla subnet 10.200.15.0/24 via server mt5. Vedi sezione 23 per la configurazione attuale.
+
+<details><summary>Configurazione storica (non più attiva)</summary>
 
 Tre tunnel sullo stesso link WAN5, ciascuno per una classe di traffico:
 
@@ -698,6 +704,8 @@ log_level: info
 tls_cert_file: /etc/mpquic/tls/server.crt
 tls_key_file: /etc/mpquic/tls/server.key
 ```
+
+</details>
 
 ### 11.12 Esempio completo: client multipath stripe dual Starlink (mp1)
 
@@ -913,9 +921,9 @@ table ip nat {
         oifname "mpq6" masquerade
 
         # === NAT sui tunnel avanzati ===
-        oifname "cr5" masquerade
-        oifname "df5" masquerade
-        oifname "bk5" masquerade
+        oifname "cr*" masquerade
+        oifname "br*" masquerade
+        oifname "df*" masquerade
         oifname "mp1" masquerade
     }
 }
@@ -1344,7 +1352,7 @@ sudo systemctl restart mpquic@mp1.service
 journalctl -u mpquic@mp1.service -n 100 --no-pager -f
 
 # Stato tutte le istanze
-for i in 1 2 3 4 5 6 mp1 cr5 df5 bk5; do
+for i in 1 2 3 4 5 6 mp1 cr4 br4 df4 cr5 br5 df5 cr6 br6 df6; do
     printf "%-6s " "$i"
     systemctl is-active mpquic@$i.service 2>/dev/null || echo inactive
 done
@@ -1398,7 +1406,7 @@ for i in 1 2 3 4 5 6 mp1; do
 done
 
 # 6. TUN interfaces
-ip -br a | egrep 'mpq[1-6]|mp1|cr5|df5|bk5'
+ip -br a | egrep 'mpq[1-6]|mp1|cr[456]|br[456]|df[456]'
 
 # 7. nftables
 sudo nft list ruleset | head -30
@@ -1472,12 +1480,12 @@ tls_key_file: /etc/mpquic/tls/server.key
 ```
 
 ```yaml
-# Client (es. /etc/mpquic/instances/cr1.yaml.tpl)
+# Client (es. /etc/mpquic/instances/cr4.yaml.tpl)
 role: client
 bind_ip: if:enp7s6
 remote_addr: VPS_PUBLIC_IP
 remote_port: 45014
-tun_name: cr1
+tun_name: cr4
 tun_cidr: 10.200.14.1/24
 metrics_listen: auto          # ← deriva 10.200.14.1:9090 da tun_cidr
 log_level: info
@@ -1510,10 +1518,7 @@ git push origin main
 ```bash
 cd /opt/mpquic && git pull
 
-# Copia i config aggiornati (mt1 ha .tpl, mt4/5/6 hanno .yaml)
-for i in mt1; do
-  cp deploy/config/server/$i.yaml /etc/mpquic/instances/$i.yaml.tpl
-done
+# Copia i config aggiornati
 for i in mt4 mt5 mt6; do
   cp deploy/config/server/$i.yaml /etc/mpquic/instances/$i.yaml
 done
@@ -1527,7 +1532,7 @@ bash scripts/mpquic-update.sh /opt/mpquic
 cd /opt/mpquic && git pull
 
 # Copia i config aggiornati
-for i in cr1 cr2 cr3 cr5; do
+for i in cr4 br4 df4 cr5 br5 df5 cr6 br6 df6; do
   cp deploy/config/client/$i.yaml /etc/mpquic/instances/$i.yaml.tpl
 done
 
@@ -1552,7 +1557,7 @@ curl --connect-timeout 3 http://<VPS_PUBLIC_IP>:9090/metrics
 # Dal client → metriche server (attraverso il tunnel)
 curl http://10.200.14.254:9090/api/v1/stats
 
-# Dal server → metriche client cr1 (attraverso il tunnel)
+# Dal server → metriche client cr4 (attraverso il tunnel)
 curl http://10.200.14.1:9090/api/v1/stats
 ```
 
@@ -1645,8 +1650,8 @@ curl http://10.200.14.1:9090/api/v1/stats
 │  │  Gateway per subnet tunnel 10.200.x.0/24             │   │
 │  │                                                      │   │
 │  │  10.200.17.1:9090  (mp1 client)                      │   │
-│  │  10.200.14.1:9090  (cr1)   10.200.15.1:9090 (cr5)    │   │
-│  │  10.200.16.1:9090  (cr2)   10.200.10.1:9090 (cr3)    │   │
+│  │  10.200.14.1:9090  (cr4)   10.200.15.1:9090 (cr5)    │   │
+│  │  10.200.16.1:9090  (cr5)   10.200.10.1:9090 (cr6)    │   │
 │  └──────────────────────────────────────────────────────┘   │
 │           │                                                 │
 │           │ tunnel QUIC/stripe                              │
@@ -1753,19 +1758,19 @@ scrape_configs:
           transport: "stripe"
       - targets: ["10.200.14.1:9090"]
         labels:
-          instance_name: "cr1"
+          instance_name: "cr4"
           role: "client"
           site: "client"
           transport: "quic"
       - targets: ["10.200.16.1:9090"]
         labels:
-          instance_name: "cr2"
+          instance_name: "cr5"
           role: "client"
           site: "client"
           transport: "quic"
       - targets: ["10.200.10.1:9090"]
         labels:
-          instance_name: "cr3"
+          instance_name: "cr6"
           role: "client"
           site: "client"
           transport: "quic"
@@ -1946,24 +1951,24 @@ sub-interface VLAN dedicati nel client VM, e il classifier instrada nel tunnel c
 in base all'interfaccia di ingresso.
 
 ```
-OpenWrt → VLAN 21 (critical LAN2) → enp7s1.21 → ip rule iif → cr2 TUN → WAN5 → VPS:45015
-OpenWrt → VLAN 22 (bulk LAN2)     → enp7s1.22 → ip rule iif → br2 TUN → WAN5 → VPS:45015
-OpenWrt → VLAN 23 (default LAN2)  → enp7s1.23 → ip rule iif → df2 TUN → WAN5 → VPS:45015
+OpenWrt → VLAN 21 (critical LAN2) → enp7s1.21 → ip rule iif → cr5 TUN → WAN5 → VPS:45015
+OpenWrt → VLAN 22 (bulk LAN2)     → enp7s1.22 → ip rule iif → br5 TUN → WAN5 → VPS:45015
+OpenWrt → VLAN 23 (default LAN2)  → enp7s1.23 → ip rule iif → df5 TUN → WAN5 → VPS:45015
 ```
 
 ### 23.2 Schema VLAN → Tunnel → Server
 
 | LAN trunk | VLAN | Classe | Tunnel | Server TUN | Server porta |
 |-----------|------|--------|--------|------------|-------------|
-| enp6s23 (LAN4) | 11 | critical | cr1 | mt4 | 45014 |
-| enp6s23 (LAN4) | 12 | bulk | br1 | mt4 | 45014 |
-| enp6s23 (LAN4) | 13 | default | df1 | mt4 | 45014 |
-| enp7s1 (LAN5) | 21 | critical | cr2 | mt5 | 45015 |
-| enp7s1 (LAN5) | 22 | bulk | br2 | mt5 | 45015 |
-| enp7s1 (LAN5) | 23 | default | df2 | mt5 | 45015 |
-| enp7s2 (LAN6) | 31 | critical | cr3 | mt6 | 45016 |
-| enp7s2 (LAN6) | 32 | bulk | br3 | mt6 | 45016 |
-| enp7s2 (LAN6) | 33 | default | df3 | mt6 | 45016 |
+| enp6s23 (LAN4) | 11 | critical | cr4 | mt4 | 45014 |
+| enp6s23 (LAN4) | 12 | bulk | br4 | mt4 | 45014 |
+| enp6s23 (LAN4) | 13 | default | df4 | mt4 | 45014 |
+| enp7s1 (LAN5) | 21 | critical | cr5 | mt5 | 45015 |
+| enp7s1 (LAN5) | 22 | bulk | br5 | mt5 | 45015 |
+| enp7s1 (LAN5) | 23 | default | df5 | mt5 | 45015 |
+| enp7s2 (LAN6) | 31 | critical | cr6 | mt6 | 45016 |
+| enp7s2 (LAN6) | 32 | bulk | br6 | mt6 | 45016 |
+| enp7s2 (LAN6) | 33 | default | df6 | mt6 | 45016 |
 
 ### 23.3 Installazione automatica (consigliata)
 
@@ -1975,7 +1980,7 @@ cd /opt/mpquic
 sudo ./scripts/install_client.sh
 # Installa automaticamente:
 #   - VLAN .netdev/.network in /etc/systemd/network/
-#   - Config cr1-3/br1-3/df1-3 in /etc/mpquic/instances/
+#   - Config cr4/br4/df4, cr5/br5/df5, cr6/br6/df6 in /etc/mpquic/instances/
 #   - VLAN classifier in /usr/local/sbin/
 #   - Abilita tutti i servizi (1-6, cr/br/df, mp1)
 #   - Applica il VLAN classifier
@@ -1986,8 +1991,8 @@ sudo ./scripts/install_client.sh
 cd /opt/mpquic
 sudo ./scripts/install_server.sh
 # Installa automaticamente:
-#   - Config mt1/mt4/mt5/mt6 in /etc/mpquic/instances/
-#   - NFT: porte 45010/45014-45016, forward mt*, NAT subnet
+#   - Config mt4/mt5/mt6 in /etc/mpquic/instances/
+#   - NFT: porte 45014-45016, forward mt*, NAT subnet
 #   - VPS routes per VLAN transit subnets
 ```
 
@@ -2011,13 +2016,13 @@ ip -br link show type vlan
 
 ```bash
 # Copia configs (il .yaml diventa .yaml.tpl; render_config.sh sostituisce VPS_PUBLIC_IP)
-for inst in cr1 br1 df1 cr2 br2 df2 cr3 br3 df3; do
+for inst in cr4 br4 df4 cr5 br5 df5 cr6 br6 df6; do
   sudo cp deploy/config/client/${inst}.yaml /etc/mpquic/instances/${inst}.yaml.tpl
   sudo cp deploy/config/client/${inst}.env  /etc/mpquic/instances/${inst}.env
 done
 
 # Abilita e avvia i servizi
-for inst in cr1 br1 df1 cr2 br2 df2 cr3 br3 df3; do
+for inst in cr4 br4 df4 cr5 br5 df5 cr6 br6 df6; do
   sudo systemctl enable --now mpquic@${inst}.service
 done
 ```
@@ -2077,15 +2082,15 @@ sudo bash scripts/mpquic-vps-routes.sh
 
 ```bash
 # Client: verifica tutti i 9 tunnel UP
-for t in cr1 br1 df1 cr2 br2 df2 cr3 br3 df3; do
+for t in cr4 br4 df4 cr5 br5 df5 cr6 br6 df6; do
   printf "%-4s: " "$t"
   ip -4 addr show dev "$t" 2>/dev/null | awk '/inet/{print $2}' || echo "DOWN"
 done
 
 # Client: ping peer per ogni classe
-for t in cr1 br1 df1; do ping -c1 -W2 -I "$t" 10.200.14.254 && echo "$t OK"; done
-for t in cr2 br2 df2; do ping -c1 -W2 -I "$t" 10.200.15.254 && echo "$t OK"; done
-for t in cr3 br3 df3; do ping -c1 -W2 -I "$t" 10.200.16.254 && echo "$t OK"; done
+for t in cr4 br4 df4; do ping -c1 -W2 -I "$t" 10.200.14.254 && echo "$t OK"; done
+for t in cr5 br5 df5; do ping -c1 -W2 -I "$t" 10.200.15.254 && echo "$t OK"; done
+for t in cr6 br6 df6; do ping -c1 -W2 -I "$t" 10.200.16.254 && echo "$t OK"; done
 
 # Client: verifica VLAN classifier
 sudo /usr/local/sbin/mpquic-vlan-classifier.sh status
@@ -2111,15 +2116,15 @@ fisico (SL4/SL5/SL6) porta 3 VLAN (critical/bulk/default) verso il client TBOX.
 
 | VLAN | Classe   | OpenWrt IF | IP OpenWrt  | IP TBOX (gw)  | Tunnel | Metric |
 |------|----------|------------|-------------|---------------|--------|--------|
-| 11   | critical | eth11.11   | 172.16.11.2 | 172.16.11.1   | cr1    | 10     |
-| 12   | bulk     | eth11.12   | 172.16.12.2 | 172.16.12.1   | br1    | 30     |
-| 13   | default  | eth11.13   | 172.16.13.2 | 172.16.13.1   | df1    | 20     |
-| 21   | critical | eth12.21   | 172.16.21.2 | 172.16.21.1   | cr2    | 10     |
-| 22   | bulk     | eth12.22   | 172.16.22.2 | 172.16.22.1   | br2    | 30     |
-| 23   | default  | eth12.23   | 172.16.23.2 | 172.16.23.1   | df2    | 20     |
-| 31   | critical | eth13.31   | 172.16.31.2 | 172.16.31.1   | cr3    | 10     |
-| 32   | bulk     | eth13.32   | 172.16.32.2 | 172.16.32.1   | br3    | 30     |
-| 33   | default  | eth13.33   | 172.16.33.2 | 172.16.33.1   | df3    | 20     |
+| 11   | critical | eth11.11   | 172.16.11.2 | 172.16.11.1   | cr4    | 10     |
+| 12   | bulk     | eth11.12   | 172.16.12.2 | 172.16.12.1   | br4    | 30     |
+| 13   | default  | eth11.13   | 172.16.13.2 | 172.16.13.1   | df4    | 20     |
+| 21   | critical | eth12.21   | 172.16.21.2 | 172.16.21.1   | cr5    | 10     |
+| 22   | bulk     | eth12.22   | 172.16.22.2 | 172.16.22.1   | br5    | 30     |
+| 23   | default  | eth12.23   | 172.16.23.2 | 172.16.23.1   | df5    | 20     |
+| 31   | critical | eth13.31   | 172.16.31.2 | 172.16.31.1   | cr6    | 10     |
+| 32   | bulk     | eth13.32   | 172.16.32.2 | 172.16.32.1   | br6    | 30     |
+| 33   | default  | eth13.33   | 172.16.33.2 | 172.16.33.1   | df6    | 20     |
 
 #### Script UCI automatici
 
@@ -2158,12 +2163,12 @@ applicati. mwan3 posticipato a fase test/produzione.
 uci show network | grep vlan
 
 # Interfacce attive
-ifstatus cr1    # deve mostrare up: true, ipv4-address: 172.16.11.2
+ifstatus cr4    # deve mostrare up: true, ipv4-address: 172.16.11.2
 
 # Ping verso TBOX gateway (verifica connettività VLAN)
-ping -c3 172.16.11.1   # cr1 via eth11.11
-ping -c3 172.16.21.1   # cr2 via eth12.21
-ping -c3 172.16.31.1   # cr3 via eth13.31
+ping -c3 172.16.11.1   # cr4 via eth11.11
+ping -c3 172.16.21.1   # cr5 via eth12.21
+ping -c3 172.16.31.1   # cr6 via eth13.31
 
 # Firewall zones
 uci show firewall | grep wan_cr

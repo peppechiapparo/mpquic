@@ -88,16 +88,16 @@ WAN5 (enp7s7) ──── mpq5 ──── 10.200.5.1/30 ↔ 10.200.5.2/30 (:4
 WAN6 (enp7s8) ──── mpq6 ──── 10.200.6.1/30 ↔ 10.200.6.2/30 (:45006)
 ```
 
-### Livello 2: Multi-tunnel per link (IN SVILUPPO)
+### Livello 2: Multi-tunnel per link
 N tunnel QUIC sullo STESSO link, ciascuno dedicato a una classe di traffico.
 Il classificatore è esterno (nftables + fwmark + policy routing).
 Tutti i tunnel convergono sulla STESSA porta server e sulla STESSA TUN server.
 
 ```
-CLIENT (WAN5)                                         SERVER (:45010)
-  tun-cr5 (10.200.10.1) ─┐                            ┌─ conn_1 ──┐
-  tun-df5 (10.200.10.5) ─┼─── QUIC (diverse src port)─┼─ conn_2 ──┼─ mt1 (10.200.10.0/24)
-  tun-bk5 (10.200.10.9) ─┘    same WAN, same dst port ┼─ conn_3 ──┘
+CLIENT (WAN5)                                         SERVER (:45015)
+  tun-cr5 (10.200.15.1) ─┐                            ┌─ conn_1 ──┐
+  tun-br5 (10.200.15.5) ─┼─── QUIC (diverse src port)─┼─ conn_2 ──┼─ mt5 (10.200.15.0/24)
+  tun-df5 (10.200.15.9) ─┘    same WAN, same dst port ┼─ conn_3 ──┘
                                                         │
                                                   routing table:
                                                   .1 → conn_1

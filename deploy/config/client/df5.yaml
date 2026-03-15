@@ -1,11 +1,12 @@
-# Default traffic class — Web, HTTPS, APIs, business apps
-# Binds to WAN5, connects to multi-conn server port 45010
+# Default traffic class on WAN5 (SL5) — web, HTTPS, APIs
+# Binds to WAN5, connects to multi-conn server port 45015
 role: client
 bind_ip: if:enp7s7
 remote_addr: VPS_PUBLIC_IP
-remote_port: 45010
+remote_port: 45015
 tun_name: df5
-tun_cidr: 10.200.10.5/24
+tun_cidr: 10.200.15.9/24
+metrics_listen: auto
 log_level: info
 tls_ca_file: /etc/mpquic/tls/ca.crt
 tls_server_name: mpquic-server

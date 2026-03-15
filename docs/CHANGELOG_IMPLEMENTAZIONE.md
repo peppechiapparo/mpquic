@@ -2,13 +2,25 @@
 
 ## 2026-03-15
 
+### Rename tunnel: numero = WAN
+- **Convenzione**: il suffisso numerico del tunnel ora corrisponde alla WAN:
+  - WAN4: cr4/br4/df4 (erano cr1/br1/df1)
+  - WAN5: cr5/br5/df5 (erano cr2/br2/df2)
+  - WAN6: cr6/br6/df6 (erano cr3/br3/df3)
+- **Decommissione Step 2.3**: rimossi cr5/df5/bk5 (old, 10.200.10.x) e mt1 —
+  la subnet 10.200.10.0/24 non è più in uso
+- **Rinominati**: config client/server, rt_tables, prometheus, vlan-classifier,
+  isolation-test, vps-routes, install_mpquic.sh, tutta la documentazione
+- **Rimosso**: `scripts/mpquic-mt-classifier.sh` (Step 2.3 classifier obsoleto)
+- **Dashboard Grafana**: nessun cambiamento necessario (query basate su regex)
+
 ### Fix routing bd1 + mp1 crash loop
 - **Fix rt_tables**: aggiunto `200 bd1` in `/etc/iproute2/rt_tables` (mancante dopo
-  la correzione del 14/03 che ha rinominato `120 bd1` → `120 mt_cr1`)
+  la correzione del 14/03 che ha rinominato `120 bd1` → `120 mt_cr4`)
 - **Fix 27-bd1.network**: corretto `Table=120` → `Table=200` — la VLAN 17 inviava
-  il traffico alla tabella `mt_cr1` anziché `bd1`, causando uscita da enp6s18
+  il traffico alla tabella `mt_cr4` anziché `bd1`, causando uscita da enp6s18
   (main table) anziché dal tunnel mp1
-- **Fix ip rule 1017**: aggiornata live `from 172.16.17.0/30 lookup bd1` (era mt_cr1)
+- **Fix ip rule 1017**: aggiornata live `from 172.16.17.0/30 lookup bd1` (era mt_cr4)
 - **Fix mp1 crash loop (450 restart)**: il servizio `mpquic@mp1` andava in crash per
   `ExecStartPost` che eseguiva `ip route replace ... table bd1` ma la tabella bd1
   non era definita in rt_tables → exit 255 → service killed
@@ -21,23 +33,23 @@
 ### Step 2.5: Multi-tunnel VLAN — install script, deploy e verifica end-to-end
 - **`install_mpquic.sh` aggiornato** per installazione completa Step 2.5 su nuove TBOX:
   - Client: installa VLAN `.netdev`/`.network` in `/etc/systemd/network/`, config
-    multi-tunnel (cr1-3/br1-3/df1-3), classifier, e abilita tutti i servizi
-  - Server: installa config mt1/mt4/mt5/mt6, apre porte NFT (45010/45014-45016),
+    multi-tunnel (cr4-3/br4-3/df4-3), classifier, e abilita tutti i servizi
+  - Server: installa config mt4/mt5/mt6, apre porte NFT (45014-45016),
     configura forward e NAT per `mt*` tunnel e subnet 10.200.{10,14,15,16}.0/24
 - **VPS routes** (`mpquic-vps-routes.sh`): aggiunte route di ritorno per VLAN transit
   subnets 172.16.{11-13,21-23,31-33}.0/30 via mt4/mt5/mt6
 - **VPS nftables** (`mpquic-vps.nft`): forward per `mt*` tunnel + NAT per subnet
   multi-tunnel e VLAN transit
-- **Config fix**: aggiunto `metrics_listen: auto` a br1, df1, br2, df2, br3, df3
+- **Config fix**: aggiunto `metrics_listen: auto` a br4, df4, br5, df5, br6, df6
 - **Deploy client**: VLAN networkd (9 .netdev + 9 .network), LAN trunk con VLAN= lines,
   ip rules 800-808, rt_tables 120-128, VLAN classifier applicato
-- **Deploy VPS**: forward rules mt1/mt4/mt5/mt6 ↔ eth0, VLAN transit routes (9 subnets),
+- **Deploy VPS**: forward rules mt4/mt5/mt6 ↔ eth0, VLAN transit routes (9 subnets),
   nftables salvato in `/etc/nftables.conf`, `mpquic-vps-routes.service` riavviato
 - **Verifica end-to-end**: 9/9 class tunnel UP + ping peer VPS OK:
-  - WAN4 (SL4, terrestrial): cr1/br1/df1 → 10.200.14.254 — ~110ms RTT
-  - WAN5 (SL5, Starlink): cr2/br2/df2 → 10.200.15.254 — ~13ms RTT
-  - WAN6 (SL6, Starlink): cr3/br3/df3 → 10.200.16.254 — ~19ms RTT
-- **Fix rt_tables**: corretto entry stale `120 bd1` → `120 mt_cr1`
+  - WAN4 (SL4, terrestrial): cr4/br4/df4 → 10.200.14.254 — ~110ms RTT
+  - WAN5 (SL5, Starlink): cr5/br5/df5 → 10.200.15.254 — ~13ms RTT
+  - WAN6 (SL6, Starlink): cr6/br6/df6 → 10.200.16.254 — ~19ms RTT
+- **Fix rt_tables**: corretto entry stale `120 bd1` → `120 mt_cr4`
 - **Documentazione**: sezione 23 in INSTALLAZIONE_TEST.md (procedura completa)
 
 ### Fase 5 Metriche: completata
@@ -184,7 +196,12 @@
 - `learnRoute()` per return-path su traffico non-NATtato (`b93155c`)
 - Config flag `multi_conn_enabled: true`
 
-### Step 2.2 — Client istanze per-classe + classifier (`058ddca`, `477d08d`)
+### Step 2.2-2.3 — Test multi-tunnel su WAN5 (DECOMMISSIONATO)
+> **Nota**: Questi step usavano i nomi cr5/df5/bk5 sulla subnet 10.200.10.0/24
+> con server mt1 (porta 45010). Sono stati **decommissionati** il 15/03/2026
+> con il rename che unifica la numerazione tunnel=WAN. I nomi cr5/df5 ora
+> identificano i tunnel WAN5 rinominati (ex cr2/df2, subnet 10.200.15.x).
+
 - 3 istanze client: cr5 (critical), df5 (default), bk5 (bulk) sulla stessa WAN5
 - Deploy configs: `deploy/config/client/{cr5,df5,bk5}.yaml` + `.env`
 - Server config: `deploy/config/server/mt1.yaml` (porta 45010, TUN mt1, /24)
@@ -192,7 +209,7 @@
 - Masquerade per-tunnel (NAT src → TUN IP) per return-path server
 - Persistenza nftables in `/etc/nftables.conf`
 
-### Step 2.3 — Deploy e test end-to-end
+### Step 2.3 — Deploy e test end-to-end (DECOMMISSIONATO)
 - VPS: `mpquic@mt1` su porta 45010, NFT aperta, TUN mt1 10.200.10.254/24
 - Client: 3 servizi `mpquic@{cr5,df5,bk5}` attivi, TUN UP con IP corretti
 - Test OpenWrt: `mwan3 use SLx ping` → traffico classificato → VPS → internet → reply ✓
@@ -200,11 +217,11 @@
 - RTT ~14ms su WAN5
 
 ### Step 2.4 — Test isolamento con netem + iperf3 (2026-02-28)
-- **RTT isolation**: netem 10%/30% loss su br2 → cr2 e df2 a 0% loss
+- **RTT isolation**: netem 10%/30% loss su br5 → cr5 e df5 a 0% loss
 - **Throughput isolation**: iperf3 con device binding (`-B IP%dev`)
-  - Baseline: cr2=50.2, br2=48.1, df2=50.0 Mbps
-  - 10% loss br2: cr2=50.2 (±0%), br2=2.3 (−95%), df2=50.2 (±0%)
-  - 30% loss br2: cr2=50.2 (±0%), br2=0.4 (−99%), df2=49.8 (±0%)
+  - Baseline: cr5=50.2, br5=48.1, df5=50.0 Mbps
+  - 10% loss br5: cr5=50.2 (±0%), br5=2.3 (−95%), df5=50.2 (±0%)
+  - 30% loss br5: cr5=50.2 (±0%), br5=0.4 (−99%), df5=49.8 (±0%)
 - **Conclusione**: isolamento perfetto tra tunnel sulla stessa WAN
 - VPS nftables: aggiunta regola `iifname "mt*" accept` + `tcp dport 5201`
 - Nota: subnet /24 condivisa richiede binding esplicito per-device nei test

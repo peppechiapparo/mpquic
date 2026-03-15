@@ -75,19 +75,19 @@ scrape_configs:
           transport: "stripe"
       - targets: ["10.200.14.1:9090"]
         labels:
-          instance_name: "cr1"
+          instance_name: "cr4"
           role: "client"
           site: "client"
           transport: "quic"
       - targets: ["10.200.16.1:9090"]
         labels:
-          instance_name: "cr2"
+          instance_name: "cr5"
           role: "client"
           site: "client"
           transport: "quic"
       - targets: ["10.200.10.1:9090"]
         labels:
-          instance_name: "cr3"
+          instance_name: "cr6"
           role: "client"
           site: "client"
           transport: "quic"

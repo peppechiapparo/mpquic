@@ -44,7 +44,6 @@ if [[ "$ROLE" == "client" ]]; then
 
   # VLAN classifier (Step 2.5)
   install -m 0755 "$ROOT_DIR/scripts/mpquic-vlan-classifier.sh" /usr/local/sbin/mpquic-vlan-classifier.sh
-  install -m 0755 "$ROOT_DIR/scripts/mpquic-mt-classifier.sh" /usr/local/sbin/mpquic-mt-classifier.sh
 
   install -d /etc/network/if-up.d /etc/network/if-post-down.d
   install -m 0755 "$ROOT_DIR/deploy/hooks/mpquic-ifupdown-hook" /etc/network/if-up.d/mpquic-auto
@@ -69,18 +68,8 @@ if [[ "$ROLE" == "client" ]]; then
     [[ -f "$f" ]] && install -m 0644 "$f" /etc/systemd/network/
   done
 
-  # Multi-tunnel client configs: cr1-3, br1-3, df1-3 (Step 2.5)
-  for inst in cr1 br1 df1 cr2 br2 df2 cr3 br3 df3; do
-    if [[ -f "$ROOT_DIR/deploy/config/client/${inst}.yaml" ]]; then
-      install -m 0644 "$ROOT_DIR/deploy/config/client/${inst}.yaml" "/etc/mpquic/instances/${inst}.yaml.tpl"
-    fi
-    if [[ -f "$ROOT_DIR/deploy/config/client/${inst}.env" ]]; then
-      install -m 0644 "$ROOT_DIR/deploy/config/client/${inst}.env" "/etc/mpquic/instances/${inst}.env"
-    fi
-  done
-
-  # Test multi-tunnel on WAN5 (cr5/df5/bk5)
-  for inst in cr5 df5 bk5; do
+  # Multi-tunnel client configs: WAN4 (cr4/br4/df4), WAN5 (cr5/br5/df5), WAN6 (cr6/br6/df6)
+  for inst in cr4 br4 df4 cr5 br5 df5 cr6 br6 df6; do
     if [[ -f "$ROOT_DIR/deploy/config/client/${inst}.yaml" ]]; then
       install -m 0644 "$ROOT_DIR/deploy/config/client/${inst}.yaml" "/etc/mpquic/instances/${inst}.yaml.tpl"
     fi
@@ -112,8 +101,8 @@ if [[ "$ROLE" == "server" ]]; then
     /usr/local/lib/mpquic/generate_tls_certs.sh /etc/mpquic/tls mpquic-server 825
   fi
 
-  # Multi-tunnel server configs: mt1, mt4, mt5, mt6 (Step 2.5)
-  for inst in mt1 mt4 mt5 mt6; do
+  # Multi-tunnel server configs: mt4, mt5, mt6 (Step 2.5)
+  for inst in mt4 mt5 mt6; do
     if [[ -f "$ROOT_DIR/deploy/config/server/${inst}.yaml" ]]; then
       install -m 0644 "$ROOT_DIR/deploy/config/server/${inst}.yaml" "/etc/mpquic/instances/${inst}.yaml.tpl"
     fi
@@ -134,15 +123,15 @@ if [[ "$ROLE" == "server" ]]; then
       if ! nft list chain inet filter input | grep -q 'udp dport 45001-45006 accept'; then
         nft add rule inet filter input udp dport 45001-45006 accept
       fi
-      # Multi-tunnel ports 45010 + 45014-45017 + 46017
-      for port in 45010 45014 45015 45016 45017 46017; do
+      # Multi-tunnel ports 45014-45017 + 46017
+      for port in 45014 45015 45016 45017 46017; do
         if ! nft list chain inet filter input | grep -q "udp dport ${port} accept"; then
           nft add rule inet filter input udp dport "$port" accept
         fi
       done
       # Forward for mt* tunnels
       if nft list chain inet filter forward >/dev/null 2>&1; then
-        for tun in mt1 mt4 mt5 mt6; do
+        for tun in mt4 mt5 mt6; do
           if ! nft list chain inet filter forward | grep -q "iifname \"${tun}\".*accept"; then
             nft add rule inet filter forward iifname "$tun" oifname "eth0" accept
             nft add rule inet filter forward iifname "eth0" oifname "$tun" ct state established,related accept
@@ -151,7 +140,7 @@ if [[ "$ROLE" == "server" ]]; then
       fi
       # NAT for multi-tunnel subnets
       if nft list chain ip nat postrouting >/dev/null 2>&1; then
-        for subnet in 10.200.10.0/24 10.200.14.0/24 10.200.15.0/24 10.200.16.0/24; do
+        for subnet in 10.200.14.0/24 10.200.15.0/24 10.200.16.0/24; do
           if ! nft list chain ip nat postrouting | grep -q "ip saddr ${subnet} masquerade"; then
             nft add rule ip nat postrouting oifname "eth0" ip saddr "$subnet" masquerade
           fi
@@ -174,7 +163,7 @@ done
 
 if [[ "$ROLE" == "client" ]]; then
   # Enable multi-tunnel class instances (Step 2.5)
-  for inst in cr1 br1 df1 cr2 br2 df2 cr3 br3 df3 cr5 df5 bk5; do
+  for inst in cr4 br4 df4 cr5 br5 df5 cr6 br6 df6; do
     if [[ -f "/etc/mpquic/instances/${inst}.env" ]]; then
       systemctl enable mpquic@"$inst".service
     fi
@@ -194,7 +183,7 @@ if [[ "$ROLE" == "client" ]]; then
   /usr/local/sbin/mpquic-vlan-classifier.sh apply all 2>/dev/null || echo "  (VLAN classifier skipped — VLAN interfaces may not be up yet)"
 else
   # Enable multi-tunnel server instances (Step 2.5)
-  for inst in mt1 mt4 mt5 mt6; do
+  for inst in mt4 mt5 mt6; do
     if [[ -f "/etc/mpquic/instances/${inst}.env" ]]; then
       systemctl enable mpquic@"$inst".service
     fi

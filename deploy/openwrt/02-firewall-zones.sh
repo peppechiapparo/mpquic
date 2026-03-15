@@ -44,20 +44,20 @@ add_zone() {
     uci set firewall.fwd_lan_${zone_name}.dest="${zone_name}"
 }
 
-# === WAN4 / SL4 — cr1, br1, df1 =============================================
-add_zone wan_cr1 cr1
-add_zone wan_br1 br1
-add_zone wan_df1 df1
+# === WAN4 / SL4 — cr4, br4, df4 =============================================
+add_zone wan_cr1 cr4
+add_zone wan_br1 br4
+add_zone wan_df1 df4
 
-# === WAN5 / SL5 — cr2, br2, df2 =============================================
-add_zone wan_cr2 cr2
-add_zone wan_br2 br2
-add_zone wan_df2 df2
+# === WAN5 / SL5 — cr5, br5, df5 =============================================
+add_zone wan_cr2 cr5
+add_zone wan_br2 br5
+add_zone wan_df2 df5
 
-# === WAN6 / SL6 — cr3, br3, df3 =============================================
-add_zone wan_cr3 cr3
-add_zone wan_br3 br3
-add_zone wan_df3 df3
+# === WAN6 / SL6 — cr6, br6, df6 =============================================
+add_zone wan_cr3 cr6
+add_zone wan_br3 br6
+add_zone wan_df3 df6
 
 # === Commit & apply ==========================================================
 echo ""

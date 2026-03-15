@@ -24,7 +24,7 @@ done
 
 # --- Network: interfaces ---
 echo "--- Removing interfaces ---"
-for iface in cr1 br1 df1 cr2 br2 df2 cr3 br3 df3; do
+for iface in cr4 br4 df4 cr5 br5 df5 cr6 br6 df6; do
     uci -q delete network.${iface} 2>/dev/null && echo "  [-] interface ${iface}" || true
 done
 
@@ -41,7 +41,7 @@ uci commit firewall
 
 # --- mwan3: interfaces, members, policies, rules ---
 echo "--- Removing mwan3 config ---"
-for iface in cr1 br1 df1 cr2 br2 df2 cr3 br3 df3; do
+for iface in cr4 br4 df4 cr5 br5 df5 cr6 br6 df6; do
     uci -q delete mwan3.${iface} 2>/dev/null && echo "  [-] mwan3 interface ${iface}" || true
 done
 

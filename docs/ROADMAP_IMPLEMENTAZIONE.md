@@ -116,13 +116,13 @@ di traffico. Il packet loss su un link impatta solo le applicazioni di quella cl
 CLIENT (VM MPQUIC)                                            SERVER (VPS)
                                                              
  LAN traffic ──▶ nftables classifier                         ┌─────────────────────┐
-                  │                                          │ porta 45010         │
+                  │                                          │ porta 45015         │
                   ├─ VoIP (UDP 5060) ──▶ tun-critical ─┐     │                     │
-                  │                     10.200.10.1/24  │     │  conn_1 ◄──────────┤
-                  ├─ HTTPS (TCP 443) ──▶ tun-default  ─┼QUIC─┤  conn_2 (same port)│──▶ tun-mt1
-                  │                     10.200.10.5/24  │WAN5 │  conn_3            │   10.200.10.0/24
+                  │                     10.200.15.1/24  │     │  conn_1 ◄──────────┤
+                  ├─ HTTPS (TCP 443) ──▶ tun-default  ─┼QUIC─┤  conn_2 (same port)│──▶ tun-mt5
+                  │                     10.200.15.5/24  │WAN5 │  conn_3            │   10.200.15.0/24
                   └─ Bulk (TCP 5001) ──▶ tun-bulk     ─┘     │                     │
-                                        10.200.10.9/24       │  routing table:     │──▶ NAT ──▶ Internet
+                                        10.200.15.9/24       │  routing table:     │──▶ NAT ──▶ Internet
                                                              │  .1 → conn_1       │
                                                              │  .5 → conn_2       │
                                                              │  .9 → conn_3       │
@@ -167,7 +167,10 @@ di ritorno. Ogni connessione è identificata dal suo Connection ID QUIC, non dal
 4. Config YAML per-classe (TUN IP diverso, stessa WAN, stessa porta server)
 5. Systemd units per-classe
 
-### Step 2.3 — Deploy e test su infra reale ✅ COMPLETATO (2026-02-28)
+### Step 2.3 — Deploy e test su infra reale ✅ COMPLETATO (2026-02-28) — DECOMMISSIONATO
+> **Nota**: Step 2.3 usava subnet 10.200.10.0/24 con server mt1 (porta 45010).
+> Decommissionato il 15/03/2026 con il rename tunnel=WAN.
+
 1. Deploy server multi-connessione sul VPS (porta 45010, TUN `mt1`, `10.200.10.0/24`)
 2. Deploy 3 istanze client su VM (WAN5):
    - `mpquic-critical@5`: TUN `cr5` → 10.200.10.1, bind WAN5, server :45010
@@ -182,34 +185,34 @@ di ritorno. Ogni connessione è identificata dal suo Connection ID QUIC, non dal
 
 ### Step 2.4 — Test isolamento e QoS ✅ COMPLETATO (2026-02-28)
 
-**Metodologia**: netem loss injection su singola TUN (br2), misura su tutte e 3 le TUN
-(cr2/br2/df2) dello stesso link WAN5. Binding esplicito per-device (`-B IP%dev`).
+**Metodologia**: netem loss injection su singola TUN (br5), misura su tutte e 3 le TUN
+(cr5/br5/df5) dello stesso link WAN5. Binding esplicito per-device (`-B IP%dev`).
 iperf3 3.12 → VPS iperf3 server (porta 5201).
 
 #### Risultati RTT (ping, 20 pacchetti per tunnel)
 
-| Tunnel | Baseline RTT | Baseline Loss | 10% netem br2 | 30% netem br2 |
+| Tunnel | Baseline RTT | Baseline Loss | 10% netem br5 | 30% netem br5 |
 |--------|-------------|---------------|----------------|----------------|
-| cr2 | 13.0 ms | 0% | **0% loss** | **0% loss** |
-| br2 | 13.2 ms | 0% | 15% loss | 35% loss |
-| df2 | 13.1 ms | 0% | **0% loss** | **0% loss** |
+| cr5 | 13.0 ms | 0% | **0% loss** | **0% loss** |
+| br5 | 13.2 ms | 0% | 15% loss | 35% loss |
+| df5 | 13.1 ms | 0% | **0% loss** | **0% loss** |
 
 #### Risultati Throughput (iperf3, 5s per tunnel, device-bound)
 
-| Tunnel | Baseline (Mbps) | 10% loss br2 (Mbps) | 30% loss br2 (Mbps) |
+| Tunnel | Baseline (Mbps) | 10% loss br5 (Mbps) | 30% loss br5 (Mbps) |
 |--------|----------------|---------------------|---------------------|
-| cr2 (critical) | 50.2 | **50.2** (±0%) | **50.2** (±0%) |
-| br2 (bulk) | 48.1 | **2.3** (−95%) | **0.4** (−99%) |
-| df2 (default) | 50.0 | **50.2** (±0%) | **49.8** (±0%) |
+| cr5 (critical) | 50.2 | **50.2** (±0%) | **50.2** (±0%) |
+| br5 (bulk) | 48.1 | **2.3** (−95%) | **0.4** (−99%) |
+| df5 (default) | 50.0 | **50.2** (±0%) | **49.8** (±0%) |
 
 **Conclusione**: isolamento perfetto — packet loss su un tunnel ha ZERO impatto
 su latenza e throughput degli altri tunnel, anche sotto loss del 30%.
-I tunnel cr2 e df2 mantengono throughput pieno (~50 Mbps) e 0% loss
-mentre br2 crolla a 0.4 Mbps. Questo dimostra il valore architetturale
+I tunnel cr5 e df5 mantengono throughput pieno (~50 Mbps) e 0% loss
+mentre br5 crolla a 0.4 Mbps. Questo dimostra il valore architetturale
 della separazione per classe di traffico.
 
 **Nota tecnica**: i 3 tunnel condividono la stessa subnet /24. Il kernel Linux
-usa la prima route (cr2). Per test isolati è necessario il binding esplicito
+usa la prima route (cr5). Per test isolati è necessario il binding esplicito
 `iperf3 -B IP%dev`. In produzione il VLAN classifier instrada correttamente.
 
 ### Step 2.5 — Generalizzazione: 3 WAN × 3 classi = 9 tunnel con VLAN 🔄 IN CORSO
@@ -223,45 +226,45 @@ instrada nel tunnel corretto in base alla VLAN di origine.
 
 | TBOX LAN (trunk) | OpenWrt IF | VLAN | Classe | Tunnel | WAN uscita |
 |------------------|------------|------|--------|--------|------------|
-| LAN4 (enp6s23) | eth11 | 11 | critical | cr1 | WAN4 (SL4) |
-| LAN4 (enp6s23) | eth11 | 12 | bulk | br1 | WAN4 (SL4) |
-| LAN4 (enp6s23) | eth11 | 13 | default | df1 | WAN4 (SL4) |
-| LAN5 (enp7s1) | eth12 | 21 | critical | cr2 | WAN5 (SL5) |
-| LAN5 (enp7s1) | eth12 | 22 | bulk | br2 | WAN5 (SL5) |
-| LAN5 (enp7s1) | eth12 | 23 | default | df2 | WAN5 (SL5) |
-| LAN6 (enp7s2) | eth13 | 31 | critical | cr3 | WAN6 (SL6) |
-| LAN6 (enp7s2) | eth13 | 32 | bulk | br3 | WAN6 (SL6) |
-| LAN6 (enp7s2) | eth13 | 33 | default | df3 | WAN6 (SL6) |
+| LAN4 (enp6s23) | eth11 | 11 | critical | cr4 | WAN4 (SL4) |
+| LAN4 (enp6s23) | eth11 | 12 | bulk | br4 | WAN4 (SL4) |
+| LAN4 (enp6s23) | eth11 | 13 | default | df4 | WAN4 (SL4) |
+| LAN5 (enp7s1) | eth12 | 21 | critical | cr5 | WAN5 (SL5) |
+| LAN5 (enp7s1) | eth12 | 22 | bulk | br5 | WAN5 (SL5) |
+| LAN5 (enp7s1) | eth12 | 23 | default | df5 | WAN5 (SL5) |
+| LAN6 (enp7s2) | eth13 | 31 | critical | cr6 | WAN6 (SL6) |
+| LAN6 (enp7s2) | eth13 | 32 | bulk | br6 | WAN6 (SL6) |
+| LAN6 (enp7s2) | eth13 | 33 | default | df6 | WAN6 (SL6) |
 
 **Flusso traffico**:
 ```
-OpenWrt (eth12.21) → VLAN 21 (critical) → TBOX enp7s1.21 → ip rule → cr2 TUN → WAN5 → VPS:45011
-OpenWrt (eth12.22) → VLAN 22 (bulk)     → TBOX enp7s1.22 → ip rule → br2 TUN → WAN5 → VPS:45011
-OpenWrt (eth12.23) → VLAN 23 (default)  → TBOX enp7s1.23 → ip rule → df2 TUN → WAN5 → VPS:45011
+OpenWrt (eth12.21) → VLAN 21 (critical) → TBOX enp7s1.21 → ip rule → cr5 TUN → WAN5 → VPS:45011
+OpenWrt (eth12.22) → VLAN 22 (bulk)     → TBOX enp7s1.22 → ip rule → br5 TUN → WAN5 → VPS:45011
+OpenWrt (eth12.23) → VLAN 23 (default)  → TBOX enp7s1.23 → ip rule → df5 TUN → WAN5 → VPS:45011
 ```
 
 **Server layout**: 3 porte, ciascuna multi-conn (3 classi):
-- 45010: WAN4 → cr1 + br1 + df1 (TUN mt4, subnet 10.200.10.0/24)
-- 45011: WAN5 → cr2 + br2 + df2 (TUN mt5, subnet 10.200.11.0/24)
-- 45012: WAN6 → cr3 + br3 + df3 (TUN mt6, subnet 10.200.12.0/24)
+- 45010: WAN4 → cr4 + br4 + df4 (TUN mt4, subnet 10.200.10.0/24)
+- 45011: WAN5 → cr5 + br5 + df5 (TUN mt5, subnet 10.200.11.0/24)
+- 45012: WAN6 → cr6 + br6 + df6 (TUN mt6, subnet 10.200.12.0/24)
 
 **Client VM (TBOX)**: VLAN sub-interfaces su ogni LAN trunk + classifier per-VLAN:
-- `enp6s23.11` → routing table mt_cr1 → default via cr1
-- `enp6s23.12` → routing table mt_br1 → default via br1
-- `enp6s23.13` → routing table mt_df1 → default via df1
-- `enp7s1.21` → routing table mt_cr2 → default via cr2
-- `enp7s1.22` → routing table mt_br2 → default via br2
-- `enp7s1.23` → routing table mt_df2 → default via df2
-- `enp7s2.31` → routing table mt_cr3 → default via cr3
-- `enp7s2.32` → routing table mt_br3 → default via br3
-- `enp7s2.33` → routing table mt_df3 → default via df3
+- `enp6s23.11` → routing table mt_cr4 → default via cr4
+- `enp6s23.12` → routing table mt_br4 → default via br4
+- `enp6s23.13` → routing table mt_df4 → default via df4
+- `enp7s1.21` → routing table mt_cr5 → default via cr5
+- `enp7s1.22` → routing table mt_br5 → default via br5
+- `enp7s1.23` → routing table mt_df5 → default via df5
+- `enp7s2.31` → routing table mt_cr6 → default via cr6
+- `enp7s2.32` → routing table mt_br6 → default via br6
+- `enp7s2.33` → routing table mt_df6 → default via df6
 
 **Lato OpenWrt**: piena libertà di routing — basta taggare il traffico sulla VLAN
 giusta (mwan3, firewall zone, DSCP→VLAN map, ecc.)
 
 **Passi implementativi**:
 1. ✅ Creare VLAN sub-interfaces su client VM (systemd-networkd .netdev + .network)
-2. ✅ Creare 9 configurazioni client YAML (cr1/br1/df1, cr2/br2/df2, cr3/br3/df3)
+2. ✅ Creare 9 configurazioni client YAML (cr4/br4/df4, cr5/br5/df5, cr6/br6/df6)
 3. ✅ Creare 3 configurazioni server YAML (mt4, mt5, mt6 multi-conn)
 4. ✅ Creare classifier per-VLAN (evoluzione di mpquic-mt-classifier.sh)
 5. ✅ Deploy server: 3 istanze multi-conn su porte 45014-45016 + nftables forward/NAT
@@ -317,16 +320,16 @@ ritrasmessi dal QUIC stack, e il CC algorithm guida pacing e recovery.
 **Datagram mode** (prima del fix):
 | Tunnel | CC | Baseline | 10% loss |
 |--------|-----|----------|----------|
-| cr3 | Cubic | 15.1 Mbps | 0.5 Mbps (−97%) |
-| br3 | BBR | 14.5 Mbps | 0.5 Mbps (−97%) |
-| df3 | Cubic | 14.9 Mbps | 0.9 Mbps (−94%) |
+| cr6 | Cubic | 15.1 Mbps | 0.5 Mbps (−97%) |
+| br6 | BBR | 14.5 Mbps | 0.5 Mbps (−97%) |
+| df6 | Cubic | 14.9 Mbps | 0.9 Mbps (−94%) |
 
 **Reliable mode** (dopo il fix):
 | Tunnel | CC | Baseline | 10% loss | 30% loss |
 |--------|-----|----------|----------|----------|
-| cr3 | Cubic | 45.2 Mbps | 41.9 Mbps (−7%) | 15.5 Mbps (−66%) |
-| br3 | **BBR** | 47.4 Mbps | 28.5 Mbps (−40%) | **26.1 Mbps (−45%)** |
-| df3 | Cubic | 55.8 Mbps | 39.7 Mbps (−29%) | 13.6 Mbps (−76%) |
+| cr6 | Cubic | 45.2 Mbps | 41.9 Mbps (−7%) | 15.5 Mbps (−66%) |
+| br6 | **BBR** | 47.4 Mbps | 28.5 Mbps (−40%) | **26.1 Mbps (−45%)** |
+| df6 | Cubic | 55.8 Mbps | 39.7 Mbps (−29%) | 13.6 Mbps (−76%) |
 
 **Conclusioni chiave**:
 - Reliable transport: **3× throughput** base (15→50 Mbps)
@@ -1397,10 +1400,9 @@ per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  VM 200 (Client MPQUIC)                              │   │
 │  │  10.200.17.1:9090  (mp1 client)                      │   │
-│  │  10.200.14.1:9090  (cr1 client)                      │   │
-│  │  10.200.15.1:9090  (cr5/df5/bk5 client)              │   │
-│  │  10.200.16.1:9090  (cr2 client)                      │   │
-│  │  10.200.10.1:9090  (cr3 client)                      │   │
+│  │  10.200.14.1:9090  (cr4 client)                      │   │
+│  │  10.200.15.1:9090  (cr5 client)                      │   │
+│  │  10.200.16.1:9090  (cr6 client)                      │   │
 │  │  10.200.4.1:9090   (mpq4 client)                     │   │
 │  │  10.200.5.1:9090   (mpq5 client)                     │   │
 │  │  10.200.6.1:9090   (mpq6 client)                     │   │
@@ -1420,7 +1422,7 @@ per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
 1. ✅ Creare LXC Prometheus (CT 201) su Proxmox — Debian 12, 1 vCPU, 512 MB RAM, 8 GB disk
 2. ✅ Creare LXC Grafana (CT 202) su Proxmox — Debian 12, 1 vCPU, 512 MB RAM, 8 GB disk
 3. ✅ Configurare routing: containers raggiungono subnet 10.200.x.0/24 via VM 200
-4. ✅ Installare e configurare Prometheus con scrape targets MPQUIC (tutti: mp1, cr1-cr5, mpq4-mpq6)
+4. ✅ Installare e configurare Prometheus con scrape targets MPQUIC (tutti: mp1, cr4-cr5, mpq4-mpq6)
 5. ✅ Installare Grafana 12.4.1, collegare datasource Prometheus
 6. ✅ Creare dashboard "MPQUIC Overview" (uid: `adsnpmk`) con pannelli:
    - Overview: Uptime, Sessioni attive, Path attivi, TX totale, RX totale
@@ -1438,7 +1440,7 @@ per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
 **Configurazione Prometheus** (`deploy/monitoring/prometheus/prometheus.yml`):
 - Scrape interval: 15s
 - Job `mpquic-server`: mp1 (10.200.17.254:9090)
-- Job `mpquic-client`: mp1, cr1-cr5, mpq4, mpq5, mpq6 (9 target totali)
+- Job `mpquic-client`: mp1, cr4-cr5, mpq4, mpq5, mpq6 (9 target totali)
 - Transport datagram per mpq4-mpq6
 
 **Layer 3 — Consumer** (futuro, Fase 6):
@@ -1490,7 +1492,9 @@ per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
 |---------|------|-----|-----------|------------|
 | mpq1-3 | single-link | WAN1-3 | QUIC | — (no modem) |
 | mpq4-6 | single-link | WAN4-6 | QUIC reliable | ~50 Mbps |
-| cr5/df5/bk5 | multi-tunnel | WAN5 | QUIC reliable | ~50 Mbps (isolato) |
+| cr4/br4/df4 | multi-tunnel | WAN4 | QUIC reliable | ~50 Mbps (isolato) |
+| cr5/br5/df5 | multi-tunnel | WAN5 | QUIC reliable | ~50 Mbps (isolato) |
+| cr6/br6/df6 | multi-tunnel | WAN6 | QUIC reliable | ~50 Mbps (isolato) |
 | **mp1** | **multipath 2 WAN** | **WAN5+6** | **UDP stripe + FEC adaptive + ARQ** | **374 Mbps (picco 499)** |
 
 ---

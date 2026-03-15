@@ -1,4 +1,4 @@
-# Multi-conn server for WAN6 (SL6) — accepts cr3 + br3 + df3
+# Multi-conn server for WAN6 (SL6) — accepts cr6 + br6 + df6
 role: server
 bind_ip: 0.0.0.0
 remote_port: 45016

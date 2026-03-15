@@ -4,15 +4,15 @@
 #
 # Routes traffic from VLAN sub-interfaces into the correct tunnel:
 #
-#   VLAN 11 (enp6s23.11) → cr1  (critical via WAN4/SL4)
-#   VLAN 12 (enp6s23.12) → br1  (bulk     via WAN4/SL4)
-#   VLAN 13 (enp6s23.13) → df1  (default  via WAN4/SL4)
-#   VLAN 21 (enp7s1.21)  → cr2  (critical via WAN5/SL5)
-#   VLAN 22 (enp7s1.22)  → br2  (bulk     via WAN5/SL5)
-#   VLAN 23 (enp7s1.23)  → df2  (default  via WAN5/SL5)
-#   VLAN 31 (enp7s2.31)  → cr3  (critical via WAN6/SL6)
-#   VLAN 32 (enp7s2.32)  → br3  (bulk     via WAN6/SL6)
-#   VLAN 33 (enp7s2.33)  → df3  (default  via WAN6/SL6)
+#   VLAN 11 (enp6s23.11) → cr4  (critical via WAN4/SL4)
+#   VLAN 12 (enp6s23.12) → br4  (bulk     via WAN4/SL4)
+#   VLAN 13 (enp6s23.13) → df4  (default  via WAN4/SL4)
+#   VLAN 21 (enp7s1.21)  → cr5  (critical via WAN5/SL5)
+#   VLAN 22 (enp7s1.22)  → br5  (bulk     via WAN5/SL5)
+#   VLAN 23 (enp7s1.23)  → df5  (default  via WAN5/SL5)
+#   VLAN 31 (enp7s2.31)  → cr6  (critical via WAN6/SL6)
+#   VLAN 32 (enp7s2.32)  → br6  (bulk     via WAN6/SL6)
+#   VLAN 33 (enp7s2.33)  → df6  (default  via WAN6/SL6)
 #
 # Classification uses 'iif' (incoming interface) based ip rules, which is
 # cleaner than source-IP matching for VLAN-tagged traffic.
@@ -27,23 +27,23 @@ set -euo pipefail
 # ── Configuration ──────────────────────────────────────────────────────────
 # Each entry: VLAN_IFACE  TUNNEL  TABLE_NAME  TABLE_ID  PRIORITY
 #
-# Table IDs 120-128 (avoid conflict with wan1-6=100-105, mt_cr5/df5/bk5=110-112)
+# Table IDs 120-128 (avoid conflict with wan1-6=100-105)
 # Priorities 800-808 (higher priority than wan rules at 1001-1006)
 
 ENTRIES_SET1=(
-  "enp6s23.11  cr1  mt_cr1  120  800"
-  "enp6s23.12  br1  mt_br1  121  801"
-  "enp6s23.13  df1  mt_df1  122  802"
+  "enp6s23.11  cr4  mt_cr4  120  800"
+  "enp6s23.12  br4  mt_br4  121  801"
+  "enp6s23.13  df4  mt_df4  122  802"
 )
 ENTRIES_SET2=(
-  "enp7s1.21   cr2  mt_cr2  123  803"
-  "enp7s1.22   br2  mt_br2  124  804"
-  "enp7s1.23   df2  mt_df2  125  805"
+  "enp7s1.21   cr5  mt_cr5  123  803"
+  "enp7s1.22   br5  mt_br5  124  804"
+  "enp7s1.23   df5  mt_df5  125  805"
 )
 ENTRIES_SET3=(
-  "enp7s2.31   cr3  mt_cr3  126  806"
-  "enp7s2.32   br3  mt_br3  127  807"
-  "enp7s2.33   df3  mt_df3  128  808"
+  "enp7s2.31   cr6  mt_cr6  126  806"
+  "enp7s2.32   br6  mt_br6  127  807"
+  "enp7s2.33   df6  mt_df6  128  808"
 )
 
 # WAN gateways and devices per set, for VPS route
@@ -281,9 +281,9 @@ case "$ACTION" in
     echo "usage: $0 {apply|remove|status} [set1|set2|set3|all]" >&2
     echo ""
     echo "  Sets:"
-    echo "    set1  WAN4/SL4: cr1 + br1 + df1 (VLANs 11/12/13)"
-    echo "    set2  WAN5/SL5: cr2 + br2 + df2 (VLANs 21/22/23)"
-    echo "    set3  WAN6/SL6: cr3 + br3 + df3 (VLANs 31/32/33)"
+    echo "    set1  WAN4/SL4: cr4 + br4 + df4 (VLANs 11/12/13)"
+    echo "    set2  WAN5/SL5: cr5 + br5 + df5 (VLANs 21/22/23)"
+    echo "    set3  WAN6/SL6: cr6 + br6 + df6 (VLANs 31/32/33)"
     echo "    all   All sets (default)"
     exit 1
     ;;

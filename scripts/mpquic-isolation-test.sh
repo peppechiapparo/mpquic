@@ -6,10 +6,10 @@
 # injecting loss on ONE tunnel does NOT degrade the others.
 #
 # Test plan:
-#   1. BASELINE: measure RTT + throughput on all 3 tunnels (cr2/br2/df2 on WAN5)
-#   2. LOSS on br2: inject 10% loss via netem on br2 TUN interface
+#   1. BASELINE: measure RTT + throughput on all 3 tunnels (cr5/br5/df5 on WAN5)
+#   2. LOSS on br5: inject 10% loss via netem on br5 TUN interface
 #   3. MEASURE under loss: re-measure all 3 tunnels
-#   4. Compare: cr2 and df2 should be unaffected by br2 loss
+#   4. Compare: cr5 and df5 should be unaffected by br5 loss
 #   5. Cleanup: remove netem qdisc
 #
 # Requires:
@@ -20,15 +20,15 @@
 # Usage:
 #   mpquic-isolation-test.sh [baseline|loss|cleanup|full]
 #
-# We test on WAN5 set (cr2/br2/df2) because it has the best RTT (~14ms).
+# We test on WAN5 set (cr5/br5/df5) because it has the best RTT (~14ms).
 ###############################################################################
 set -euo pipefail
 
 # ── Configuration ──────────────────────────────────────────────────────────
 VPS_TUN_IP_MT5="10.200.15.254"       # VPS-side TUN IP for mt5 subnet
-TUNNELS=(cr2 br2 df2)
+TUNNELS=(cr5 br5 df5)
 TUN_IPS=(10.200.15.1 10.200.15.5 10.200.15.9)
-LOSS_TARGET="br2"                     # inject loss on this tunnel
+LOSS_TARGET="br5"                     # inject loss on this tunnel
 LOSS_PERCENT="10"                     # % packet loss to inject
 IPERF_DURATION=10                     # seconds per iperf3 test
 IPERF_PORT_BASE=5201                  # VPS iperf3 server port
@@ -223,8 +223,8 @@ do_full() {
   cat "${RESULTS_DIR}/loss_${TIMESTAMP}.txt" 2>/dev/null | sed 's/^/  /'
   hr
   log ""
-  log "Key finding: cr2 and df2 RTT/throughput should be UNCHANGED"
-  log "while br2 shows degraded throughput and/or higher retransmits."
+  log "Key finding: cr5 and df5 RTT/throughput should be UNCHANGED"
+  log "while br5 shows degraded throughput and/or higher retransmits."
 
   stop_vps_iperf || true
 }

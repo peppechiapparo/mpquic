@@ -58,27 +58,27 @@ add_vlan() {
 }
 
 # === SL4 / WAN4 — VLANs 11, 12, 13 =========================================
-#   critical (cr1): VLAN 11, 172.16.11.0/30, metric 10
-#   bulk     (br1): VLAN 12, 172.16.12.0/30, metric 30
-#   default  (df1): VLAN 13, 172.16.13.0/30, metric 20
+#   critical (cr4): VLAN 11, 172.16.11.0/30, metric 10
+#   bulk     (br4): VLAN 12, 172.16.12.0/30, metric 30
+#   default  (df4): VLAN 13, 172.16.13.0/30, metric 20
 
 add_vlan "$TRUNK_SL4" 11 cr 1  172.16.11.2  172.16.11.1  10
 add_vlan "$TRUNK_SL4" 12 br 1  172.16.12.2  172.16.12.1  30
 add_vlan "$TRUNK_SL4" 13 df 1  172.16.13.2  172.16.13.1  20
 
 # === SL5 / WAN5 — VLANs 21, 22, 23 =========================================
-#   critical (cr2): VLAN 21, 172.16.21.0/30, metric 10
-#   bulk     (br2): VLAN 22, 172.16.22.0/30, metric 30
-#   default  (df2): VLAN 23, 172.16.23.0/30, metric 20
+#   critical (cr5): VLAN 21, 172.16.21.0/30, metric 10
+#   bulk     (br5): VLAN 22, 172.16.22.0/30, metric 30
+#   default  (df5): VLAN 23, 172.16.23.0/30, metric 20
 
 add_vlan "$TRUNK_SL5" 21 cr 2  172.16.21.2  172.16.21.1  10
 add_vlan "$TRUNK_SL5" 22 br 2  172.16.22.2  172.16.22.1  30
 add_vlan "$TRUNK_SL5" 23 df 2  172.16.23.2  172.16.23.1  20
 
 # === SL6 / WAN6 — VLANs 31, 32, 33 =========================================
-#   critical (cr3): VLAN 31, 172.16.31.0/30, metric 10
-#   bulk     (br3): VLAN 32, 172.16.32.0/30, metric 30
-#   default  (df3): VLAN 33, 172.16.33.0/30, metric 20
+#   critical (cr6): VLAN 31, 172.16.31.0/30, metric 10
+#   bulk     (br6): VLAN 32, 172.16.32.0/30, metric 30
+#   default  (df6): VLAN 33, 172.16.33.0/30, metric 20
 
 add_vlan "$TRUNK_SL6" 31 cr 3  172.16.31.2  172.16.31.1  10
 add_vlan "$TRUNK_SL6" 32 br 3  172.16.32.2  172.16.32.1  30
