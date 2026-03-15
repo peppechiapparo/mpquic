@@ -170,7 +170,7 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "up{job=\"mpquic-client\", instance_name=~\"cr.*\"}",
+          "expr": "up{job=\"mpquic-client\", instance_name=~\"cr[456]\"}",
           "legendFormat": "{{instance_name}}",
           "refId": "A"
         }
@@ -243,7 +243,7 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "up{job=\"mpquic-client\", instance_name=~\"br.*|bk.*\"}",
+          "expr": "up{job=\"mpquic-client\", instance_name=~\"br[456]\"}",
           "legendFormat": "{{instance_name}}",
           "refId": "A"
         }
@@ -316,7 +316,7 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "up{job=\"mpquic-client\", instance_name=~\"df.*\"}",
+          "expr": "up{job=\"mpquic-client\", instance_name=~\"df[456]\"}",
           "legendFormat": "{{instance_name}}",
           "refId": "A"
         }
@@ -389,7 +389,7 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "up{job=\"mpquic-client\", instance_name=~\"mpq.*\"}",
+          "expr": "up{job=\"mpquic-client\", instance_name=~\"mpq[456]\"}",
           "legendFormat": "{{instance_name}}",
           "refId": "A"
         },
@@ -467,7 +467,7 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "up{job=\"mpquic-server\"}",
+          "expr": "up{job=\"mpquic-server\", instance_name=~\"mp1|mt[456]\"}",
           "legendFormat": "{{instance_name}}",
           "refId": "A"
         }
@@ -519,7 +519,7 @@
         "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "auto",
-        "orientation": "horizontal",
+        "orientation": "vertical",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -528,14 +528,14 @@
           "values": false
         },
         "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
+        "textMode": "value_and_name",
+        "wideLayout": false
       },
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "max by (instance_name, job) (mpquic_uptime_seconds{job=~\"$job\"})",
-          "legendFormat": "{{instance_name}} ({{job}})",
+          "expr": "mpquic_uptime_seconds{instance_name=~\"mp1|mpq[456]\"}",
+          "legendFormat": "{{instance_name}}",
           "refId": "A"
         }
       ],
@@ -700,7 +700,7 @@
         "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "auto",
-        "orientation": "horizontal",
+        "orientation": "auto",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -709,14 +709,14 @@
           "values": false
         },
         "showPercentChange": false,
-        "textMode": "auto",
+        "textMode": "value_and_name",
         "wideLayout": true
       },
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "max by (instance_name, job) (mpquic_tx_bytes_total{job=~\"$job\"})",
-          "legendFormat": "{{instance_name}}",
+          "expr": "sum(mpquic_tx_bytes_total{job=\"mpquic-client\"})",
+          "legendFormat": "Client totale",
           "refId": "A"
         }
       ],
@@ -755,7 +755,7 @@
         "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "auto",
-        "orientation": "horizontal",
+        "orientation": "auto",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -764,14 +764,14 @@
           "values": false
         },
         "showPercentChange": false,
-        "textMode": "auto",
+        "textMode": "value_and_name",
         "wideLayout": true
       },
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "max by (instance_name, job) (mpquic_rx_bytes_total{job=~\"$job\"})",
-          "legendFormat": "{{instance_name}}",
+          "expr": "sum(mpquic_rx_bytes_total{job=\"mpquic-client\"})",
+          "legendFormat": "Client totale",
           "refId": "A"
         }
       ],
@@ -787,7 +787,7 @@
         "y": 16
       },
       "id": 10,
-      "title": "Multipath Stripe — mp1 (WAN5 + WAN6)",
+      "title": "Multipath Stripe \u2014 mp1 (WAN5 + WAN6)",
       "type": "row"
     },
     {
@@ -1961,7 +1961,7 @@
         "y": 79
       },
       "id": 31,
-      "title": "Quality — FEC / ARQ / Loss (mp1 server)",
+      "title": "Quality \u2014 FEC / ARQ / Loss (mp1 server)",
       "type": "row"
     },
     {
@@ -2163,7 +2163,7 @@
           "refId": "C"
         }
       ],
-      "title": "ARQ — NACK / Retransmit / Dup",
+      "title": "ARQ \u2014 NACK / Retransmit / Dup",
       "type": "timeseries"
     },
     {
@@ -2227,7 +2227,7 @@
           "refId": "A"
         }
       ],
-      "title": "Adaptive FEC M (shards parità)",
+      "title": "Adaptive FEC M (shards parit\u00e0)",
       "type": "timeseries"
     },
     {
@@ -2303,7 +2303,7 @@
         "y": 96
       },
       "id": 37,
-      "title": "Stripe — dettaglio client (mp1)",
+      "title": "Stripe \u2014 dettaglio client (mp1)",
       "type": "row"
     },
     {
@@ -2483,5 +2483,5 @@
   "timezone": "browser",
   "title": "MPQUIC Overview",
   "uid": "adsnpmk",
-  "version": 7
+  "version": 8
 }
