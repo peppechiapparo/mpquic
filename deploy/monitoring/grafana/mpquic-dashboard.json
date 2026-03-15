@@ -73,11 +73,84 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 16,
+        "w": 4,
         "x": 0,
         "y": 1
       },
-      "id": 2,
+      "id": 40,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
+      },
+      "pluginVersion": "12.4.1",
+      "targets": [
+        {
+          "expr": "max by (wan) (up{job=\"mpquic-client\", wan!=\"\"})",
+          "legendFormat": "{{wan}}",
+          "refId": "A"
+        }
+      ],
+      "title": "WANs",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "",
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "DOWN"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "UP"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 4,
+        "y": 1
+      },
+      "id": 41,
       "options": {
         "colorMode": "background",
         "graphMode": "none",
@@ -97,9 +170,29 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "up{job=\"mpquic-client\"}",
+          "expr": "up{job=\"mpquic-client\", instance_name=~\"cr.*\"}",
           "legendFormat": "{{instance_name}}",
           "refId": "A"
+        },
+        {
+          "expr": "up{job=\"mpquic-client\", instance_name=~\"br.*|bk.*\"}",
+          "legendFormat": "{{instance_name}}",
+          "refId": "B"
+        },
+        {
+          "expr": "up{job=\"mpquic-client\", instance_name=~\"df.*\"}",
+          "legendFormat": "{{instance_name}}",
+          "refId": "C"
+        },
+        {
+          "expr": "up{job=\"mpquic-client\", instance_name=~\"mpq.*\"}",
+          "legendFormat": "{{instance_name}}",
+          "refId": "D"
+        },
+        {
+          "expr": "up{job=\"mpquic-client\", instance_name=\"mp1\"}",
+          "legendFormat": "{{instance_name}}",
+          "refId": "E"
         }
       ],
       "title": "Client tunnels",
@@ -150,7 +243,7 @@
         "x": 16,
         "y": 1
       },
-      "id": 3,
+      "id": 42,
       "options": {
         "colorMode": "background",
         "graphMode": "none",
