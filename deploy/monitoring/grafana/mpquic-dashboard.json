@@ -534,7 +534,7 @@
       "pluginVersion": "12.4.1",
       "targets": [
         {
-          "expr": "mpquic_uptime_seconds{instance_name=~\"mp1|mpq[456]\"}",
+          "expr": "mpquic_uptime_seconds{job=\"mpquic-client\", instance_name=~\"mp1|mpq[456]\"}",
           "legendFormat": "{{instance_name}}",
           "refId": "A"
         }
