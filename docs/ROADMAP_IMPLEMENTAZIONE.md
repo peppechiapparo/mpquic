@@ -221,23 +221,23 @@ instrada nel tunnel corretto in base alla VLAN di origine.
 
 **Schema VLAN → Tunnel**:
 
-| LAN (transit) | VLAN | Classe | Tunnel | WAN uscita |
-|---------------|------|--------|--------|------------|
-| LAN1 (enp6s20) | 11 | critical | cr1 | WAN4 (SL4) |
-| LAN1 (enp6s20) | 12 | bulk | br1 | WAN4 (SL4) |
-| LAN1 (enp6s20) | 13 | default | df1 | WAN4 (SL4) |
-| LAN2 (enp6s21) | 21 | critical | cr2 | WAN5 (SL5) |
-| LAN2 (enp6s21) | 22 | bulk | br2 | WAN5 (SL5) |
-| LAN2 (enp6s21) | 23 | default | df2 | WAN5 (SL5) |
-| LAN3 (enp6s22) | 31 | critical | cr3 | WAN6 (SL6) |
-| LAN3 (enp6s22) | 32 | bulk | br3 | WAN6 (SL6) |
-| LAN3 (enp6s22) | 33 | default | df3 | WAN6 (SL6) |
+| TBOX LAN (trunk) | OpenWrt IF | VLAN | Classe | Tunnel | WAN uscita |
+|------------------|------------|------|--------|--------|------------|
+| LAN4 (enp6s23) | eth11 | 11 | critical | cr1 | WAN4 (SL4) |
+| LAN4 (enp6s23) | eth11 | 12 | bulk | br1 | WAN4 (SL4) |
+| LAN4 (enp6s23) | eth11 | 13 | default | df1 | WAN4 (SL4) |
+| LAN5 (enp7s1) | eth12 | 21 | critical | cr2 | WAN5 (SL5) |
+| LAN5 (enp7s1) | eth12 | 22 | bulk | br2 | WAN5 (SL5) |
+| LAN5 (enp7s1) | eth12 | 23 | default | df2 | WAN5 (SL5) |
+| LAN6 (enp7s2) | eth13 | 31 | critical | cr3 | WAN6 (SL6) |
+| LAN6 (enp7s2) | eth13 | 32 | bulk | br3 | WAN6 (SL6) |
+| LAN6 (enp7s2) | eth13 | 33 | default | df3 | WAN6 (SL6) |
 
 **Flusso traffico**:
 ```
-OpenWrt → VLAN 21 (critical LAN2) → enp6s21.21 → ip rule → cr2 TUN → WAN5 → VPS:45011
-OpenWrt → VLAN 22 (bulk LAN2)     → enp6s21.22 → ip rule → br2 TUN → WAN5 → VPS:45011
-OpenWrt → VLAN 23 (default LAN2)  → enp6s21.23 → ip rule → df2 TUN → WAN5 → VPS:45011
+OpenWrt (eth12.21) → VLAN 21 (critical) → TBOX enp7s1.21 → ip rule → cr2 TUN → WAN5 → VPS:45011
+OpenWrt (eth12.22) → VLAN 22 (bulk)     → TBOX enp7s1.22 → ip rule → br2 TUN → WAN5 → VPS:45011
+OpenWrt (eth12.23) → VLAN 23 (default)  → TBOX enp7s1.23 → ip rule → df2 TUN → WAN5 → VPS:45011
 ```
 
 **Server layout**: 3 porte, ciascuna multi-conn (3 classi):
@@ -245,11 +245,16 @@ OpenWrt → VLAN 23 (default LAN2)  → enp6s21.23 → ip rule → df2 TUN → W
 - 45011: WAN5 → cr2 + br2 + df2 (TUN mt5, subnet 10.200.11.0/24)
 - 45012: WAN6 → cr3 + br3 + df3 (TUN mt6, subnet 10.200.12.0/24)
 
-**Client VM**: VLAN sub-interfaces su ogni LAN trunk + classifier per-VLAN:
-- `enp6s20.11` → routing table → default via cr1
-- `enp6s20.12` → routing table → default via br1
-- `enp6s20.13` → routing table → default via df1
-- (idem per LAN2 → .21/.22/.23, LAN3 → .31/.32/.33)
+**Client VM (TBOX)**: VLAN sub-interfaces su ogni LAN trunk + classifier per-VLAN:
+- `enp6s23.11` → routing table mt_cr1 → default via cr1
+- `enp6s23.12` → routing table mt_br1 → default via br1
+- `enp6s23.13` → routing table mt_df1 → default via df1
+- `enp7s1.21` → routing table mt_cr2 → default via cr2
+- `enp7s1.22` → routing table mt_br2 → default via br2
+- `enp7s1.23` → routing table mt_df2 → default via df2
+- `enp7s2.31` → routing table mt_cr3 → default via cr3
+- `enp7s2.32` → routing table mt_br3 → default via br3
+- `enp7s2.33` → routing table mt_df3 → default via df3
 
 **Lato OpenWrt**: piena libertà di routing — basta taggare il traffico sulla VLAN
 giusta (mwan3, firewall zone, DSCP→VLAN map, ecc.)
