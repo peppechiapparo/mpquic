@@ -1,5 +1,21 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-03-15
+
+### Fix routing bd1 + mp1 crash loop
+- **Fix rt_tables**: aggiunto `200 bd1` in `/etc/iproute2/rt_tables` (mancante dopo
+  la correzione del 14/03 che ha rinominato `120 bd1` → `120 mt_cr1`)
+- **Fix 27-bd1.network**: corretto `Table=120` → `Table=200` — la VLAN 17 inviava
+  il traffico alla tabella `mt_cr1` anziché `bd1`, causando uscita da enp6s18
+  (main table) anziché dal tunnel mp1
+- **Fix ip rule 1017**: aggiornata live `from 172.16.17.0/30 lookup bd1` (era mt_cr1)
+- **Fix mp1 crash loop (450 restart)**: il servizio `mpquic@mp1` andava in crash per
+  `ExecStartPost` che eseguiva `ip route replace ... table bd1` ma la tabella bd1
+  non era definita in rt_tables → exit 255 → service killed
+- **Repo**: aggiunti `deploy/networkd/bd1/` (26-vlan17.netdev, 27-bd1.network),
+  `deploy/networkd/rt_tables`, `deploy/systemd/mpquic@mp1.service.d/bd1-route.conf`
+- **Docs**: aggiornato ID tabella bd1 da 120 a 200 in NOTA_TECNICA e INSTALLAZIONE_TEST
+
 ## 2026-03-14
 
 ### Step 2.5: Multi-tunnel VLAN — install script, deploy e verifica end-to-end

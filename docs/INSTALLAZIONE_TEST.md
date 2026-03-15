@@ -1031,7 +1031,7 @@ service `mpquic-routing.service`.
 103 wan4
 104 wan5
 105 wan6
-120 bd1
+200 bd1
 ```
 
 ### 15.3 Regole e route per tunnel single-link
@@ -1052,7 +1052,7 @@ ip route replace 172.238.232.223/32 via "$GATEWAY" dev enp7s6 table wan4
 
 ### 15.4 Route per tunnel multipath mp1 — tabella bd1
 
-Il tunnel multipath mp1 utilizza una tabella di routing dedicata `bd1` (ID 120)
+Il tunnel multipath mp1 utilizza una tabella di routing dedicata `bd1` (ID 200)
 con VLAN 17 su enp6s20, completamente indipendente dalle tabelle wan1–wan6 e
 dallo script watchdog `mpquic-lan-routing-check.sh`.
 
@@ -1080,7 +1080,7 @@ IPv6AcceptRA=no
 
 [RoutingPolicyRule]
 From=172.16.17.0/30
-Table=120
+Table=200
 Priority=1017
 ```
 

@@ -2366,7 +2366,7 @@ senza modificare nulla della configurazione wan1/mpq1 esistente:
 | VLAN netdev | `/etc/systemd/network/26-vlan17.netdev` | VLAN 17 su enp6s20 (LAN1) |
 | VLAN network | `/etc/systemd/network/27-bd1.network` | IP 172.16.17.1/30, ip rule priority 1017 |
 | Parent ref | `/etc/systemd/network/20-lan1.network` | Aggiunto `VLAN=enp6s20.17` |
-| Routing table | `/etc/iproute2/rt_tables` | `120 bd1` |
+| Routing table | `/etc/iproute2/rt_tables` | `200 bd1` |
 | Route persistence | `mpquic@mp1.service.d/bd1-route.conf` | `ExecStartPost` con default + connected route |
 
 **Schema routing:**

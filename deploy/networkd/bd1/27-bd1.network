@@ -1,0 +1,12 @@
+[Match]
+Name=enp6s20.17
+
+[Network]
+Address=172.16.17.1/30
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[RoutingPolicyRule]
+From=172.16.17.0/30
+Table=200
+Priority=1017

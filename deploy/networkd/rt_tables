@@ -1,0 +1,30 @@
+#
+# reserved values
+#
+255     local
+254     main
+253     default
+0       unspec
+#
+# local
+#
+#1      inr.ruhep
+100 wan1
+101 wan2
+102 wan3
+103 wan4
+104 wan5
+105 wan6
+110 mt_cr5
+111 mt_df5
+112 mt_bk5
+120 mt_cr1
+121 mt_br1
+122 mt_df1
+123 mt_cr2
+124 mt_br2
+125 mt_df2
+126 mt_cr3
+127 mt_br3
+128 mt_df3
+200 bd1

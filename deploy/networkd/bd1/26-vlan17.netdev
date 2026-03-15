@@ -1,0 +1,6 @@
+[NetDev]
+Name=enp6s20.17
+Kind=vlan
+
+[VLAN]
+Id=17
