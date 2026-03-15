@@ -27,83 +27,198 @@ scrape_configs:
       - targets: ["localhost:9090"]
 
   # ── MPQUIC Server (VPS 172.238.232.223) ─────────────────
-  # Il server multipath mp1 espone metriche sull'IP tunnel .254
+  # Ogni istanza server espone metriche sull'IP tunnel .254:9090
   - job_name: "mpquic-server"
     static_configs:
-      - targets:
-          - "10.200.17.254:9090"
+      # mp1 — multipath stripe (WAN5+WAN6 bonding)
+      - targets: ["10.200.17.254:9090"]
         labels:
           instance_name: "mp1"
           role: "server"
           site: "vps"
+          transport: "stripe"
+
+      # mt4 — multi-conn WAN4 (cr1/br1/df1)
+      - targets: ["10.200.14.254:9090"]
+        labels:
+          instance_name: "mt4"
+          role: "server"
+          site: "vps"
+          transport: "quic"
+          wan: "wan4"
+
+      # mt5 — multi-conn WAN5 (cr2/br2/df2)
+      - targets: ["10.200.15.254:9090"]
+        labels:
+          instance_name: "mt5"
+          role: "server"
+          site: "vps"
+          transport: "quic"
+          wan: "wan5"
+
+      # mt6 — multi-conn WAN6 (cr3/br3/df3)
+      - targets: ["10.200.16.254:9090"]
+        labels:
+          instance_name: "mt6"
+          role: "server"
+          site: "vps"
+          transport: "quic"
+          wan: "wan6"
+
+      # mt1 — multi-conn WAN5 step 2.3 (cr5/df5/bk5)
+      - targets: ["10.200.10.254:9090"]
+        labels:
+          instance_name: "mt1"
+          role: "server"
+          site: "vps"
+          transport: "quic"
+          wan: "wan5"
 
   # ── MPQUIC Client (VM 200, Proxmox) ────────────────────
-  # Ogni istanza client espone metriche sull'IP tunnel .1
+  # Ogni istanza client espone metriche sull'IP tunnel .1/.5/.9:9090
   - job_name: "mpquic-client"
     static_configs:
-      # Multipath bonding (WAN5+WAN6)
-      - targets:
-          - "10.200.17.1:9090"
+      # ── Multipath bonding mp1 (WAN5+WAN6 stripe) ──────
+      - targets: ["10.200.17.1:9090"]
         labels:
           instance_name: "mp1"
           role: "client"
           site: "client"
           transport: "stripe"
 
-      # Single-conn QUIC reliable
-      - targets:
-          - "10.200.14.1:9090"
+      # ── VLAN class tunnels: WAN4 / SL4 (cr1/br1/df1) ──
+      - targets: ["10.200.14.1:9090"]
         labels:
           instance_name: "cr1"
           role: "client"
           site: "client"
           transport: "quic"
+          wan: "wan4"
+          class: "critical"
 
-      - targets:
-          - "10.200.16.1:9090"
+      - targets: ["10.200.14.5:9090"]
+        labels:
+          instance_name: "br1"
+          role: "client"
+          site: "client"
+          transport: "quic"
+          wan: "wan4"
+          class: "bulk"
+
+      - targets: ["10.200.14.9:9090"]
+        labels:
+          instance_name: "df1"
+          role: "client"
+          site: "client"
+          transport: "quic"
+          wan: "wan4"
+          class: "default"
+
+      # ── VLAN class tunnels: WAN5 / SL5 (cr2/br2/df2) ──
+      - targets: ["10.200.15.1:9090"]
         labels:
           instance_name: "cr2"
           role: "client"
           site: "client"
           transport: "quic"
+          wan: "wan5"
+          class: "critical"
 
-      - targets:
-          - "10.200.10.1:9090"
+      - targets: ["10.200.15.5:9090"]
+        labels:
+          instance_name: "br2"
+          role: "client"
+          site: "client"
+          transport: "quic"
+          wan: "wan5"
+          class: "bulk"
+
+      - targets: ["10.200.15.9:9090"]
+        labels:
+          instance_name: "df2"
+          role: "client"
+          site: "client"
+          transport: "quic"
+          wan: "wan5"
+          class: "default"
+
+      # ── VLAN class tunnels: WAN6 / SL6 (cr3/br3/df3) ──
+      - targets: ["10.200.16.1:9090"]
         labels:
           instance_name: "cr3"
           role: "client"
           site: "client"
           transport: "quic"
+          wan: "wan6"
+          class: "critical"
 
-      - targets:
-          - "10.200.15.1:9090"
+      - targets: ["10.200.16.5:9090"]
+        labels:
+          instance_name: "br3"
+          role: "client"
+          site: "client"
+          transport: "quic"
+          wan: "wan6"
+          class: "bulk"
+
+      - targets: ["10.200.16.9:9090"]
+        labels:
+          instance_name: "df3"
+          role: "client"
+          site: "client"
+          transport: "quic"
+          wan: "wan6"
+          class: "default"
+
+      # ── Step 2.3 class tunnels: WAN5 (cr5/df5/bk5) ────
+      - targets: ["10.200.10.1:9090"]
         labels:
           instance_name: "cr5"
           role: "client"
           site: "client"
           transport: "quic"
+          wan: "wan5"
+          class: "critical"
 
-      # Single-conn datagram tunnels (mpq4-6)
-      - targets:
-          - "10.200.4.1:9090"
+      - targets: ["10.200.10.5:9090"]
+        labels:
+          instance_name: "df5"
+          role: "client"
+          site: "client"
+          transport: "quic"
+          wan: "wan5"
+          class: "default"
+
+      - targets: ["10.200.10.9:9090"]
+        labels:
+          instance_name: "bk5"
+          role: "client"
+          site: "client"
+          transport: "quic"
+          wan: "wan5"
+          class: "bulk"
+
+      # ── Single-link tunnels (mpq4/mpq5/mpq6) ──────────
+      - targets: ["10.200.4.1:9090"]
         labels:
           instance_name: "mpq4"
           role: "client"
           site: "client"
-          transport: "datagram"
+          transport: "quic"
+          wan: "wan4"
 
-      - targets:
-          - "10.200.5.1:9090"
+      - targets: ["10.200.5.1:9090"]
         labels:
           instance_name: "mpq5"
           role: "client"
           site: "client"
-          transport: "datagram"
+          transport: "quic"
+          wan: "wan5"
 
-      - targets:
-          - "10.200.6.1:9090"
+      - targets: ["10.200.6.1:9090"]
         labels:
           instance_name: "mpq6"
           role: "client"
           site: "client"
-          transport: "datagram"
+          transport: "quic"
+          wan: "wan6"
