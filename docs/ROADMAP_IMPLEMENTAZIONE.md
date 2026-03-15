@@ -1,6 +1,15 @@
 # Roadmap implementazione MPQUIC
 
-*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2025-07-17*
+*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-15*
+
+### Nota deploy monitoraggio (2026-03-15)
+- Fix `metrics_listen: auto` mancante in mpq4/5/6 (commit `af14a2d`) — i single-link
+  tunnel non esponevano endpoint metriche, Prometheus li segnava DOWN
+- Dashboard Grafana v8 (commit `c07b825`, `a217474`): fix leggibilità Uptime/TX/RX,
+  regex stale limitate a `[456]` per evitare match su vecchie time series,
+  duplicato mp1 rimosso dal pannello Uptime con filtro `job="mpquic-client"`
+- Prometheus: **17/18 target UP** (mt4 DOWN lato VPS — non correlato)
+- Fase 5 metriche + monitoraggio: completamente operativa end-to-end
 
 ### Nota manutenzione (2026-03-01)
 - Cleanup diagnostico completato in `cmd/mpquic/main.go` (commit `c15b235`):
@@ -785,7 +794,7 @@ Overhead ~0% in condizioni normali (solo NACK packets quando ci sono gap).
 
 **Risultati benchmark** (6 run × 30s, iperf3 -R -P8, dual Starlink):
 
-| Config              | Throughput medio | Retransmit medi | Note                                    |
+| Config              | Throughput medio | Retransmit medi | Note                                   |
 |---------------------|------------------|-----------------|----------------------------------------|
 | Baseline (no ARQ)   | **239 Mbps**     | ~1.000          | Riferimento M=0                        |
 | **Hybrid ARQ on**   | **274 Mbps**     | ~3.199          | +14.6% throughput, picco 315 Mbps      |
@@ -823,12 +832,12 @@ Hybrid ARQ iniziale, mantenendo il guadagno di throughput.
 
 **Risultati benchmark** (6 run × 30s, iperf3 -R -P20, dual Starlink, 12 pipe/path = 24 totali):
 
-| Config                        | Throughput medio | Retransmit medi | Note                                         |
-|-------------------------------|------------------|-----------------|----------------------------------------------|
-| Baseline (no ARQ, P8, 10 pipe)| **239 Mbps**     | ~1.000          | Riferimento M=0                              |
-| ARQ v1 (P8, 10 pipe)         | **274 Mbps**     | ~3.199          | Step 4.13, +14.6% vs baseline               |
-| **ARQ v2 + dedup (P20, 12 pipe)** | **330 Mbps** | ~4.110          | **+38% vs baseline, +20% vs ARQ v1, picco 384 Mbps** |
-| ARQ v2 + batch I/O (P20, 12 pipe) | **333 Mbps** | n/d             | Step 4.16, **neutro** (+1%, entro rumore), picco 390 |
+| Config                            | Throughput medio | Retransmit medi | Note                                                 |
+|-----------------------------------|------------------|-----------------|------------------------------------------------------|
+| Baseline (no ARQ, P8, 10 pipe)    | **239 Mbps**     | ~1.000          | Riferimento M=0                                      |
+| ARQ v1 (P8, 10 pipe)              | **274 Mbps**     | ~3.199          | Step 4.13, +14.6% vs baseline                        |
+| **ARQ v2 + dedup (P20, 12 pipe)** | **330 Mbps**     | ~4.110          | **+38% vs baseline, +20% vs ARQ v1, picco 384 Mbps** |
+| ARQ v2 + batch I/O (P20, 12 pipe) | **333 Mbps**     | n/d             | Step 4.16, **neutro** (+1%, entro rumore), picco 390 |
 
 Dettaglio run ARQ v2:
 
@@ -1436,12 +1445,16 @@ per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
 - Fix pannelli stat vuoti: aggiunto `"instant": true` + aggregazione `max by (instance_name, job)`
 - Abilitato `metrics_listen: auto` nei template `.yaml.tpl` per mpq4, mpq5, mpq6
 - Dashboard gestito via API (provisioning file disabilitato per evitare conflitti UI/file)
+- Fix `metrics_listen: auto` mancante nei config repo `{4,5,6}.yaml` client e server (commit `af14a2d`) — i single-link tunnel non esponevano `:9090`
+- Dashboard v8: regex `cr.*` → `cr[456]`, `br.*|bk.*` → `br[456]`, `df.*` → `df[456]`, `mpq.*` → `mpq[456]` per evitare match su time series stale (commit `c07b825`)
+- Dashboard v8: Uptime filtrato a `job="mpquic-client"` per eliminare duplicato mp1 client/server (commit `a217474`)
+- Dashboard v8: TX/RX totale come `sum()` aggregato singolo (era 18 valori individuali)
 
 **Configurazione Prometheus** (`deploy/monitoring/prometheus/prometheus.yml`):
-- Scrape interval: 15s
-- Job `mpquic-server`: mp1 (10.200.17.254:9090)
-- Job `mpquic-client`: mp1, cr4-cr5, mpq4, mpq5, mpq6 (9 target totali)
-- Transport datagram per mpq4-mpq6
+- Scrape interval: 5s (ridotto da 15s per reattività dashboard)
+- Job `mpquic-server`: mp1 + mt4, mt5, mt6 (4 target)
+- Job `mpquic-client`: mp1, cr4-cr6, br4-br6, df4-df6, mpq4-mpq6 (13 target)
+- Totale: **18 target** (incl. prometheus self-monitoring), **17/18 UP** (mt4 DOWN lato VPS)
 
 **Layer 3 — Consumer** (futuro, Fase 6):
 - Grafana Dashboard: ✅ operativo (MPQUIC Overview, uid `adsnpmk`)
@@ -1487,7 +1500,7 @@ per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
 - Route di ritorno su mpq1-mpq6 e mp1
 - Stripe sessions: 2 (wan5, wan6) × 12 pipe = 24 pipe totali
 
-### Istanze operative (2026-03-04)
+### Istanze operative (2026-03-15)
 | Istanza | Tipo | WAN | Trasporto | Throughput |
 |---------|------|-----|-----------|------------|
 | mpq1-3 | single-link | WAN1-3 | QUIC | — (no modem) |

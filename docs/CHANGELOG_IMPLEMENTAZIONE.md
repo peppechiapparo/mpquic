@@ -28,6 +28,25 @@
   `deploy/networkd/rt_tables`, `deploy/systemd/mpquic@mp1.service.d/bd1-route.conf`
 - **Docs**: aggiornato ID tabella bd1 da 120 a 200 in NOTA_TECNICA e INSTALLAZIONE_TEST
 
+### Fix `metrics_listen: auto` mancante in mpq4/5/6
+- **Root cause**: i template `{4,5,6}.yaml` (single-link tunnel) non contenevano
+  la direttiva `metrics_listen: auto` — presente solo nei class tunnel (cr/br/df)
+- **Sintomo**: mpq4/5/6 non esponevano endpoint HTTP su `:9090`, Prometheus li segnava DOWN
+- **Fix**: aggiunto `metrics_listen: auto` nei config client e server per 4.yaml, 5.yaml, 6.yaml
+- **Deploy**: sed sui `.yaml.tpl` in `/etc/mpquic/instances/`, re-render, restart `mpquic@{4,5,6}`
+- **Verifica**: `ss -tlnp` mostra listening su `:9090`, `curl` ritorna metriche Prometheus
+- **Prometheus**: 17/18 target UP (mt4 DOWN — problema lato VPS, non correlato)
+- **Commit**: `af14a2d`
+
+### Dashboard Grafana v8: fix leggibilità e regex stale
+- **Stato Tunnel**: regex `cr.*` → `cr[456]`, `br.*|bk.*` → `br[456]`, `df.*` → `df[456]`,
+  `mpq.*` → `mpq[456]` — impedisce match su vecchie time series in Prometheus TSDB
+- **Server**: query `up{job="mpquic-server"}` → filtro esplicito `instance_name=~"mp1|mt[456]"`
+- **Uptime**: filtrato a `job="mpquic-client"`, `instance_name=~"mp1|mpq[456]"` (4 valori),
+  layout verticale. Fix duplicato mp1 (appariva sia come client che server senza filtro job)
+- **TX/RX totale**: da 18 valori individuali a singolo `sum()` aggregato
+- **Commit**: `c07b825` (fix completo), `a217474` (fix duplicato mp1 in Uptime)
+
 ## 2026-03-14
 
 ### Step 2.5: Multi-tunnel VLAN — install script, deploy e verifica end-to-end
