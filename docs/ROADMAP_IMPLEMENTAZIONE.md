@@ -1497,6 +1497,45 @@ un FEC minimal basato su XOR parity su finestra scorrevole. Copre il caso comune
 - [ ] **Media ≥ 400 Mbps su 30-60s, dual Starlink, tempo buono** — best run 400 Mbps raggiunto, media 6 run 336 (Starlink variabilità)
 - [ ] Profiling CPU confronto con v4.3 baseline
 - [x] Benchmark GSO 7 run: picco **548 Mbps** (+9.8%), best 30s **400 Mbps** (+6.9%), retransmit +80% → valida Step 4.25
+- [ ] Fix criticità ARQ retransmit (Issue #1)
+- [ ] Fix asimmetria wan5/wan6 (Issue #2)
+
+### Criticità aperte (emerse da benchmark Step 4.24)
+
+**Issue #1 — ARQ retransmit received = 0 (NACK inviati ma retransmit non ricevute)**
+
+Il server invia ~45K NACK per sessione (contatore `arq_nack_sent`) ma il contatore
+`arq_retx_recv` sul server resta a 0. Possibili cause:
+1. **NACK non arrivano al client**: il path di ritorno (server→client) perde i NACK
+2. **Client non processa i NACK**: bug nel dispatch del messaggio NACK sul client
+3. **Client retransmit ma il server non li conta**: bug nel contatore server-side
+4. **NACK vengono inviati ma scartati**: rate limiting NACK troppo aggressivo
+
+**Impatto**: se l'ARQ non funziona effettivamente, le perdite sono coperte
+solo dal TCP retransmit end-to-end (molto più lento). Fixing questo potrebbe
+ridurre i retransmit TCP e migliorare la media.
+
+**Issue #2 — Asimmetria wan5/wan6: 36/64% distribuzione traffico**
+
+Il server ha inviato 5.55 GB sulla sessione wan5 e 9.86 GB sulla sessione wan6
+(ratio 36:64). Causa: l'hashing dei 30 flussi TCP da parte del kernel TUN
+multiqueue (`IFF_MULTI_QUEUE`) produce distribuzione non uniforme tra i due fd.
+Il kernel calcola l'RSS hash su ogni pacchetto IP e lo assegna alla coda in
+base a `hash % N_queues` — con 30 flussi, la distribuzione è stocastica e
+converge lentamente.
+
+**Impatto**: il path sottoutilizzato (wan5) ha capacità residua non sfruttata.
+Una distribuzione 50/50 potrebbe migliorare la media di ~10-15% (il path
+saturo diventa il bottleneck prima).
+
+**Possibili soluzioni**:
+1. **Round-robin nel dispatcher MPQUIC** (server-side): assegnamento alternato dei
+   pacchetti IP in uscita tra le sessioni, bypassando l'hashing del kernel
+2. **Weighted round-robin**: bilanciamento basato su throughput misurato per path
+3. **eBPF XDP redirect**: programma BPF sul server per distribuire via hash custom
+4. **Server-side: round-robin già nel `drainSendCh`**: il dispatcher attuale ruota
+   tra le pipe di una sessione ma non tra sessioni diverse → verificare se il
+   bilanciamento inter-sessione è corretto
 
 ---
 

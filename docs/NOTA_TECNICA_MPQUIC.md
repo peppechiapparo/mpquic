@@ -215,18 +215,22 @@ il 1 marzo 2026, organizzati per fase di sviluppo.
 > **Step 4.24: UDP GSO (`UDP_SEGMENT`) su client TX. Il client non aveva alcun
 > TX batching — ogni pacchetto era 1 syscall. Con GSO, gli shard criptati vengono
 > concatenati per pipe e inviati con 1 `sendmsg` + `UDP_SEGMENT` cmsg.
-> Kernel split automatico. Obiettivo: stabilizzare media ≥400 Mbps.**
+> Kernel split automatico. Benchmark: picco 548 Mbps, best 30s 400 Mbps.**
 
 | Metrica | Valore |
 |---------|--------|
 | **Step 4.24** | UDP GSO: per-pipe accumulation + `WriteMsgUDP` con `UDP_SEGMENT` |
+| **Nuovo record** | **548 Mbps** picco (+9.8% vs 499), **400 Mbps** best 30s (+6.9% vs 374) |
+| **Media 6×30s** | 336 Mbps (mediana 350, senza outlier 355) |
+| **Retransmit** | +80% vs baseline (176/s vs 98/s) — burst GSO → overflow buffer |
 | **Scoperta** | Client aveva 0 batch TX (ogni `SendDatagram` → `WriteToUDP` diretta) |
 | **GSO probe** | Automatico: `stripeGSOProbe()` verifica kernel ≥5.0 + `UDP_SEGMENT` sockopt |
 | **Fallback** | EIO → `gsoDisabled=1` atomic, resend individuale |
 | **Config** | `stripe_disable_gso: true` per A/B test (default: auto-enabled) |
 | **Path coperti** | Entrambi: M=0 fast path e M>0 FEC `sendFECGroupLocked` |
 | **Server** | Invariato — mantiene `sendmmsg` (round-robin multi-addr) |
-| **Tag** | **v4.4** (da benchmarkare vs v4.3 baseline) |
+| **Next** | Step 4.25 kernel pacing per ridurre retransmit self-inflicted |
+| **Tag** | **v4.4** |
 
 ---
 
@@ -2681,6 +2685,41 @@ Per disabilitarlo (A/B test):
 stripe_disable_gso: true
 ```
 
+### 18e.6 Risultati benchmark
+
+Benchmark eseguito il 16 marzo 2026, dual Starlink, iperf3 -R -P30 --bind-dev mp1,
+7 run (1×60s + 6×30s):
+
+| Run | Durata | Media ricevitore | Picco 1s | Retransmit/s |
+|-----|--------|-----------------|----------|-------------|
+| 0 | 60s | **364 Mbps** | **548 Mbps** | 159 |
+| 1 | 30s | **400 Mbps** | 455 Mbps | 142 |
+| 2 | 30s | 365 Mbps | 443 Mbps | 190 |
+| 3 | 30s | 238 Mbps | 302 Mbps | 137 |
+| 4 | 30s | 311 Mbps | 429 Mbps | 156 |
+| 5 | 30s | 344 Mbps | 460 Mbps | 228 |
+| 6 | 30s | 356 Mbps | 440 Mbps | 201 |
+
+**Confronto con v4.3 baseline**:
+
+| Metrica | v4.3 | v4.4 GSO | Delta |
+|---------|------|----------|-------|
+| Picco per-second | 499 Mbps | **548 Mbps** | **+9.8%** |
+| Miglior media 30s | 374 Mbps | **400 Mbps** | **+6.9%** |
+| Retransmit/s | ~98 | 176 | +80% |
+
+**Nuovo record assoluto: 548 Mbps.** L'aumento dei retransmit TCP (+80%) è causato
+dai burst GSO a wire-speed che saturano i buffer NIC/switch. Questo conferma la
+necessità del kernel pacing (Step 4.25, `SO_TXTIME` + `sch_fq`) per distanziare
+i pacchetti nel burst.
+
+**Criticità emerse dal benchmark**:
+1. **ARQ retransmit received = 0**: il server invia ~45K NACK ma il client non
+   riceve retransmission. Il path di risposta NACK → retransmit è da verificare.
+2. **Asimmetria wan5/wan6**: 36/64% dei dati. L'hashing dei 30 flow TCP su TUN
+   multiqueue produce distribuzione non uniforme tra i due path, limitando
+   l'aggregazione effettiva.
+
 ---
 
 ## 19. Vantaggi per il Cliente
@@ -3218,7 +3257,7 @@ Sulla base dei test condotti in laboratorio con configurazione analoga
 
 | Metrica | Valore tipico |
 |---------|---------------|
-| **Throughput aggregato** | 350 – 500 Mbps (download, picco 499 misurato) |
+| **Throughput aggregato** | 350 – 550 Mbps (download, picco 548 misurato) |
 | **Latenza (RTT)** | 15 – 35 ms |
 | **Tempo di failover** | < 5 secondi |
 | **Tempo di ripristino dopo riavvio** | < 3 secondi |
