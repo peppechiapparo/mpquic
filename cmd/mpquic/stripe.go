@@ -277,6 +277,13 @@ type stripeClientConn struct {
 	rxLossPrevFECRecov   uint64
 	rxLossPrevFECGroups  uint64
 
+	// GSO TX batch (UDP Generic Segmentation Offload).
+	// Per-pipe accumulation: encrypted wire packets are buffered and flushed
+	// as one sendmsg with UDP_SEGMENT, reducing syscall overhead by N×.
+	gsoEnabled  bool
+	gsoDisabled uint32          // atomic: 1 = runtime fallback (NIC lacks TX csum)
+	gsoBufs     []gsoTxPipeBuf  // one per pipe
+
 	// Stats (atomic)
 	txPkts   uint64
 	rxPkts   uint64
@@ -293,6 +300,15 @@ type stripeClientConn struct {
 	rxCipher *stripeCipher // server→client decryption
 
 	securityDecryptFail uint64
+}
+
+// gsoTxPipeBuf accumulates encrypted wire packets for a single pipe.
+// All segments must be the same size (the kernel splits at segSize boundaries).
+// If a packet of different size arrives, the buffer is flushed first.
+type gsoTxPipeBuf struct {
+	buf     []byte
+	count   int
+	segSize int
 }
 
 // SecurityStats returns the decrypt failure counter.
@@ -464,6 +480,16 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		logger.Infof("stripe pipe %d: local=%s → remote=%s dev=%s", i, conn.LocalAddr(), serverAddr, ifName)
 	}
 
+	// Probe GSO (UDP_SEGMENT) support on the first pipe.
+	// If supported, allocate per-pipe accumulation buffers for batch TX.
+	if !cfg.StripeDisableGSO && len(scc.pipes) > 0 && stripeGSOProbe(scc.pipes[0]) {
+		scc.gsoEnabled = true
+		scc.gsoBufs = make([]gsoTxPipeBuf, len(scc.pipes))
+		for i := range scc.gsoBufs {
+			scc.gsoBufs[i].buf = make([]byte, 0, 65536)
+		}
+	}
+
 	// Register each pipe with the server (with retries for NAT traversal)
 	var totalSendOK int
 	for retry := 0; retry < stripeRegisterRetries; retry++ {
@@ -533,8 +559,12 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	if cfg.StripeARQ {
 		arqStr = "on"
 	}
-	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d mode=%s pacing=%s arq=%s server=%s encrypted=AES-256-GCM",
-		sessionID, len(scc.pipes), dataK, parityM, fecMode, pacingStr, arqStr, serverAddr)
+	gsoStr := "off"
+	if scc.gsoEnabled {
+		gsoStr = "on"
+	}
+	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d mode=%s pacing=%s arq=%s gso=%s server=%s encrypted=AES-256-GCM",
+		sessionID, len(scc.pipes), dataK, parityM, fecMode, pacingStr, arqStr, gsoStr, serverAddr)
 
 	return scc, nil
 }
@@ -573,8 +603,12 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 
 		scc.pacer.pace(len(wirePkt))
 		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
-		pipe := scc.pipes[int(idx)%len(scc.pipes)]
-		_, _ = pipe.WriteToUDP(wirePkt, scc.serverAddr)
+		pipeIdx := int(idx) % len(scc.pipes)
+		if scc.gsoEnabled && atomic.LoadUint32(&scc.gsoDisabled) == 0 {
+			scc.gsoAccumLocked(pipeIdx, wirePkt)
+		} else {
+			_, _ = scc.pipes[pipeIdx].WriteToUDP(wirePkt, scc.serverAddr)
+		}
 
 		atomic.AddUint64(&scc.txPkts, 1)
 		atomic.AddUint64(&scc.txBytes, uint64(len(pkt)))
@@ -697,6 +731,7 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 
 	// Send data shards round-robin across pipes (1 alloc per shard).
 	groupDataN := uint8(K)
+	gsoActive := scc.gsoEnabled && atomic.LoadUint32(&scc.gsoDisabled) == 0
 	for i, shard := range shards {
 		wirePkt := stripeEncryptShard(scc.txCipher, &stripeHdr{
 			Magic:      stripeMagic,
@@ -710,8 +745,12 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 		}, shard)
 		scc.pacer.pace(len(wirePkt))
 		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
-		pipe := scc.pipes[int(idx)%len(scc.pipes)]
-		_, _ = pipe.WriteToUDP(wirePkt, scc.serverAddr)
+		pipeIdx := int(idx) % len(scc.pipes)
+		if gsoActive {
+			scc.gsoAccumLocked(pipeIdx, wirePkt)
+		} else {
+			_, _ = scc.pipes[pipeIdx].WriteToUDP(wirePkt, scc.serverAddr)
+		}
 	}
 
 	// Send parity shards (1 alloc per shard).
@@ -728,8 +767,12 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 		}, shard)
 		scc.pacer.pace(len(wirePkt))
 		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
-		pipe := scc.pipes[int(idx)%len(scc.pipes)]
-		_, _ = pipe.WriteToUDP(wirePkt, scc.serverAddr)
+		pipeIdx := int(idx) % len(scc.pipes)
+		if gsoActive {
+			scc.gsoAccumLocked(pipeIdx, wirePkt)
+		} else {
+			_, _ = scc.pipes[pipeIdx].WriteToUDP(wirePkt, scc.serverAddr)
+		}
 	}
 
 	scc.txGroup = scc.txGroup[:0]
@@ -747,6 +790,8 @@ func (scc *stripeClientConn) flushTxGroup() {
 	if len(scc.txGroup) > 0 {
 		scc.sendFECGroupLocked()
 	}
+	// Flush any GSO-accumulated packets from the FEC group above.
+	scc.gsoFlushAllLocked()
 	scc.resetFlushTimer()
 }
 
@@ -766,6 +811,88 @@ func (scc *stripeClientConn) getEffectiveM() int {
 	default: // "always"
 		return scc.parityM
 	}
+}
+
+// ─── Client GSO TX (UDP Generic Segmentation Offload) ─────────────────────
+//
+// Instead of N individual WriteToUDP syscalls per pipe, GSO concatenates
+// encrypted wire packets into one contiguous buffer and sends them in a
+// single sendmsg with UDP_SEGMENT ancillary data. The kernel splits the
+// buffer at segment boundaries, producing N individual UDP datagrams.
+// This reduces TX syscall overhead by up to N× on the client hot path.
+//
+// All GSO methods require txMu to be held by the caller.
+
+// gsoAccumLocked appends an encrypted wire packet to the per-pipe GSO buffer.
+// If the new packet's size differs from the current segment size, the buffer
+// is flushed first (GSO requires uniform segment sizes).
+func (scc *stripeClientConn) gsoAccumLocked(pipeIdx int, wirePkt []byte) {
+	gb := &scc.gsoBufs[pipeIdx]
+	if gb.count > 0 && len(wirePkt) != gb.segSize {
+		scc.gsoFlushPipeLocked(pipeIdx)
+	}
+	if gb.count == 0 {
+		gb.segSize = len(wirePkt)
+	}
+	gb.buf = append(gb.buf, wirePkt...)
+	gb.count++
+}
+
+// gsoFlushPipeLocked sends all accumulated segments for one pipe.
+// Single-segment buffers use plain WriteToUDP (no GSO overhead).
+// Multi-segment buffers use WriteMsgUDP with UDP_SEGMENT cmsg.
+// On EIO (NIC lacks TX checksum offload), GSO is permanently disabled
+// and packets are resent individually.
+func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
+	gb := &scc.gsoBufs[pipeIdx]
+	if gb.count == 0 {
+		return
+	}
+	pipe := scc.pipes[pipeIdx]
+
+	if gb.count == 1 {
+		// Single segment — plain write (no GSO overhead).
+		_, _ = pipe.WriteToUDP(gb.buf, scc.serverAddr)
+	} else {
+		// GSO: single sendmsg, kernel splits at segSize boundaries.
+		oob := stripeGSOBuildOOB(uint16(gb.segSize))
+		_, _, err := pipe.WriteMsgUDP(gb.buf, oob, scc.serverAddr)
+		if err != nil && stripeGSOIsError(err) {
+			atomic.StoreUint32(&scc.gsoDisabled, 1)
+			scc.logger.Errorf("stripe: GSO sendmsg returned EIO — disabling GSO, falling back to per-packet TX")
+			// Resend all segments individually.
+			for off := 0; off < len(gb.buf); off += gb.segSize {
+				end := off + gb.segSize
+				if end > len(gb.buf) {
+					end = len(gb.buf)
+				}
+				_, _ = pipe.WriteToUDP(gb.buf[off:end], scc.serverAddr)
+			}
+		}
+	}
+
+	gb.buf = gb.buf[:0]
+	gb.count = 0
+	gb.segSize = 0
+}
+
+// gsoFlushAllLocked flushes all per-pipe GSO buffers. Caller must hold txMu.
+func (scc *stripeClientConn) gsoFlushAllLocked() {
+	if !scc.gsoEnabled {
+		return
+	}
+	for i := range scc.gsoBufs {
+		scc.gsoFlushPipeLocked(i)
+	}
+}
+
+// FlushTxBatch flushes all per-pipe GSO buffers. Thread-safe.
+// Called by drainSendCh after batch-draining the send channel.
+// Implements txBatcher interface.
+func (scc *stripeClientConn) FlushTxBatch() {
+	scc.txMu.Lock()
+	scc.gsoFlushAllLocked()
+	scc.txMu.Unlock()
 }
 
 // getEffectiveM returns the current parity shard count for a server session.

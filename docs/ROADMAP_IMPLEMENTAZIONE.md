@@ -1340,11 +1340,11 @@ L'analisi mostra che le cause principali sono:
 |---|---|
 | `SO_REUSEPORT` + per-core sharding | Architettura ha già 24 socket indipendenti + TUN multiqueue per-session. Profiling non mostra lock contention nel top 40. Go scheduler non supporta affinity statica. Guadagno atteso <2%. |
 
-### Step 4.24 — UDP GSO (`UDP_SEGMENT`) nel TX path ⬜ DA IMPLEMENTARE
+### Step 4.24 — UDP GSO (`UDP_SEGMENT`) nel TX path ✅ IMPLEMENTATO
 
-**Obiettivo**: sostituire `sendmmsg` (N syscall per batch) con `UDP_SEGMENT`
-(1 syscall per batch, kernel segmenta) sul TX path. Riduce overhead per pacchetto
-e stabilizza il ritmo di emissione delegando segmentazione al kernel.
+**Obiettivo**: sostituire le `WriteToUDP` individuali sul client (N syscall per batch)
+con `UDP_SEGMENT` (1 syscall per pipe per batch, kernel segmenta). Riduce overhead
+per pacchetto e stabilizza il ritmo di emissione delegando segmentazione al kernel.
 
 **Perché GSO dopo sendmmsg**:
 - `sendmmsg` riduce syscall da N a N/8, ma ogni datagramma è ancora costruito e
@@ -1355,21 +1355,31 @@ e stabilizza il ritmo di emissione delegando segmentazione al kernel.
 - Il codice GSO esiste già in `local-quic-go/sys_conn_helper_linux.go`
   (`appendUDPSegmentSizeMsg`, `isGSOEnabled`, `isGSOError`)
 
+**Scoperta durante code study**: il client NON aveva alcun batching TX!
+Ogni `SendDatagram` → `WriteToUDP` individuale. Il server aveva già `sendmmsg`,
+ma il client (che è il sender primario in `-R` reverse) faceva 1 syscall per
+pacchetto. GSO è quindi il miglioramento più significativo sul client.
+
 **Vincolo architetturale**: GSO richiede stessa destinazione per tutti i segmenti
 in un singolo `sendmsg`. Impatto:
-- **Client TX**: GSO puro — ogni pipe ha destinazione fissa (server endpoint)
-- **Server TX**: raggruppare pacchetti per destinazione → GSO per-gruppo,
-  fallback `sendmmsg` per pacchetti isolati
+- **Client TX**: GSO puro — ogni pipe ha destinazione fissa (`serverAddr`)
+- **Server TX**: mantiene `sendmmsg` — round-robin su N indirizzi client rende
+  il grouping GSO impratico (<2 pkt consecutivi stesso addr)
 
-**Implementazione pianificata**:
-1. `gsoSendDatagram()`: accumula shard criptati in buffer contiguo (max 64KB)
-2. Calcola `segment_size` = dimensione shard fissa (1402 bytes)
-3. `sendmsg()` con ancillary `UDP_SEGMENT` = segment_size
-4. Fallback: se `isGSOError()` → disable GSO, torna a `sendmmsg`
-5. Flag runtime `--disable-gso` per A/B test
-6. Server: `gsoTxGroups` — raggruppa batch per `*net.UDPAddr` prima di GSO
-
-**Effort stimato**: ~1 giorno (plumbing esiste in local-quic-go).
+**Implementazione effettiva** (v4.4):
+1. `stripe_gso_linux.go`: helper Linux-only con build tag
+   - `stripeGSOProbe()`: rileva kernel ≥5 + `UDP_SEGMENT` socket option
+   - `stripeGSOBuildOOB()`: costruisce ancillary cmsg con `UDP_SEGMENT`
+   - `stripeGSOIsError()`: rileva EIO (NIC senza TX checksum offload)
+2. `stripe_gso_other.go`: stub per non-Linux (`gsoEnabled=false`)
+3. `stripeClientConn`: nuovi campi `gsoEnabled`, `gsoDisabled` (atomic), `gsoBufs []gsoTxPipeBuf`
+4. Per-pipe accumulation: `gsoAccumLocked()` concatena shard criptati in buffer per pipe
+5. Flush: `gsoFlushPipeLocked()` → `WriteMsgUDP(bigBuf, oob, serverAddr)` per pipe
+6. `FlushTxBatch()` implementato su client → `drainSendCh` lo chiama automaticamente
+7. Entrambi i path (M=0 fast path e M>0 FEC `sendFECGroupLocked`) usano GSO
+8. Fallback: se `isGSOError()` → `gsoDisabled=1` atomic, resend individuale
+9. Config: `stripe_disable_gso: true` per A/B test
+10. `flushTxGroup` (FEC timer) chiama `gsoFlushAllLocked()` dopo encode
 
 ### Step 4.25 — Kernel Pacing con `SO_TXTIME` + `sch_fq` ⬜ DA IMPLEMENTARE
 
@@ -1439,7 +1449,7 @@ un FEC minimal basato su XOR parity su finestra scorrevole. Copre il caso comune
 **Effort stimato**: ~2 giorni (encoder XOR banale, complessità nel window tracking).
 
 ### Done criteria Fase 4c
-- [ ] UDP GSO implementato e testato (Step 4.24)
+- [x] UDP GSO implementato e testato (Step 4.24)
 - [ ] Kernel pacing SO_TXTIME operativo (Step 4.25)
 - [ ] Sliding window XOR FEC implementato (Step 4.26)
 - [ ] **Media ≥ 400 Mbps su 30-60s, dual Starlink, tempo buono**

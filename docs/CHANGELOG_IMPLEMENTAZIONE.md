@@ -1,5 +1,28 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-03-16
+
+### Step 4.24 — UDP GSO (`UDP_SEGMENT`) implementato
+- **Scoperta**: il client TX non aveva alcun batching — ogni `SendDatagram` generava
+  una `WriteToUDP` individuale (1 syscall per pacchetto). Il server aveva già `sendmmsg`.
+- **Soluzione**: UDP Generic Segmentation Offload (GSO) sul client:
+  - Per-pipe accumulation: shard criptati concatenati in buffer contiguo
+  - `WriteMsgUDP` con ancillary `UDP_SEGMENT` → kernel split in datagrammi individuali
+  - 1 syscall per pipe per batch (anziché N syscall per batch)
+- **File nuovi**:
+  - `stripe_gso_linux.go`: `stripeGSOProbe()`, `stripeGSOBuildOOB()`, `stripeGSOIsError()`
+  - `stripe_gso_other.go`: stub per non-Linux
+- **Modifiche core** (`stripe.go`):
+  - `stripeClientConn`: campi `gsoEnabled`, `gsoDisabled` (atomic), `gsoBufs []gsoTxPipeBuf`
+  - M=0 fast path: `gsoAccumLocked()` anziché `WriteToUDP()`
+  - M>0 FEC path: `sendFECGroupLocked()` usa GSO per data + parity shards
+  - `FlushTxBatch()` implementato su client → `drainSendCh` lo chiama via `txBatcher`
+  - `flushTxGroup()` (FEC timer) chiama `gsoFlushAllLocked()` dopo encode
+  - Fallback: se `WriteMsgUDP` ritorna EIO → `gsoDisabled=1`, resend individuale
+- **Config**: `stripe_disable_gso: true` per A/B testing
+- **Log**: `gso=on|off` aggiunto al log "stripe client ready"
+- Build + tests + vet: ✅ passati
+
 ## 2026-03-15
 
 ### Tag v4.3 — Monitoring stack completo

@@ -63,6 +63,7 @@ type Config struct {
 	StripeFECMode         string                `yaml:"stripe_fec_mode"` // "always" (default), "adaptive", "off"
 	StripePacingRate      int                   `yaml:"stripe_pacing_rate"` // Mbps per session (0 = disabled)
 	StripeARQ             bool                  `yaml:"stripe_arq"`         // Hybrid ARQ with NACK retransmission
+	StripeDisableGSO      bool                  `yaml:"stripe_disable_gso"` // Disable UDP GSO (for A/B testing)
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
 	MetricsListen         string                `yaml:"metrics_listen"` // e.g. "10.200.17.254:9090" — bind to tunnel IP only
 }
