@@ -1407,6 +1407,11 @@ func (scc *stripeClientConn) handleXorRepair(hdr stripeHdr, payload []byte) {
 	}
 	// Deliver recovered IP packet.
 	atomic.AddUint64(&scc.fecRecov, 1)
+	// Count recovery in rxDirectCount so seq-gap loss estimator sees NET loss
+	// (after FEC), not GROSS loss. Without this, recovered packets are invisible
+	// to gap detection, inflating perceived loss and keeping the adaptive gate ON
+	// in a positive feedback loop.
+	atomic.AddUint64(&scc.rxDirectCount, 1)
 	// ARQ: mark recovered seq as received so it won't be NACKed.
 	if scc.arqRx != nil {
 		scc.arqRx.markReceived(recoveredSeq)
@@ -2825,6 +2830,9 @@ func (ss *stripeServer) handleXorRepairServer(hdr stripeHdr, payload []byte, fro
 	atomic.AddUint64(&sess.rxFECRecov, 1)
 	atomic.AddUint64(&sess.rxPkts, 1)
 	atomic.AddUint64(&sess.rxBytes, uint64(len(pkt)))
+	// Count recovery in rxDirectCount so seq-gap loss estimator sees NET loss
+	// (after FEC), not GROSS loss — prevents adaptive gate feedback loop.
+	atomic.AddUint64(&sess.rxDirectCount, 1)
 	// ARQ: mark recovered seq as received so it won't be NACKed.
 	if sess.arqRx != nil {
 		sess.arqRx.markReceived(recoveredSeq)
