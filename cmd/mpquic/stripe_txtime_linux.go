@@ -33,7 +33,7 @@ import (
 
 const (
 	soTXTIME  = 61   // SOL_SOCKET level option
-	scmTXTIME = 0x25 // cmsg type for sendmsg ancillary data
+	scmTXTIME = 61   // cmsg type for sendmsg ancillary data (SCM_TXTIME == SO_TXTIME)
 )
 
 // sockTxtime is the kernel struct sock_txtime (include/uapi/linux/net_tstamp.h).
