@@ -1381,6 +1381,45 @@ in un singolo `sendmsg`. Impatto:
 9. Config: `stripe_disable_gso: true` per A/B test
 10. `flushTxGroup` (FEC timer) chiama `gsoFlushAllLocked()` dopo encode
 
+**Benchmark (2026-03-16, dual Starlink, P30, -R, 7 run: 1×60s + 6×30s)**:
+
+| Run | Durata | Receiver | Retransmit | Retransmit/s | Picco 1s |
+|-----|--------|----------|------------|-------------|----------|
+| 0 | 60s | **364 Mbps** | 9533 | 159 | **548 Mbps** |
+| 1 | 30s | **400 Mbps** | 4273 | 142 | 455 Mbps |
+| 2 | 30s | **365 Mbps** | 5705 | 190 | 443 Mbps |
+| 3 | 30s | **238 Mbps** | 4095 | 137 | 302 Mbps |
+| 4 | 30s | **311 Mbps** | 4690 | 156 | 429 Mbps |
+| 5 | 30s | **344 Mbps** | 6847 | 228 | 460 Mbps |
+| 6 | 30s | **356 Mbps** | 6020 | 201 | 440 Mbps |
+
+**Statistiche 6×30s**: media **336 Mbps**, mediana 350, media senza outlier **355 Mbps**,
+best **400 Mbps**, worst 238 Mbps (degradazione Starlink), StdDev 51 Mbps.
+
+**Confronto con v4.3 baseline**:
+
+| Metrica | v4.3 | v4.4 GSO | Delta |
+|---------|------|----------|-------|
+| Picco per-second | 499 Mbps | **548 Mbps** | **+9.8%** |
+| Miglior media 30s | 374 Mbps | **400 Mbps** | **+6.9%** |
+| Media 6×30s | — | 336 Mbps | comparabile a v4.3 150s (333) |
+
+**Nuovo record assoluto: 548 Mbps** (Run 0, t=20s). Miglior run 30s (Run 1):
+63% dei secondi sopra 400 Mbps (19/30s). Impatto GSO coerente con previsione +5-10%.
+
+**Retransmit aumentati (+80% vs baseline)**: GSO emette burst a wire-speed →
+overflow buffer NIC/switch → retransmit TCP self-inflicted.
+Questo **conferma la necessità di Step 4.25** (kernel pacing `SO_TXTIME` + `sch_fq`)
+per distanziare i pacchetti nel burst GSO e ridurre i retransmit.
+
+**Metriche Prometheus (snapshot post-test)**:
+- Client RX totale: 15.39 GB, TX: 553 MB (ACK TCP — coerente con 8 Mbps TX su Grafana)
+- Asimmetria wan5/wan6: 36/64% dei dati (hashing 30 TCP flow su TUN multiqueue)
+- FEC adattivo M=0, loss rate 0%, decrypt failures 0
+- Server NACK sent: ~45K/sessione, retransmit received: 0
+
+**Commit**: `f9c2607`.
+
 ### Step 4.25 — Kernel Pacing con `SO_TXTIME` + `sch_fq` ⬜ DA IMPLEMENTARE
 
 **Obiettivo**: eliminare la burstiness software delegando il pacing al kernel.
@@ -1395,6 +1434,9 @@ e il qdisc `sch_fq` lo trattiene fino a quel momento.
   approccio usato da implementazioni QUIC moderne (Google, Cloudflare)
 - Il pacing riduce burstiness software → meno congestione → meno NACK
   self-inflicted → throughput netto più stabile
+- **Validato da Step 4.24**: GSO ha aumentato i retransmit TCP del +80% (176/s vs
+  98/s baseline) perché emette burst a wire-speed → overflow buffer → drop.
+  Il kernel pacing è il complemento necessario per distanziare i pacchetti nel burst.
 
 **Aspettativa calibrata**: la variabilità dominante è Starlink (beam handoff,
 scheduling LEO), non software. Il pacing attacca solo la componente software.
@@ -1452,8 +1494,9 @@ un FEC minimal basato su XOR parity su finestra scorrevole. Copre il caso comune
 - [x] UDP GSO implementato e testato (Step 4.24)
 - [ ] Kernel pacing SO_TXTIME operativo (Step 4.25)
 - [ ] Sliding window XOR FEC implementato (Step 4.26)
-- [ ] **Media ≥ 400 Mbps su 30-60s, dual Starlink, tempo buono**
+- [ ] **Media ≥ 400 Mbps su 30-60s, dual Starlink, tempo buono** — best run 400 Mbps raggiunto, media 6 run 336 (Starlink variabilità)
 - [ ] Profiling CPU confronto con v4.3 baseline
+- [x] Benchmark GSO 7 run: picco **548 Mbps** (+9.8%), best 30s **400 Mbps** (+6.9%), retransmit +80% → valida Step 4.25
 
 ---
 

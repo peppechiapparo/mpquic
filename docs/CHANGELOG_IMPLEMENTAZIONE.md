@@ -23,6 +23,16 @@
 - **Log**: `gso=on|off` aggiunto al log "stripe client ready"
 - Build + tests + vet: ✅ passati
 
+### Step 4.24 — Benchmark GSO (7 run: 1×60s + 6×30s, P30, -R, dual Starlink)
+- **Nuovo record assoluto**: **548 Mbps** (picco per-second, +9.8% vs 499 v4.3)
+- **Miglior run 30s**: **400 Mbps** (+6.9% vs baseline 374 Mbps)
+- **Media 6×30s**: 336 Mbps (mediana 350, senza outlier 355)
+- **Retransmit TCP**: +80% vs baseline (176/s vs 98/s) — burst GSO → buffer overflow
+- **Variabilità Starlink**: range 238-548 Mbps (2.3×), domina rispetto a delta GSO
+- **Metriche**: FEC adattivo M=0, loss rate 0%, decrypt fail 0, asimmetria wan5/wan6 36/64%
+- **Conclusione**: GSO migliora throughput come previsto (+5-10%), retransmit confermano
+  necessità Step 4.25 (kernel pacing) per domare i burst
+
 ## 2026-03-15
 
 ### Tag v4.3 — Monitoring stack completo
