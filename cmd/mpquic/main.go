@@ -723,10 +723,17 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 			if !exists || !isActive || (nowNano-entry.lastSeen) > flowIdleNs {
 				// Least-loaded: choose active path with lowest score.
 				// score = queue_depth * 1e6 + txBytes / 1e6
-				bestIdx := active[0]
-				bestScore := int64(len(grp.paths[active[0]].sendCh))*1e6 +
-					int64(atomic.LoadUint64(&grp.paths[active[0]].txBytes)/1e6)
-				for _, ai := range active[1:] {
+				// Start from a rotating position so that tied scores
+				// (both queues empty, similar txBytes) round-robin
+				// across paths instead of always picking active[0].
+				n := len(active)
+				startPos := grp.rr % n
+				grp.rr = (startPos + 1) % n
+				bestIdx := active[startPos]
+				bestScore := int64(len(grp.paths[bestIdx].sendCh))*1e6 +
+					int64(atomic.LoadUint64(&grp.paths[bestIdx].txBytes)/1e6)
+				for k := 1; k < n; k++ {
+					ai := active[(startPos+k)%n]
 					s := int64(len(grp.paths[ai].sendCh))*1e6 +
 						int64(atomic.LoadUint64(&grp.paths[ai].txBytes)/1e6)
 					if s < bestScore {
@@ -745,9 +752,11 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 					}
 				}
 			} else {
-				// Update lastSeen for existing active flow
-				entry.lastSeen = nowNano
-				grp.flowPaths[h] = entry
+				// Refresh lastSeen only if >1s stale (avoid per-packet map write)
+				if (nowNano - entry.lastSeen) > int64(time.Second) {
+					entry.lastSeen = nowNano
+					grp.flowPaths[h] = entry
+				}
 			}
 			idx = entry.pathIdx
 		} else {
