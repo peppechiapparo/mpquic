@@ -162,10 +162,23 @@ type GlobalStats struct {
 	UptimeSec  float64        `json:"uptime_sec"`
 	Sessions   []SessionStats `json:"sessions,omitempty"`
 	Paths      []PathStats    `json:"paths,omitempty"`
+	Dispatch   []DispatchPathStats `json:"dispatch,omitempty"`
 	TotalTxBytes uint64       `json:"total_tx_bytes"`
 	TotalRxBytes uint64       `json:"total_rx_bytes"`
 	TotalTxPkts  uint64       `json:"total_tx_pkts"`
 	TotalRxPkts  uint64       `json:"total_rx_pkts"`
+}
+
+// DispatchPathStats holds aggregated dispatch metrics for a path index.
+// Aggregated across all connGroups in the connectionTable.
+type DispatchPathStats struct {
+	PathIdx      int    `json:"path_idx"`
+	RemoteAddr   string `json:"remote_addr"`
+	DispatchHit  uint64 `json:"dispatch_hit"`
+	DispatchDrop uint64 `json:"dispatch_drop"`
+	TxBytes      uint64 `json:"tx_bytes"`
+	SendQueueLen int    `json:"send_queue_len"`
+	FlowCount    int    `json:"flow_count"` // number of flows assigned to this path
 }
 
 // ─── Snapshot functions ───────────────────────────────────────────────────
@@ -249,6 +262,69 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 	return stats
 }
 
+// snapshotDispatchStats aggregates per-path dispatch metrics from the
+// connectionTable. Walks all connGroups under ct.mu.RLock and builds
+// per-pathIdx stats including dispatched packets, drops, bytes, queue
+// depth and flow count.
+func snapshotDispatchStats(ss *stripeServer) []DispatchPathStats {
+	if ss == nil || ss.ct == nil {
+		return nil
+	}
+	ct := ss.ct
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
+
+	// Aggregate per remoteAddr across all groups.
+	type agg struct {
+		idx      int
+		remote   string
+		hit      uint64
+		drop     uint64
+		tx       uint64
+		qLen     int
+		flows    int
+	}
+	byRemote := make(map[string]*agg)
+
+	for _, grp := range ct.byIP {
+		// Count flows per pathIdx
+		flowCounts := make(map[int]int, len(grp.paths))
+		for _, fe := range grp.flowPaths {
+			flowCounts[fe.pathIdx]++
+		}
+		for i, pc := range grp.paths {
+			if pc == nil {
+				continue
+			}
+			key := pc.remoteAddr
+			a, ok := byRemote[key]
+			if !ok {
+				a = &agg{idx: i, remote: key}
+				byRemote[key] = a
+			}
+			a.hit += atomic.LoadUint64(&pc.dispatchHit)
+			a.drop += atomic.LoadUint64(&pc.dispatchDrop)
+			a.tx += atomic.LoadUint64(&pc.txBytes)
+			a.qLen += len(pc.sendCh)
+			a.flows += flowCounts[i]
+		}
+	}
+
+	stats := make([]DispatchPathStats, 0, len(byRemote))
+	for _, a := range byRemote {
+		stats = append(stats, DispatchPathStats{
+			PathIdx:      a.idx,
+			RemoteAddr:   a.remote,
+			DispatchHit:  a.hit,
+			DispatchDrop: a.drop,
+			TxBytes:      a.tx,
+			SendQueueLen: a.qLen,
+			FlowCount:    a.flows,
+		})
+	}
+	return stats
+}
+
 func buildGlobalStats() GlobalStats {
 	globalMetrics.mu.RLock()
 	role := globalMetrics.role
@@ -265,6 +341,7 @@ func buildGlobalStats() GlobalStats {
 
 	if ss != nil {
 		gs.Sessions = snapshotServerSessions(ss)
+		gs.Dispatch = snapshotDispatchStats(ss)
 		for _, s := range gs.Sessions {
 			gs.TotalTxBytes += s.TxBytes
 			gs.TotalRxBytes += s.RxBytes
@@ -411,6 +488,40 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_session_decrypt_fail_total counter\n")
 		for _, s := range gs.Sessions {
 			fmt.Fprintf(w, "mpquic_session_decrypt_fail_total{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.DecryptFail)
+		}
+		fmt.Fprintln(w)
+	}
+
+	// Dispatch scheduler metrics (server side, per-path)
+	if len(gs.Dispatch) > 0 {
+		fmt.Fprintf(w, "# HELP mpquic_dispatch_hit_total Packets successfully queued to a path via dispatch.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_dispatch_hit_total counter\n")
+		for _, d := range gs.Dispatch {
+			fmt.Fprintf(w, "mpquic_dispatch_hit_total{remote=\"%s\"} %d\n", d.RemoteAddr, d.DispatchHit)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_dispatch_drop_total Packets dropped (sendCh full) via dispatch.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_dispatch_drop_total counter\n")
+		for _, d := range gs.Dispatch {
+			fmt.Fprintf(w, "mpquic_dispatch_drop_total{remote=\"%s\"} %d\n", d.RemoteAddr, d.DispatchDrop)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_dispatch_tx_bytes Total bytes queued via dispatch scheduler.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_dispatch_tx_bytes counter\n")
+		for _, d := range gs.Dispatch {
+			fmt.Fprintf(w, "mpquic_dispatch_tx_bytes{remote=\"%s\"} %d\n", d.RemoteAddr, d.TxBytes)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_dispatch_queue_len Current sendCh queue depth.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_dispatch_queue_len gauge\n")
+		for _, d := range gs.Dispatch {
+			fmt.Fprintf(w, "mpquic_dispatch_queue_len{remote=\"%s\"} %d\n", d.RemoteAddr, d.SendQueueLen)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_dispatch_flow_count Active flows assigned to this path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_dispatch_flow_count gauge\n")
+		for _, d := range gs.Dispatch {
+			fmt.Fprintf(w, "mpquic_dispatch_flow_count{remote=\"%s\"} %d\n", d.RemoteAddr, d.FlowCount)
 		}
 		fmt.Fprintln(w)
 	}
