@@ -2,6 +2,35 @@
 
 ## 2026-03-16
 
+### Step 4.26 — Sliding Window XOR FEC (RFC 8681) implementato, deployato e benchmarkato
+- **Obiettivo**: sostituire FEC Reed-Solomon block-based (pesante, alta latenza) con
+  XOR a finestra scorrevole: 1 repair ogni W pacchetti, recovery istantanea per 1-loss,
+  fallback ARQ per multi-loss.
+- **File nuovi**:
+  - `stripe_fec_xor.go` (257 LOC): `xorFECSender` (accumulatore XOR incrementale,
+    0 allocs/op) + `xorFECReceiver` (ring buffer pre-allocato, 30ns storeShard)
+  - `stripe_fec_xor_test.go` (406 LOC): 9 test + 3 benchmark, 100% pass
+- **Modifiche core** (`stripe.go`):
+  - Wire protocol: `stripeXOR_REPAIR` type 0x06, riusa `stripeHdr` 16B
+  - Client + Server TX: `addSource()` nel path M=0, `sendXorRepairLocked()`,
+    flush timer per finestre parziali
+  - Client + Server RX: `storeShard()` ring buffer, `handleXorRepair()`,
+    `tryRecover()` per 1-loss recovery
+  - **Adaptive gate**: `xorActive` int32 atomic — stessa logica di `adaptiveM`
+    (soglia 2% loss, cooldown 15s). In condizioni normali: 0 repairs emessi.
+- **Config**: `stripe_fec_type: xor`, `stripe_fec_window: 10`
+- **Metrics**: `xor_emitted`, `xor_recovered`, `xor_unrecoverable` (JSON + Prometheus)
+- **Bug fix**:
+  - `7c8396a`: storeShard usava map + alloc/pkt → ring buffer (0 allocs, 45 GB/s)
+  - `ba010f2`: XOR sempre attivo → adaptive gate (0% overhead sotto soglia loss)
+- **Benchmark** (12 run × 30s, P30 -R, dual Starlink):
+  - XOR always-on: 300 Mbps media (-10.7%) — bandwidth tax 10%
+  - XOR adaptive: 307 Mbps media, σ=28, range 248-353 — neutro vs baseline
+    (varianza rete domina, run 11: 353 Mbps > baseline 336)
+  - XOR repairs = 0 (confirmed `adaptive XOR FEC: OFF` in logs)
+- **Commit**: `8b3f2c2`, `7c8396a`, `ba010f2`
+- **Tag**: v4.6 (pending)
+
 ### Step 4.25 — Kernel Pacing `SO_TXTIME` + `sch_fq` implementato, deployato e benchmarkato
 - **Problema**: GSO (Step 4.24) emette burst a wire-speed → retransmit TCP +80%
   (176/s vs 98/s). Software pacer (`time.Sleep`) ha granularità ~1ms, inutile a

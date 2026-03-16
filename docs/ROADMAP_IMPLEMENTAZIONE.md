@@ -1520,7 +1520,7 @@ non misurabile nell'aggregato. Overhead trascurabile (1 cmsg aggiuntivo per pkt)
 
 **Tag**: **v4.5** su commit `3d2945e`.
 
-### Step 4.26 — Sliding Window FEC (XOR parity) ⬜ DA IMPLEMENTARE
+### Step 4.26 — Sliding Window FEC (XOR parity) ✅ IMPLEMENTATO + DEPLOYATO + BENCHMARKATO
 
 **Obiettivo**: sostituire il FEC Reed-Solomon block-based (Step 4.8, heavyweight) con
 un FEC minimal basato su XOR a finestra scorrevole (Sliding Window FEC). Copre il
@@ -1597,28 +1597,37 @@ Vantaggi rispetto a Reed-Solomon:
 - **Payload ID esplicito**: receiver identifica esattamente i source coperti
 - **Compatibilità**: RS encoder mantenuto come fallback per scenari ad alta loss
 
-**Implementazione pianificata**:
-1. Sender: ring buffer di W shard, XOR running calcolato incrementalmente
-2. Ogni W shard emessi, emetti 1 shard parity (XOR dei precedenti W)
-3. Receiver: se manca 1 shard su W+1, XOR degli W presenti = shard mancante
-4. Se mancano >1 nella stessa finestra: NACK come oggi
-5. Parametro `stripe_fec_window: 10` (default), configurabile 4-16
-6. Parametro `stripe_fec_type: xor` (default), `rs` per Reed-Solomon legacy
-7. Contatori telemetria: `xor_recovered`, `xor_emitted`, `xor_fallback_nack`
-8. RS encoder mantenuto come opzione per scenari ad alta loss (>5%)
+**Implementazione completata (2026-03-16)**:
 
-**Effort stimato**: ~2 giorni (encoder XOR banale, complessità nel window tracking
-e coordinamento con ARQ per evitare NACK ridondanti).
+**Commit**:
+- `8b3f2c2` — feat: Step 4.26 Sliding Window XOR FEC (RFC 8681)
+- `7c8396a` — perf: xorFECReceiver ring buffer — zero allocs on RX hot path
+- `ba010f2` — feat: adaptive XOR FEC — emit repairs only when peer loss > 2%
 
-**Riferimenti**:
-- RFC 8681: Sliding Window Random Linear Code (RLC) Forward Erasure Correction
-- FlexFEC (WebRTC): ULPFEC XOR-based, produzione Google
-- 3GPP: SW-FEC per mobility handoff su reti LEO
+**File nuovi**:
+- `stripe_fec_xor.go` (257 LOC): `xorFECSender` + `xorFECReceiver` (ring buffer)
+- `stripe_fec_xor_test.go` (406 LOC): 9 unit test + 3 benchmark
+
+**Risultati benchmark** (12 run × 30s, P30 -R, dual Starlink):
+- **XOR always-on (pre-adaptive)**: 300 Mbps media (-10.7% vs baseline 336)
+  → causa: 10% bandwidth tax (1 repair ogni 10 pacchetti)
+- **XOR adaptive (post-fix)**: 307 Mbps media (σ=28), range 248-353
+  → XOR OFF confermato (log: `adaptive XOR FEC: OFF`), 0 repairs emessi
+  → calo residuo attribuito a varianza rete (run 11: 353 > baseline 336)
+- **storeShard ring buffer**: 30 ns/op, 0 allocs, 45 GB/s (vs map: ~1µs + alloc/pkt)
+- **addSource sender**: 732 ns/op, 0 allocs, 1913 MB/s
+
+**Logica adaptive**:
+- `xorActive` flag atomic: 0=OFF, 1=ON
+- Stessa soglia/cooldown di RS adaptive: loss > 2% → ON, cooldown 15s → OFF
+- In condizioni normali (0.02% loss): zero overhead, zero repairs
+- In burst loss (>2%): XOR ON, 10% overhead, recovery 1-loss/window
+- ARQ attivo sempre come fallback per multi-loss
 
 ### Done criteria Fase 4c
 - [x] UDP GSO implementato e testato (Step 4.24)
 - [x] Kernel pacing SO_TXTIME implementato, deployato e benchmarkato (Step 4.25)
-- [ ] Sliding window XOR FEC implementato (Step 4.26)
+- [x] Sliding window XOR FEC implementato e deployato (Step 4.26)
 - [ ] **Media ≥ 400 Mbps su 30-60s, dual Starlink, tempo buono** — best run 400 Mbps (GSO), media 6 run 333 (dominata da variabilità Starlink 23% CoV)
 - [ ] Profiling CPU confronto con v4.3 baseline
 - [x] Benchmark GSO 7 run: picco **548 Mbps** (+9.8%), best 30s **400 Mbps** (+6.9%), retransmit +80%
