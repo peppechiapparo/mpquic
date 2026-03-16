@@ -2223,11 +2223,16 @@
       "targets": [
         {
           "expr": "mpquic_session_adaptive_m{job=\"mpquic-server\"}",
-          "legendFormat": "M {{session}} ({{instance_name}})",
+          "legendFormat": "RS M {{session}} ({{instance_name}})",
           "refId": "A"
+        },
+        {
+          "expr": "mpquic_session_xor_active{job=\"mpquic-server\"}",
+          "legendFormat": "XOR gate {{session}} ({{instance_name}})",
+          "refId": "B"
         }
       ],
-      "title": "Adaptive FEC M (shards parit\u00e0)",
+      "title": "Adaptive FEC Gate (RS M + XOR active)",
       "type": "timeseries"
     },
     {
@@ -2363,11 +2368,26 @@
       "targets": [
         {
           "expr": "rate(mpquic_path_stripe_fec_recovered{job=\"mpquic-client\"}[$__rate_interval])",
-          "legendFormat": "{{path}}",
+          "legendFormat": "RS {{path}}",
           "refId": "A"
+        },
+        {
+          "expr": "rate(mpquic_path_stripe_xor_recovered{job=\"mpquic-client\"}[$__rate_interval])",
+          "legendFormat": "XOR recover {{path}}",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(mpquic_path_stripe_xor_emitted{job=\"mpquic-client\"}[$__rate_interval])",
+          "legendFormat": "XOR emitted {{path}}",
+          "refId": "C"
+        },
+        {
+          "expr": "mpquic_path_stripe_xor_active{job=\"mpquic-client\"}",
+          "legendFormat": "XOR gate {{path}}",
+          "refId": "D"
         }
       ],
-      "title": "FEC recovery per path (client stripe)",
+      "title": "FEC recovery + XOR gate (client stripe)",
       "type": "timeseries"
     },
     {
@@ -2483,5 +2503,5 @@
   "timezone": "browser",
   "title": "MPQUIC Overview",
   "uid": "adsnpmk",
-  "version": 8
+  "version": 9
 }
