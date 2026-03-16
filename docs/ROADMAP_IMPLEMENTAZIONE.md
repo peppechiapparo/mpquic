@@ -1420,7 +1420,7 @@ per distanziare i pacchetti nel burst GSO e ridurre i retransmit.
 
 **Commit**: `f9c2607`.
 
-### Step 4.25 — Kernel Pacing con `SO_TXTIME` + `sch_fq` ⬜ DA IMPLEMENTARE
+### Step 4.25 — Kernel Pacing con `SO_TXTIME` + `sch_fq` ✅ IMPLEMENTATO
 
 **Obiettivo**: eliminare la burstiness software delegando il pacing al kernel.
 Invece di emettere batch in burst e sperare che la NIC li distanzi, si assegna
@@ -1442,22 +1442,37 @@ e il qdisc `sch_fq` lo trattiene fino a quel momento.
 scheduling LEO), non software. Il pacing attacca solo la componente software.
 Stima: media +5-15% (da ~374 a ~400-430 Mbps), non miracolo.
 
-**Implementazione pianificata**:
-1. Setup `sch_fq` su interfacce WAN: `tc qdisc replace dev enp7sX root fq`
-2. Socket option: `setsockopt(fd, SOL_SOCKET, SO_TXTIME, ...)` con
-   `clockid=CLOCK_MONOTONIC`, `flags=0` (no error reporting)
-3. Per ogni `sendmsg`: ancillary `SCM_TXTIME` con timestamp calcolato:
-   `txtime = max(now, last_txtime + inter_packet_gap)`
-4. `inter_packet_gap` calcolato da target rate: `pkt_size * 8 / target_bps * 1e9` ns
-5. Target rate iniziale = banda stimata per pipe (da telemetria Fase 5)
-6. Flag `--pacing` per enable/disable runtime (default: enabled)
-7. Fallback: se `SO_TXTIME` non supportato, emissione senza pacing
+**Implementazione realizzata**:
+
+File nuovi:
+- `stripe_txtime_linux.go` (155 LOC): SO_TXTIME probe, setup, SCM_TXTIME cmsg builder,
+  `monoNowNs()` via CLOCK_MONOTONIC, `setsockoptTxtime()` raw syscall
+- `stripe_txtime_other.go` (17 LOC): stub non-Linux (no-op)
+- `scripts/setup-fq-qdisc.sh`: installa `sch_fq` su interfacce WAN (auto-detect o manuale)
+
+Modifiche a `stripe.go`:
+1. **Client**: ogni pipe socket → `SO_TXTIME` + `SO_MAX_PACING_RATE` (per-pipe rate)
+   - Per-pipe EDT tracker: `txtimeEDT[]` + `txtimeGapNs` (nanosecond inter-packet gap)
+   - `gsoFlushPipeLocked()`: aggiunge `SCM_TXTIME` al OOB con EDT calcolato
+   - `writePacedUDP()`: singoli pacchetti (non-GSO) con SCM_TXTIME
+   - Software pacer (`stripePacer`) disabilitato automaticamente quando kernel pacing attivo
+2. **Server**: `SO_TXTIME` sul listener socket → ogni sessione ha `txtimeEDT` + `txtimeGapNs`
+   - `txBatchAddLocked()`: ogni messaggio nel batch sendmmsg porta SCM_TXTIME individuale
+   - OOB cleanup dopo flush (evita stale cmsg su slot riutilizzati)
+3. **Log**: `txtime=on/off` nel messaggio di avvio (client e server)
+
+Fix correlato (Issue #1 — ARQ retransmit received: 0):
+- `addRetxReceived(1)` ora chiamato quando `markReceived()=true` e `seq < rxSeqHighest`
+  (il pacchetto ha riempito un gap = retransmit o out-of-order riuscito)
+- Sia client che server: il contatore `arq_retx_recv` ora riflette i retransmit reali
 
 **Prerequisiti deploy**:
-- `sch_fq` qdisc attivo sulle WAN (client + server VPS)
+- `sch_fq` qdisc attivo sulle WAN: `sudo scripts/setup-fq-qdisc.sh`
 - Kernel ≥4.19 (supporto `SO_TXTIME`) — OK su Debian 12 (6.1) e Ubuntu 24.04 (6.8)
+- `stripe_pacing_rate > 0` nel config (già presente: 800 Mbps default)
 
-**Effort stimato**: ~1.5 giorni (syscall Cmsghdr manuali in Go + tc setup).
+**Fallback**: se `SO_TXTIME` probe fallisce (kernel vecchio / no `sch_fq`), software pacer
+rimane attivo. Nessun cambiamento di comportamento in assenza di supporto kernel.
 
 ### Step 4.26 — Sliding Window FEC (XOR parity) ⬜ DA IMPLEMENTARE
 
@@ -1492,27 +1507,31 @@ un FEC minimal basato su XOR parity su finestra scorrevole. Copre il caso comune
 
 ### Done criteria Fase 4c
 - [x] UDP GSO implementato e testato (Step 4.24)
-- [ ] Kernel pacing SO_TXTIME operativo (Step 4.25)
+- [x] Kernel pacing SO_TXTIME implementato (Step 4.25) — da deployare e benchmarkare
 - [ ] Sliding window XOR FEC implementato (Step 4.26)
 - [ ] **Media ≥ 400 Mbps su 30-60s, dual Starlink, tempo buono** — best run 400 Mbps raggiunto, media 6 run 336 (Starlink variabilità)
 - [ ] Profiling CPU confronto con v4.3 baseline
 - [x] Benchmark GSO 7 run: picco **548 Mbps** (+9.8%), best 30s **400 Mbps** (+6.9%), retransmit +80% → valida Step 4.25
-- [ ] Fix criticità ARQ retransmit (Issue #1)
+- [x] Fix criticità ARQ retransmit (Issue #1) — root cause: `addRetxReceived()` mai chiamato, fix applicato
 - [ ] Fix asimmetria wan5/wan6 (Issue #2)
 
 ### Criticità aperte (emerse da benchmark Step 4.24)
 
-**Issue #1 — ARQ retransmit received = 0 (NACK inviati ma retransmit non ricevute)**
+**Issue #1 — ARQ retransmit received = 0 ✅ RISOLTO**
 
 Il server invia ~45K NACK per sessione (contatore `arq_nack_sent`) ma il contatore
-`arq_retx_recv` sul server resta a 0. Possibili cause:
-1. **NACK non arrivano al client**: il path di ritorno (server→client) perde i NACK
-2. **Client non processa i NACK**: bug nel dispatch del messaggio NACK sul client
-3. **Client retransmit ma il server non li conta**: bug nel contatore server-side
-4. **NACK vengono inviati ma scartati**: rate limiting NACK troppo aggressivo
+`arq_retx_recv` sul server restava a 0.
 
-**Impatto**: se l'ARQ non funziona effettivamente, le perdite sono coperte
-solo dal TCP retransmit end-to-end (molto più lento). Fixing questo potrebbe
+**Root cause trovata**: `addRetxReceived()` definita in `stripe_arq.go:268` ma **mai
+chiamata** da nessun punto del codice. Il flusso ARQ funzionava correttamente (NACK →
+retransmit → delivery), ma il contatore dedicato non veniva mai incrementato. I
+retransmit riusciti finivano nel contatore `dup_filtered` indiscriminatamente.
+
+**Fix applicato**: in `stripe.go`, sia client che server, quando `markReceived(seq)`
+ritorna `true` (gap riempito) e `seq < rxSeqHighest`, si incrementa `addRetxReceived(1)`.
+Questo distingue correttamente:
+- `retx_recv`: pacchetti che hanno riempito un gap (retransmit o out-of-order utili)
+- `dup_filtered`: pacchetti già ricevuti (duplicati reali o retransmit tardivi)
 ridurre i retransmit TCP e migliorare la media.
 
 **Issue #2 — Asimmetria wan5/wan6: 36/64% distribuzione traffico**

@@ -284,6 +284,15 @@ type stripeClientConn struct {
 	gsoDisabled uint32          // atomic: 1 = runtime fallback (NIC lacks TX csum)
 	gsoBufs     []gsoTxPipeBuf  // one per pipe
 
+	// Kernel TX pacing (SO_TXTIME + sch_fq).
+	// Each pipe socket has SO_TXTIME enabled; per-sendmsg SCM_TXTIME cmsg
+	// carries an EDT (Earliest Departure Time) so sch_fq holds the packet
+	// until that instant.  Replaces the software stripePacer with nanosecond
+	// kernel-level precision.
+	txtimeEnabled bool               // SO_TXTIME probed OK on first pipe
+	txtimeEDT     []int64            // per-pipe next EDT (ns, CLOCK_MONOTONIC)
+	txtimeGapNs   int64              // inter-packet gap (ns) derived from pacing rate
+
 	// Stats (atomic)
 	txPkts   uint64
 	rxPkts   uint64
@@ -490,6 +499,31 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		}
 	}
 
+	// Probe SO_TXTIME kernel pacing on the first pipe.
+	// If supported, enable SO_TXTIME on ALL pipes and compute inter-packet gap.
+	// Kernel pacing replaces the software stripePacer with nanosecond-precision
+	// sch_fq scheduling, eliminating burst-induced retransmits.
+	if cfg.StripePacingRate > 0 && len(scc.pipes) > 0 && stripeTxtimeProbe(scc.pipes[0]) {
+		numPipes := len(scc.pipes)
+		rateBytesPerPipe := uint64(cfg.StripePacingRate) * 1e6 / 8 / uint64(numPipes)
+		// Typical shard: stripeHdrLen + 2 + MTU + AES-GCM overhead ≈ 1402 bytes
+		scc.txtimeGapNs = int64(float64(1402*8) / (float64(cfg.StripePacingRate) * 1e6 / float64(numPipes)) * 1e9)
+		scc.txtimeEDT = make([]int64, numPipes)
+		allOK := true
+		for i, pipe := range scc.pipes {
+			if err := stripeTxtimeSetup(pipe, rateBytesPerPipe); err != nil {
+				logger.Errorf("stripe: SO_TXTIME pipe %d failed: %v (disabling kernel pacing)", i, err)
+				allOK = false
+				break
+			}
+		}
+		if allOK {
+			scc.txtimeEnabled = true
+			// Kernel pacing supersedes the software token-bucket pacer.
+			scc.pacer = nil
+		}
+	}
+
 	// Register each pipe with the server (with retries for NAT traversal)
 	var totalSendOK int
 	for retry := 0; retry < stripeRegisterRetries; retry++ {
@@ -552,8 +586,10 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	scc.txTimer = time.AfterFunc(stripeFlushInterval, scc.flushTxGroup)
 
 	pacingStr := "off"
-	if cfg.StripePacingRate > 0 {
-		pacingStr = fmt.Sprintf("%dMbps", cfg.StripePacingRate)
+	if scc.txtimeEnabled {
+		pacingStr = fmt.Sprintf("kernel@%dMbps(gap=%dns)", cfg.StripePacingRate, scc.txtimeGapNs)
+	} else if cfg.StripePacingRate > 0 {
+		pacingStr = fmt.Sprintf("sw@%dMbps", cfg.StripePacingRate)
 	}
 	arqStr := "off"
 	if cfg.StripeARQ {
@@ -563,8 +599,12 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	if scc.gsoEnabled {
 		gsoStr = "on"
 	}
-	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d mode=%s pacing=%s arq=%s gso=%s server=%s encrypted=AES-256-GCM",
-		sessionID, len(scc.pipes), dataK, parityM, fecMode, pacingStr, arqStr, gsoStr, serverAddr)
+	txtimeStr := "off"
+	if scc.txtimeEnabled {
+		txtimeStr = "on"
+	}
+	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d mode=%s pacing=%s arq=%s gso=%s txtime=%s server=%s encrypted=AES-256-GCM",
+		sessionID, len(scc.pipes), dataK, parityM, fecMode, pacingStr, arqStr, gsoStr, txtimeStr, serverAddr)
 
 	return scc, nil
 }
@@ -607,7 +647,7 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 		if scc.gsoEnabled && atomic.LoadUint32(&scc.gsoDisabled) == 0 {
 			scc.gsoAccumLocked(pipeIdx, wirePkt)
 		} else {
-			_, _ = scc.pipes[pipeIdx].WriteToUDP(wirePkt, scc.serverAddr)
+			scc.writePacedUDP(pipeIdx, wirePkt)
 		}
 
 		atomic.AddUint64(&scc.txPkts, 1)
@@ -749,7 +789,7 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 		if gsoActive {
 			scc.gsoAccumLocked(pipeIdx, wirePkt)
 		} else {
-			_, _ = scc.pipes[pipeIdx].WriteToUDP(wirePkt, scc.serverAddr)
+			scc.writePacedUDP(pipeIdx, wirePkt)
 		}
 	}
 
@@ -771,7 +811,7 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 		if gsoActive {
 			scc.gsoAccumLocked(pipeIdx, wirePkt)
 		} else {
-			_, _ = scc.pipes[pipeIdx].WriteToUDP(wirePkt, scc.serverAddr)
+			scc.writePacedUDP(pipeIdx, wirePkt)
 		}
 	}
 
@@ -839,8 +879,8 @@ func (scc *stripeClientConn) gsoAccumLocked(pipeIdx int, wirePkt []byte) {
 }
 
 // gsoFlushPipeLocked sends all accumulated segments for one pipe.
-// Single-segment buffers use plain WriteToUDP (no GSO overhead).
-// Multi-segment buffers use WriteMsgUDP with UDP_SEGMENT cmsg.
+// Single-segment buffers use WriteMsgUDP (possibly with SCM_TXTIME).
+// Multi-segment buffers use WriteMsgUDP with UDP_SEGMENT cmsg (+ SCM_TXTIME).
 // On EIO (NIC lacks TX checksum offload), GSO is permanently disabled
 // and packets are resent individually.
 func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
@@ -851,11 +891,21 @@ func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
 	pipe := scc.pipes[pipeIdx]
 
 	if gb.count == 1 {
-		// Single segment — plain write (no GSO overhead).
-		_, _ = pipe.WriteToUDP(gb.buf, scc.serverAddr)
+		// Single segment — no GSO overhead.
+		if scc.txtimeEnabled {
+			edt := scc.txtimeNextEDT(pipeIdx, 1)
+			oob := stripeTxtimeBuildOOB(edt)
+			_, _, _ = pipe.WriteMsgUDP(gb.buf, oob, scc.serverAddr)
+		} else {
+			_, _ = pipe.WriteToUDP(gb.buf, scc.serverAddr)
+		}
 	} else {
 		// GSO: single sendmsg, kernel splits at segSize boundaries.
 		oob := stripeGSOBuildOOB(uint16(gb.segSize))
+		if scc.txtimeEnabled {
+			edt := scc.txtimeNextEDT(pipeIdx, gb.count)
+			oob = stripeTxtimeAppendOOB(oob, edt)
+		}
 		_, _, err := pipe.WriteMsgUDP(gb.buf, oob, scc.serverAddr)
 		if err != nil && stripeGSOIsError(err) {
 			atomic.StoreUint32(&scc.gsoDisabled, 1)
@@ -874,6 +924,34 @@ func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
 	gb.buf = gb.buf[:0]
 	gb.count = 0
 	gb.segSize = 0
+}
+
+// txtimeNextEDT returns the next Earliest Departure Time for a pipe and
+// advances the per-pipe EDT counter by numPkts * txtimeGapNs.
+// Ensures the EDT is never in the past (clamps to now + small delta).
+// Caller must hold txMu.
+func (scc *stripeClientConn) txtimeNextEDT(pipeIdx int, numPkts int) int64 {
+	now := monoNowNs()
+	edt := scc.txtimeEDT[pipeIdx]
+	if edt < now {
+		edt = now + 1000 // 1 µs ahead to avoid immediate delivery
+	}
+	scc.txtimeEDT[pipeIdx] = edt + int64(numPkts)*scc.txtimeGapNs
+	return edt
+}
+
+// writePacedUDP sends a single packet via a pipe, using SCM_TXTIME when
+// kernel pacing is active — otherwise falls back to plain WriteToUDP.
+// Caller must hold txMu.
+func (scc *stripeClientConn) writePacedUDP(pipeIdx int, pkt []byte) {
+	pipe := scc.pipes[pipeIdx]
+	if scc.txtimeEnabled {
+		edt := scc.txtimeNextEDT(pipeIdx, 1)
+		oob := stripeTxtimeBuildOOB(edt)
+		_, _, _ = pipe.WriteMsgUDP(pkt, oob, scc.serverAddr)
+	} else {
+		_, _ = pipe.WriteToUDP(pkt, scc.serverAddr)
+	}
 }
 
 // gsoFlushAllLocked flushes all per-pipe GSO buffers. Caller must hold txMu.
@@ -915,16 +993,35 @@ func (sdc *stripeServerDC) getEffectiveM() int {
 
 // txBatchAddLocked enqueues a wire packet for batched transmission.
 // Auto-flushes when the batch reaches stripeBatchSize.
+// When kernel pacing (SO_TXTIME) is active, each message gets an SCM_TXTIME
+// cmsg with the session's next EDT, spreading the batch over time.
 // Caller must hold sess.txMu.
 func (sdc *stripeServerDC) txBatchAddLocked(wirePkt []byte, addr *net.UDPAddr) {
 	sess := sdc.session
 	n := sess.txBatchN
 	sess.txBatchMsgs[n].Buffers[0] = wirePkt
 	sess.txBatchMsgs[n].Addr = addr
+	if sess.txtimeEnabled {
+		edt := sdc.txtimeNextEDT(1)
+		sess.txBatchMsgs[n].OOB = stripeTxtimeBuildOOB(edt)
+	}
 	sess.txBatchN = n + 1
 	if sess.txBatchN >= stripeBatchSize {
 		sdc.txBatchFlushLocked()
 	}
+}
+
+// txtimeNextEDT returns the next EDT for the session and advances the counter.
+// Caller must hold sess.txMu.
+func (sdc *stripeServerDC) txtimeNextEDT(numPkts int) int64 {
+	sess := sdc.session
+	now := monoNowNs()
+	edt := sess.txtimeEDT
+	if edt < now {
+		edt = now + 1000 // 1 µs ahead
+	}
+	sess.txtimeEDT = edt + int64(numPkts)*sess.txtimeGapNs
+	return edt
 }
 
 // txBatchFlushLocked sends all accumulated messages via sendmmsg.
@@ -935,6 +1032,12 @@ func (sdc *stripeServerDC) txBatchFlushLocked() {
 		return
 	}
 	_, _ = sess.txBatchPC.WriteBatch(sess.txBatchMsgs[:sess.txBatchN], 0)
+	// Clear OOB references to avoid stale SCM_TXTIME on reused slots.
+	if sess.txtimeEnabled {
+		for i := 0; i < sess.txBatchN; i++ {
+			sess.txBatchMsgs[i].OOB = nil
+		}
+	}
 	sess.txBatchN = 0
 }
 
@@ -1066,6 +1169,11 @@ func (scc *stripeClientConn) handleRxShard(hdr stripeHdr, payload []byte, isPari
 			if !scc.arqRx.markReceived(hdr.GroupSeq) {
 				scc.arqRx.addDupFiltered(1)
 				return // dedup: already delivered
+			}
+			// Gap-filling: if this seq is below the previously seen highest,
+			// it was out-of-order or a NACK-retransmit that filled a gap.
+			if uint64(hdr.GroupSeq) < atomic.LoadUint64(&scc.rxSeqHighest) {
+				scc.arqRx.addRetxReceived(1)
 			}
 		}
 		scc.deliverDataDirect(hdr, payload)
@@ -1514,6 +1622,13 @@ type stripeSession struct {
 	txBatchMsgs []ipv4.Message   // pre-allocated message slots
 	txBatchN    int              // messages in current batch
 
+	// Kernel TX pacing (SO_TXTIME + sch_fq) — per-session EDT tracking.
+	// The server socket has SO_TXTIME set once; each message in the sendmmsg
+	// batch carries its own SCM_TXTIME cmsg with the next EDT for this session.
+	txtimeEnabled bool   // inherited from stripeServer
+	txtimeEDT     int64  // next EDT (ns, CLOCK_MONOTONIC) — protected by txMu
+	txtimeGapNs   int64  // inter-packet gap derived from pacing rate
+
 	// Metrics (atomic, zero-alloc counters for /metrics and /api/v1/stats)
 	txPkts     uint64 // IP packets sent to client
 	txBytes    uint64 // IP payload bytes sent to client
@@ -1765,6 +1880,7 @@ type stripeServer struct {
 	fecMode    string // "always", "adaptive", "off"
 	pacingRate int    // Mbps per session (0 = disabled)
 	arqEnabled bool   // Hybrid ARQ enabled
+	txtimeEnabled bool // SO_TXTIME probed OK on listener socket
 	logger     *Logger
 	closeCh    chan struct{}
 
@@ -1828,15 +1944,35 @@ func newStripeServer(cfg *Config, tun *water.Interface, tunMultiQueue bool, ct *
 		pendingKeys: pendingKeys,
 	}
 
+	// Probe SO_TXTIME on the server listener socket.
+	// If supported, enable kernel pacing — each session's sendmmsg batch
+	// messages will carry SCM_TXTIME with per-session EDT timestamps.
+	if cfg.StripePacingRate > 0 && stripeTxtimeProbe(conn) {
+		// Rate per session: the actual rate is set when the session is created.
+		// Here we just enable SO_TXTIME on the socket (rate=0 → skip SO_MAX_PACING_RATE,
+		// rely on per-packet SCM_TXTIME EDT instead).
+		if err := stripeTxtimeSetup(conn, 0); err != nil {
+			logger.Errorf("stripe server: SO_TXTIME setup failed: %v (using software pacer)", err)
+		} else {
+			ss.txtimeEnabled = true
+		}
+	}
+
 	pacingStr := "off"
-	if cfg.StripePacingRate > 0 {
-		pacingStr = fmt.Sprintf("%dMbps", cfg.StripePacingRate)
+	if ss.txtimeEnabled {
+		pacingStr = fmt.Sprintf("kernel@%dMbps/sess", cfg.StripePacingRate)
+	} else if cfg.StripePacingRate > 0 {
+		pacingStr = fmt.Sprintf("sw@%dMbps", cfg.StripePacingRate)
 	}
 	arqStr := "off"
 	if cfg.StripeARQ {
 		arqStr = "on"
 	}
-	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s pacing=%s arq=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode, pacingStr, arqStr)
+	txtimeStr := "off"
+	if ss.txtimeEnabled {
+		txtimeStr = "on"
+	}
+	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s pacing=%s arq=%s txtime=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode, pacingStr, arqStr, txtimeStr)
 	return ss, nil
 }
 
@@ -2105,6 +2241,14 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			atomic.StoreInt32(&sess.adaptiveM, int32(ss.parityM))
 		}
 		sess.pacer = newStripePacer(ss.pacingRate)
+		if ss.txtimeEnabled && ss.pacingRate > 0 {
+			sess.txtimeEnabled = true
+			// Inter-packet gap (ns) = pkt_size * 8 / rate_bps * 1e9
+			// Typical shard ≈ 1402 bytes. Rate is per-session (all pipes).
+			sess.txtimeGapNs = int64(float64(1402*8) / (float64(ss.pacingRate) * 1e6) * 1e9)
+			// Kernel pacing supersedes software pacer.
+			sess.pacer = nil
+		}
 		if ss.arqEnabled {
 			sess.arqTx = &arqTxBuf{}
 			sess.arqRx = newArqRxTracker()
@@ -2373,6 +2517,11 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 			if !sess.arqRx.markReceived(hdr.GroupSeq) {
 				sess.arqRx.addDupFiltered(1)
 				return // dedup: already delivered
+			}
+			// Gap-filling: if this seq is below the previously seen highest,
+			// it was out-of-order or a NACK-retransmit that filled a gap.
+			if uint64(hdr.GroupSeq) < atomic.LoadUint64(&sess.rxSeqHighest) {
+				sess.arqRx.addRetxReceived(1)
 			}
 		}
 		if hdr.DataLen > 0 && len(payload) >= 2+int(hdr.DataLen) {

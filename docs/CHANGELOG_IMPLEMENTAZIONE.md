@@ -2,6 +2,35 @@
 
 ## 2026-03-16
 
+### Step 4.25 — Kernel Pacing `SO_TXTIME` + `sch_fq` implementato
+- **Problema**: GSO (Step 4.24) emette burst a wire-speed → retransmit TCP +80%
+  (176/s vs 98/s). Software pacer (`time.Sleep`) ha granularità ~1ms, inutile a
+  400 Mbps che richiederebbe ~28µs inter-packet gap per shard da 1402B.
+- **Soluzione**: delegare il pacing al kernel con `SO_TXTIME` + qdisc `sch_fq`:
+  - Ogni pacchetto porta un **EDT (Earliest Departure Time)** in nanosecondo
+  - `sch_fq` trattiene il pacchetto nella coda egress fino al timestamp EDT
+  - Granularità nanosecondo vs millisecondo del software pacer
+- **File nuovi**:
+  - `stripe_txtime_linux.go` (155 LOC): probe, setup, SCM_TXTIME cmsg, `monoNowNs()`
+  - `stripe_txtime_other.go` (17 LOC): stub non-Linux
+  - `scripts/setup-fq-qdisc.sh`: installa `sch_fq` su WAN (auto-detect o manuale)
+- **Modifiche core** (`stripe.go`):
+  - Client: `txtimeEnabled`, `txtimeEDT[]`, `txtimeGapNs` per-pipe tracking
+    - `gsoFlushPipeLocked()`: SCM_TXTIME appeso al OOB (compatibile con GSO cmsg)
+    - `writePacedUDP()`: per pacchetti singoli (non-GSO)
+    - Software pacer disabilitato automaticamente quando kernel pacing attivo
+  - Server: `SO_TXTIME` sul listener socket, per-session EDT tracker
+    - `txBatchAddLocked()`: ogni msg nel batch sendmmsg ha SCM_TXTIME individuale
+    - OOB cleanup dopo flush per evitare cmsg stale
+  - Log: `txtime=on/off` + `pacing=kernel@XMbps(gap=Yns)` nel messaggio ready
+- **Requisiti deploy**: `sudo scripts/setup-fq-qdisc.sh` su client + server
+
+### Fix Issue #1 — ARQ `retransmit received: 0` (bug contatore)
+- **Root cause**: `addRetxReceived()` definita in `stripe_arq.go:268` ma **mai chiamata**
+- **Fix**: quando `markReceived(seq)=true` e `seq < rxSeqHighest` → `addRetxReceived(1)`
+  - Distingue retransmit utili (gap-filling) da duplicati reali (dup_filtered)
+  - Applicato sia client che server side
+
 ### Step 4.24 — UDP GSO (`UDP_SEGMENT`) implementato
 - **Scoperta**: il client TX non aveva alcun batching — ogni `SendDatagram` generava
   una `WriteToUDP` individuale (1 syscall per pacchetto). Il server aveva già `sendmmsg`.

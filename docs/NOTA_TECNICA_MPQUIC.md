@@ -232,6 +232,24 @@ il 1 marzo 2026, organizzati per fase di sviluppo.
 | **Next** | Step 4.25 kernel pacing per ridurre retransmit self-inflicted |
 | **Tag** | **v4.4** |
 
+### Fase 4c — Kernel Pacing: SO_TXTIME + sch_fq (16 marzo 2026)
+
+> **Step 4.25: kernel pacing con `SO_TXTIME` + qdisc `sch_fq`. Ogni pacchetto
+> porta un EDT (Earliest Departure Time) in nanosecondo; sch_fq lo trattiene
+> in coda egress fino a quell'istante. Sostituisce il software pacer (~1ms di
+> granularità) con pacing kernel a granularità nanosecondo. Anche fix del bug
+> contatore ARQ `retransmit received: 0` (Issue #1).**
+
+| Metrica | Valore |
+|---------|--------|
+| **Step 4.25** | `SO_TXTIME` + `SCM_TXTIME` cmsg + qdisc `sch_fq` |
+| **Client** | Per-pipe EDT tracker, `txtimeGapNs` calcolato da rate e num. pipe |
+| **Server** | Per-session EDT, ogni msg sendmmsg batch ha SCM_TXTIME individuale |
+| **Fallback** | Probe fallisce → software pacer rimane attivo (nessun cambio) |
+| **Fix Issue #1** | `addRetxReceived()` mai chiamata → ora chiamata su gap-fill |
+| **Script** | `scripts/setup-fq-qdisc.sh` — installa sch_fq su WAN auto-detect |
+| **Next** | Deploy + benchmark comparison (attesa: retransmit ridotti) |
+
 ---
 
 ## 2. Contesto e Motivazione
