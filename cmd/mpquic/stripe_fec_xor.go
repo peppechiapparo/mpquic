@@ -122,14 +122,27 @@ func (x *xorFECSender) flush() (repair []byte, firstSeq uint32, window int, ok b
 
 // ─── XOR FEC Receiver ─────────────────────────────────────────────────────
 
-// xorFECReceiver stores recent source shards and attempts single-loss recovery
-// when an XOR repair packet arrives.
-type xorFECReceiver struct {
-	window int
+// xorRxSlot is a single entry in the pre-allocated ring buffer.
+type xorRxSlot struct {
+	seq   uint32 // actual seq stored (distinguishes from stale wraparound)
+	data  []byte // shard data — backing array reused across packets
+	valid bool   // true if this slot holds a current entry
+}
 
-	mu     sync.Mutex
-	shards map[uint32][]byte // seq → raw shard data ([2B len][payload], NOT padded)
-	hiSeq  uint32            // highest source seq stored (for GC)
+// xorFECReceiver stores recent source shards in a pre-allocated ring buffer
+// and attempts single-loss recovery when an XOR repair packet arrives.
+//
+// The ring buffer eliminates per-packet heap allocations: after the first
+// pass through the ring, the backing []byte slices are reused in-place
+// (zero allocs in steady state).  Slot validity is checked via seq match
+// to avoid stale data from previous wrap-arounds.
+type xorFECReceiver struct {
+	window   int
+	capacity int // ring buffer size: window * xorRxBufKeepWindows
+
+	mu    sync.Mutex
+	ring  []xorRxSlot
+	hiSeq uint32 // highest source seq stored
 
 	// Stats (atomic)
 	recovered     uint64 // packets recovered via XOR
@@ -140,25 +153,50 @@ func newXorFECReceiver(window int) *xorFECReceiver {
 	if window <= 0 {
 		window = xorFECDefaultWindow
 	}
+	cap := window * xorRxBufKeepWindows
+	ring := make([]xorRxSlot, cap)
+	// Pre-allocate backing slices so the first pass also avoids allocs.
+	for i := range ring {
+		ring[i].data = make([]byte, 0, stripeMaxPayload+2)
+	}
 	return &xorFECReceiver{
-		window: window,
-		shards: make(map[uint32][]byte, window*4),
+		window:   window,
+		capacity: cap,
+		ring:     ring,
 	}
 }
 
 // storeShard saves a source shard for potential XOR recovery.
 // Called for every successfully received data packet.
+// After the ring is warm, this is ZERO allocations (reuses slot backing array).
 func (r *xorFECReceiver) storeShard(seq uint32, data []byte) {
+	idx := int(seq % uint32(r.capacity))
 	r.mu.Lock()
-	if _, exists := r.shards[seq]; !exists {
-		stored := make([]byte, len(data))
-		copy(stored, data)
-		r.shards[seq] = stored
+	slot := &r.ring[idx]
+	// Reuse backing array if capacity is sufficient; otherwise grow (rare).
+	if cap(slot.data) >= len(data) {
+		slot.data = slot.data[:len(data)]
+	} else {
+		slot.data = make([]byte, len(data))
 	}
+	copy(slot.data, data)
+	slot.seq = seq
+	slot.valid = true
 	if seq > r.hiSeq {
 		r.hiSeq = seq
 	}
 	r.mu.Unlock()
+}
+
+// lookupShard returns the shard data at seq if the slot is valid and matches.
+// Caller must hold r.mu.
+func (r *xorFECReceiver) lookupShard(seq uint32) ([]byte, bool) {
+	idx := int(seq % uint32(r.capacity))
+	slot := &r.ring[idx]
+	if slot.valid && slot.seq == seq {
+		return slot.data, true
+	}
+	return nil, false
 }
 
 // tryRecover attempts to recover a single missing packet from an XOR repair.
@@ -176,7 +214,7 @@ func (r *xorFECReceiver) tryRecover(firstSeq uint32, W int, repairData []byte) (
 
 	for i := 0; i < W; i++ {
 		seq := firstSeq + uint32(i)
-		if _, present := r.shards[seq]; !present {
+		if _, present := r.lookupShard(seq); !present {
 			missingCount++
 			missingSeq = seq
 			if missingCount > 1 {
@@ -202,7 +240,7 @@ func (r *xorFECReceiver) tryRecover(firstSeq uint32, W int, repairData []byte) (
 		if seq == missingSeq {
 			continue
 		}
-		shard := r.shards[seq]
+		shard, _ := r.lookupShard(seq)
 		// XOR present shard into recovered.  shard may be shorter than repairData
 		// (different payload sizes) — bytes beyond len(shard) are implicitly
 		// zero-padded, so XOR identity applies (no-op for those bytes).
@@ -223,35 +261,25 @@ func (r *xorFECReceiver) tryRecover(firstSeq uint32, W int, repairData []byte) (
 	pkt = make([]byte, dataLen)
 	copy(pkt, recovered[2:2+dataLen])
 
-	// Store the recovered shard in the buffer too (in case overlapping windows
-	// are used in a future sliding mode).
-	r.shards[missingSeq] = recovered
+	// Store the recovered shard in the ring too.
+	idx := int(missingSeq % uint32(r.capacity))
+	slot := &r.ring[idx]
+	if cap(slot.data) >= len(recovered) {
+		slot.data = slot.data[:len(recovered)]
+	} else {
+		slot.data = make([]byte, len(recovered))
+	}
+	copy(slot.data, recovered)
+	slot.seq = missingSeq
+	slot.valid = true
 
 	atomic.AddUint64(&r.recovered, 1)
 	return pkt, missingSeq, true
 }
 
-// gc removes entries older than the retention threshold.
-// Called periodically from gcRxGroups / gcLoop.
+// gc is a no-op for the ring buffer implementation.
+// Old entries are implicitly overwritten when the sequence wraps around
+// the ring, and slot validity is verified by seq match in lookupShard.
 func (r *xorFECReceiver) gc() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if len(r.shards) == 0 {
-		return
-	}
-
-	// Keep shards within xorRxBufKeepWindows × window of the highwater mark.
-	// E.g., hiSeq=99, window=10, keep=4 → cutoff=60, delete seq < 60.
-	keepCount := uint32(r.window * xorRxBufKeepWindows)
-	if r.hiSeq < keepCount {
-		return // not enough history to GC
-	}
-	cutoff := r.hiSeq - keepCount + 1
-
-	for seq := range r.shards {
-		if seq < cutoff {
-			delete(r.shards, seq)
-		}
-	}
+	// Ring buffer: no explicit GC needed.
 }

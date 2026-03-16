@@ -262,19 +262,32 @@ func TestXorFECReceiver_VariableLength(t *testing.T) {
 func TestXorFECReceiver_GC(t *testing.T) {
 	rx := newXorFECReceiver(10)
 
-	// Store 100 shards
+	// Store 100 shards (ring capacity = 10*4 = 40 slots)
 	for i := uint32(0); i < 100; i++ {
 		rx.storeShard(i, makeShard([]byte{byte(i)}))
 	}
 
-	rx.gc()
+	rx.gc() // no-op for ring buffer
 
-	// After GC, shards with seq < 100 - 4*10 = 60 should be gone
+	// Ring buffer: old entries are implicitly overwritten.
+	// Only the last `capacity` unique seq values survive in the ring.
+	// Verify that recent shards (seq >= 60) are still accessible.
 	rx.mu.Lock()
-	for seq := range rx.shards {
-		if seq < 60 {
-			t.Errorf("shard seq=%d should have been GCed", seq)
+	for seq := uint32(60); seq < 100; seq++ {
+		if _, ok := rx.lookupShard(seq); !ok {
+			t.Errorf("shard seq=%d should still be in ring", seq)
 		}
+	}
+	// Verify that very old shards (seq < 60) are stale (overwritten).
+	// With capacity=40, seq=0 maps to slot 0, which now holds seq=80.
+	staleLookups := 0
+	for seq := uint32(0); seq < 60; seq++ {
+		if _, ok := rx.lookupShard(seq); !ok {
+			staleLookups++
+		}
+	}
+	if staleLookups == 0 {
+		t.Error("expected some old shards to be overwritten in ring buffer")
 	}
 	rx.mu.Unlock()
 }
@@ -366,6 +379,22 @@ func BenchmarkXorFECSender_AddSource(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		tx.addSource(uint32(i), shard)
+	}
+}
+
+func BenchmarkXorFECReceiver_StoreShard(b *testing.B) {
+	rx := newXorFECReceiver(10)
+	shard := makeShard(make([]byte, 1400))
+
+	// Warm up the ring: fill all slots once so backing arrays are allocated.
+	for i := 0; i < rx.capacity; i++ {
+		rx.storeShard(uint32(i), shard)
+	}
+
+	b.SetBytes(1400)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rx.storeShard(uint32(rx.capacity+i), shard)
 	}
 }
 
