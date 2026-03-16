@@ -2180,10 +2180,13 @@
             "fillOpacity": 15,
             "gradientMode": "opacity",
             "showPoints": "never",
+            "connectNulls": true,
             "stacking": {
               "mode": "none"
             }
           },
+          "min": 0,
+          "max": 100,
           "unit": "",
           "thresholds": {
             "mode": "absolute",
@@ -2195,7 +2198,35 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "XOR gate.*"
+            },
+            "properties": [
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              },
+              {
+                "id": "max",
+                "value": 1
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
@@ -2325,10 +2356,12 @@
             "fillOpacity": 15,
             "gradientMode": "opacity",
             "showPoints": "never",
+            "connectNulls": true,
             "stacking": {
               "mode": "none"
             }
           },
+          "min": 0,
           "unit": "ops",
           "thresholds": {
             "mode": "absolute",
@@ -2340,7 +2373,39 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "XOR gate.*"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "unit",
+                "value": "bool"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 3
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 30
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 8,
@@ -2503,5 +2568,5 @@
   "timezone": "browser",
   "title": "MPQUIC Overview",
   "uid": "adsnpmk",
-  "version": 9
+  "version": 10
 }
