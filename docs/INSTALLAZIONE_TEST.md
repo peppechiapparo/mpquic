@@ -577,6 +577,7 @@ Array di path, ciascuno con:
 | `stripe_fec_mode` | `always` / `adaptive` / `off` | `always` | Modalità FEC: `always` = M fisso, ogni gruppo ha K+M shards; `adaptive` = parte da M=0 (nessuna parità, invio diretto), sale a M configurato se rilevata perdita; `off` = M=0 permanente, nessun encoder RS creato |
 | `stripe_arq` | `true` / `false` | `false` | Abilita Hybrid ARQ con NACK selettivo. Il receiver rileva gap di sequenza e invia NACK bitmap al sender, che ritrasmette solo i pacchetti mancanti. Attivo solo quando effectiveM=0. Overhead ~0% in assenza di loss |
 | `stripe_pacing_rate` | intero (Mbps) | `0` (disabilitato) | Rate limiter token bucket per sessione. **Sconsigliato**: `time.Sleep()` su Linux ha granularità ~1-4ms, causando regressione del throughput fino al 40%. Lasciare a 0 |
+| `stripe_disable_gso` | `true` / `false` | `false` | Disabilita UDP GSO (`UDP_SEGMENT`) sul client TX. GSO è rilevato automaticamente all'avvio (kernel ≥5.0). Usare `true` solo per A/B test diagnostici |
 | `stripe_enabled` | `true` / `false` | `false` | Solo server: abilita il listener UDP stripe |
 
 **Formula FEC**: può recuperare fino a M shards persi su K+M totali.

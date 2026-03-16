@@ -1,7 +1,7 @@
 # Nota Tecnica — Piattaforma MPQUIC: Test e Risultati
 
-**Data**: 9 marzo 2026  
-**Versione**: 4.2  
+**Data**: 16 marzo 2026  
+**Versione**: 4.4  
 **Autori**: Team Engineering SATCOMVAS  
 **Classificazione**: Interna / Clienti
 
@@ -65,6 +65,10 @@
 **Fase 4b.8 — Profiling-Driven Optimization (sendmmsg, batch-drain, TUN multiqueue)**
 
 18d. [Profiling-Driven Optimization — sendmmsg + TUN Multiqueue: 499 Mbps](#18d-profiling-driven-optimization--sendmmsg--tun-multiqueue-499-mbps)
+
+**Fase 4c — Stabilizzazione Data Plane (UDP GSO)**
+
+18e. [UDP GSO (UDP_SEGMENT) — Riduzione syscall TX client](#18e-udp-gso-udp_segment--riduzione-syscall-tx-client)
 
 **Conclusioni e Appendice**
 
@@ -205,6 +209,24 @@ il 1 marzo 2026, organizzati per fase di sviluppo.
 | **Picco assoluto** | **499 Mbps** (nuovo record, t=76s run 150s) |
 | **CPU totale server** | **116%** (era 144% pre-ottimizzazione) |
 | **Tag stabile** | **v4.2** |
+
+### Fase 4c — Stabilizzazione Data Plane: UDP GSO (16 marzo 2026)
+
+> **Step 4.24: UDP GSO (`UDP_SEGMENT`) su client TX. Il client non aveva alcun
+> TX batching — ogni pacchetto era 1 syscall. Con GSO, gli shard criptati vengono
+> concatenati per pipe e inviati con 1 `sendmsg` + `UDP_SEGMENT` cmsg.
+> Kernel split automatico. Obiettivo: stabilizzare media ≥400 Mbps.**
+
+| Metrica | Valore |
+|---------|--------|
+| **Step 4.24** | UDP GSO: per-pipe accumulation + `WriteMsgUDP` con `UDP_SEGMENT` |
+| **Scoperta** | Client aveva 0 batch TX (ogni `SendDatagram` → `WriteToUDP` diretta) |
+| **GSO probe** | Automatico: `stripeGSOProbe()` verifica kernel ≥5.0 + `UDP_SEGMENT` sockopt |
+| **Fallback** | EIO → `gsoDisabled=1` atomic, resend individuale |
+| **Config** | `stripe_disable_gso: true` per A/B test (default: auto-enabled) |
+| **Path coperti** | Entrambi: M=0 fast path e M>0 FEC `sendFECGroupLocked` |
+| **Server** | Invariato — mantiene `sendmmsg` (round-robin multi-addr) |
+| **Tag** | **v4.4** (da benchmarkare vs v4.3 baseline) |
 
 ---
 
@@ -2570,6 +2592,94 @@ Il ciclo profiling-driven ha prodotto:
   run 150s è interamente dovuta a beam-switching e weather del satellite
 
 Versione taggata come **v4.2** per rollback in caso di regressione.
+
+---
+
+## 18e. UDP GSO (UDP_SEGMENT) — Riduzione syscall TX client
+
+### 18e.1 Contesto: il client non aveva TX batching
+
+L'analisi del code path TX del client ha rivelato che **nessun batching** era
+implementato sul lato client. Ogni chiamata a `SendDatagram()` eseguiva
+direttamente una `WriteToUDP()` — una syscall `sendto` per ogni singolo pacchetto.
+
+Il server aveva già `sendmmsg` (Step 4.20) che riduce le syscall da N a N/8,
+ma il client — che è il **sender primario nel test `iperf3 -R`** (reverse mode,
+server VPS → client) — trasmetteva pacchetti dal client al server con 1 syscall
+ciascuno.
+
+Per il throughput downstream (`-R`), il bottleneck TX è sul server (già ottimizzato).
+Per il throughput upstream e per i keepalive/NACK/register, GSO riduce l'overhead
+client. Ma soprattutto, GSO sarà il meccanismo fondamentale quando il client
+diventa sender primario (upload, backup, sync).
+
+### 18e.2 UDP GSO: come funziona
+
+UDP Generic Segmentation Offload (GSO), introdotto nel kernel Linux 5.0, permette
+di passare al kernel un singolo buffer grande con un ancillary message `UDP_SEGMENT`
+che indica la dimensione di ogni segmento. Il kernel divide il buffer in N datagrammi
+UDP individuali nello stack di rete, con:
+
+- **1 sola traversata** dello stack di rete (vs N con `sendto` individuali)
+- **1 sola copia** dal buffer userspace al kernel (vs N copie)
+- Segmentazione avviene nel **lower stack** (idealmente nell'hardware se la NIC supporta USO)
+
+Questo è lo stesso meccanismo usato da Google QUIC, Cloudflare quiche, e quic-go.
+
+### 18e.3 Implementazione
+
+**Nuovi file**:
+- `stripe_gso_linux.go` (`//go:build linux`): 3 funzioni helper
+  - `stripeGSOProbe(conn)`: verifica kernel ≥5.0 + `getsockopt(UDP_SEGMENT)`
+  - `stripeGSOBuildOOB(segSize)`: costruisce cmsg con `IPPROTO_UDP` / `UDP_SEGMENT`
+  - `stripeGSOIsError(err)`: rileva `EIO` (NIC senza TX checksum offload)
+- `stripe_gso_other.go` (`//go:build !linux`): stub che restituiscono `false`/`nil`
+
+**Modifiche a stripe.go**:
+- `stripeClientConn`: nuovi campi `gsoEnabled bool`, `gsoDisabled uint32` (atomic),
+  `gsoBufs []gsoTxPipeBuf` (un buffer per pipe)
+- `gsoAccumLocked(pipeIdx, wirePkt)`: concatena shard criptati nel buffer della pipe.
+  Se la dimensione del nuovo pacchetto differisce dal `segSize` corrente, flush prima
+- `gsoFlushPipeLocked(pipeIdx)`: invia il buffer accumulato via `WriteMsgUDP` con OOB.
+  Se count=1, usa `WriteToUDP` semplice (no overhead GSO per pacchetti singoli)
+- `gsoFlushAllLocked()`: flush di tutte le pipe (chiamato da FEC timer e `FlushTxBatch`)
+- `FlushTxBatch()`: implementazione `txBatcher` interface per il client. `drainSendCh`
+  lo chiama automaticamente dopo ogni batch-drain
+
+**Path coperti**:
+- M=0 fast path (`SendDatagram` → `gsoAccumLocked` anziché `WriteToUDP`)
+- M>0 FEC path (`sendFECGroupLocked` → data + parity shards via `gsoAccumLocked`)
+- FEC timer (`flushTxGroup` → `gsoFlushAllLocked` dopo encode del gruppo residuo)
+
+**Fallback robusto**:
+1. Se `stripeGSOProbe()` fallisce (kernel <5.0 o sockopt non disponibile) →
+   GSO non attivato, comportamento identico a prima
+2. Se `WriteMsgUDP` ritorna `EIO` (NIC senza TX checksum offload) →
+   `gsoDisabled=1` (atomico, permanente), tutti i pacchetti nel buffer vengono
+   ri-inviati individualmente
+
+### 18e.4 Perché solo client e non server
+
+GSO richiede che **tutti i segmenti** nel buffer vadano alla **stessa destinazione**.
+
+- **Client**: ogni pipe invia a `scc.serverAddr` (fisso) → GSO perfetto
+- **Server**: TX round-robin su N indirizzi client pipe (`txActivePipes`). Con 12 pipe,
+  la probabilità di 2 pacchetti consecutivi alla stessa destinazione è 1/12 (~8%) →
+  GSO grouping impraticabile. Il server mantiene `sendmmsg` che supporta destinazioni
+  diverse per messaggio.
+
+### 18e.5 Configurazione
+
+GSO si attiva **automaticamente** su Linux ≥5.0 senza alcuna modifica YAML.
+Nel log di avvio si vede:
+```
+stripe client ready: session=XXXXXXXX pipes=12 FEC=10+2 mode=adaptive pacing=off arq=on gso=on ...
+```
+
+Per disabilitarlo (A/B test):
+```yaml
+stripe_disable_gso: true
+```
 
 ---
 

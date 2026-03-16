@@ -37,7 +37,9 @@ Il POC si inserisce sopra il piano L3: ogni processo `mpquic@i` usa la WAN assoc
 
 ## Struttura file rilevante
 - `cmd/mpquic/main.go`: dataplane TUN <-> QUIC DATAGRAM / stripe dispatch
-- `cmd/mpquic/stripe.go`: trasporto UDP stripe + FEC Reed-Solomon + Hybrid ARQ + batch I/O + socket tuning (~2370 LOC)
+- `cmd/mpquic/stripe.go`: trasporto UDP stripe + FEC Reed-Solomon + Hybrid ARQ + batch I/O + GSO + socket tuning (~2800 LOC)
+- `cmd/mpquic/stripe_gso_linux.go`: UDP GSO (UDP_SEGMENT) — probe, OOB builder, fallback detection (85 LOC)
+- `cmd/mpquic/stripe_gso_other.go`: stub GSO per non-Linux (15 LOC)
 - `cmd/mpquic/stripe_crypto.go`: cifratura AES-256-GCM + key exchange TLS Exporter (224 LOC)
 - `cmd/mpquic/stripe_arq.go`: Hybrid ARQ con NACK selettivo — TX ring buffer, RX gap tracker, NACK encode/decode (269 LOC)
 - `cmd/mpquic/stripe_test.go`: test unitari stripe + crypto + ARQ (14 test)
@@ -165,6 +167,7 @@ La sessione multipath parte se almeno un path è up. Se uno o più path sono non
 - `stripe_fec_mode`: modalità FEC — `always` (default, M fisso), `adaptive` (M=0 iniziale, sale a M su loss), `off` (M=0 permanente, nessun encoder RS)
 - `stripe_arq`: `true/false` (default: `false`) — abilita Hybrid ARQ con NACK selettivo. Il receiver rileva gap di sequenza e invia NACK bitmap, il sender ritrasmette solo i pacchetti mancanti. Attivo solo quando effectiveM=0.
 - `stripe_pacing_rate`: rate limiter in Mbps per sessione (default: `0` = disabilitato). **Sconsigliato** per granularità timer Linux.
+- `stripe_disable_gso`: `true/false` (default: `false`) — disabilita UDP GSO (`UDP_SEGMENT`). Utile per A/B test. GSO è rilevato automaticamente all'avvio; se il kernel supporta `UDP_SEGMENT`, lo usa.
 - `stripe_enabled`: (solo server) abilita il listener stripe
 - ~~`stripe_auth_key`~~: **RIMOSSO** — cifratura AES-256-GCM automatica via TLS Exporter
 - ~~`stripe_rekey_seconds`~~: **RIMOSSO** — PFS per sessione (nuove chiavi ad ogni connessione)
@@ -428,6 +431,8 @@ cifratura AES-256-GCM, batch I/O, socket buffer tuning, TX cache).
 | **ARQ RX Tracker** | Rilevamento gap | Bitmap circolare 8192 bit. NACK ogni 5ms, rate limit 30ms, soglia 96 seq |
 | **Dedup Receiver** | Eliminazione duplicati | `markReceived()` verificato prima della consegna TUN. Drop silenzioso duplicati ARQ |
 | **Batch I/O** | Riduzione overhead syscall | `recvmmsg` legge fino a 8 datagrammi per syscall (server RX + client RX) |
+| **UDP GSO (client)** | Riduzione syscall TX | `UDP_SEGMENT`: concatena N shards in 1 buffer → 1 `sendmsg`/pipe. Kernel split. Fallback su EIO |
+| **sendmmsg (server)** | Riduzione syscall TX | `WriteBatch`: N datagrammi in 1 `sendmmsg`. Per destinazioni diverse (round-robin pipe client) |
 | **Socket Buffers 7 MB** | Prevenzione drop kernel | Copre burst fino a 100ms a 500 Mbps (~4700 pacchetti). Richiede sysctl `rmem_max` |
 | **TX ActivePipes Cache** | Zero-alloc dispatch | Slice `[]*net.UDPAddr` pre-calcolata, ricostruita solo su REGISTER/keepalive |
 | **SO_BINDTODEVICE** | Binding interfaccia kernel | Forza uscita su interfaccia corretta. Necessario con multiple WAN |
@@ -474,6 +479,25 @@ Meccanismo reattivo di ritrasmissione complementare a FEC adattivo:
 
 **Benchmark ARQ v2 + Socket Tuning**: +48% throughput su dual Starlink (239 → 354 Mbps medio,
 picco 390 Mbps). Overhead ~0% in condizioni normali (solo pacchetti NACK quando ci sono gap).
+
+### UDP GSO — Client TX (UDP_SEGMENT)
+Il client non aveva alcun TX batching — ogni `SendDatagram` generava una
+`WriteToUDP` individuale. Con UDP GSO (`UDP_SEGMENT`, kernel Linux ≥5.0),
+gli shard criptati vengono concatenati in un buffer contiguo per pipe e
+inviati con un singolo `WriteMsgUDP` con ancillary `UDP_SEGMENT`. Il kernel
+spezza il buffer in datagrammi individuali nello stack di rete.
+
+- **Probe automatico**: `stripeGSOProbe()` verifica `UDP_SEGMENT` all'avvio
+- **Per-pipe accumulation**: ogni pipe accumula in un `gsoTxPipeBuf` da 64KB
+- **Flush**: `gsoFlushPipeLocked()` → `WriteMsgUDP(bigBuf, oob, serverAddr)`
+- **Fallback**: se `sendmsg` ritorna `EIO` (NIC senza TX checksum offload) →
+  `gsoDisabled=1`, resend individuale per la vita della connessione
+- **Config**: `stripe_disable_gso: true` per A/B test
+- Entrambi i path (M=0 fast path e M>0 FEC group) usano GSO
+- `FlushTxBatch()` disponibile su client → `drainSendCh` lo chiama automaticamente
+
+Il server mantiene `sendmmsg` (Step 4.20) perché il round-robin su N indirizzi
+client pipe rende il raggruppamento GSO impraticabile.
 
 ### Batch I/O (recvmmsg)
 Sostituzione di `ReadFromUDP()` (1 syscall per pacchetto) con
