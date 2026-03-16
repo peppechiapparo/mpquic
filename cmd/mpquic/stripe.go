@@ -244,8 +244,9 @@ type stripeClientConn struct {
 
 	// XOR FEC (sliding-window, alternative to RS)
 	fecType string          // "rs" (default) or "xor"
-	xorTx   *xorFECSender   // XOR TX accumulator (nil if fecType != "xor")
-	xorRx   *xorFECReceiver // XOR RX recovery buffer (nil if fecType != "xor")
+	xorTx     *xorFECSender   // XOR TX accumulator (nil if fecType != "xor")
+	xorRx     *xorFECReceiver // XOR RX recovery buffer (nil if fecType != "xor")
+	xorActive int32           // atomic: 1=emit XOR repairs, 0=skip (adaptive gate)
 
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
@@ -492,6 +493,13 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	if fecType == "xor" && fecMode != "off" {
 		scc.xorTx = newXorFECSender(fecWindow)
 		scc.xorRx = newXorFECReceiver(fecWindow)
+		// Adaptive: start XOR off (no repairs until loss > threshold);
+		// always: start XOR on.
+		if fecMode == "adaptive" {
+			atomic.StoreInt32(&scc.xorActive, 0)
+		} else {
+			atomic.StoreInt32(&scc.xorActive, 1)
+		}
 	}
 
 	if cfg.StripeARQ {
@@ -689,7 +697,8 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 		atomic.AddUint64(&scc.txBytes, uint64(len(pkt)))
 
 		// XOR FEC: feed source to accumulator, emit repair when window completes.
-		if scc.xorTx != nil {
+		// In adaptive mode, only emit repairs when xorActive=1 (peer loss > threshold).
+		if scc.xorTx != nil && atomic.LoadInt32(&scc.xorActive) == 1 {
 			if repair, firstSeq, ok := scc.xorTx.addSource(seq, shardData); ok {
 				scc.sendXorRepairLocked(firstSeq, uint8(scc.xorTx.window), repair)
 			}
@@ -903,7 +912,7 @@ func (scc *stripeClientConn) flushTxGroup() {
 		scc.sendFECGroupLocked()
 	}
 	// Flush partial XOR window (emit repair for accumulated sources).
-	if scc.xorTx != nil {
+	if scc.xorTx != nil && atomic.LoadInt32(&scc.xorActive) == 1 {
 		if repair, firstSeq, window, ok := scc.xorTx.flush(); ok {
 			scc.sendXorRepairLocked(firstSeq, uint8(window), repair)
 		}
@@ -1537,25 +1546,42 @@ func (scc *stripeClientConn) computeRxLoss() uint8 {
 // updateAdaptiveM adjusts our TX parity M based on peer's loss feedback.
 // Called every keepalive interval.
 func (scc *stripeClientConn) updateAdaptiveM() {
-	if scc.fecMode != "adaptive" || scc.parityM == 0 {
+	if scc.fecMode != "adaptive" {
 		return
 	}
 
 	peerLoss := atomic.LoadUint32(&scc.peerLossRate)
-	currentM := atomic.LoadInt32(&scc.adaptiveM)
 	lastLoss := time.Unix(0, atomic.LoadInt64(&scc.lastPeerLoss))
 
-	if peerLoss > uint32(adaptiveFECLossThreshold) {
-		// Significant loss reported by peer → enable full parity
-		if currentM == 0 {
-			atomic.StoreInt32(&scc.adaptiveM, int32(scc.parityM))
-			scc.logger.Infof("adaptive FEC: TX M=0→%d (peer reports %d%% loss)", scc.parityM, peerLoss)
+	// ── RS adaptive (parityM > 0) ──
+	if scc.parityM > 0 {
+		currentM := atomic.LoadInt32(&scc.adaptiveM)
+		if peerLoss > uint32(adaptiveFECLossThreshold) {
+			if currentM == 0 {
+				atomic.StoreInt32(&scc.adaptiveM, int32(scc.parityM))
+				scc.logger.Infof("adaptive FEC: TX M=0→%d (peer reports %d%% loss)", scc.parityM, peerLoss)
+			}
+		} else if peerLoss == 0 && currentM > 0 {
+			if time.Since(lastLoss) > adaptiveFECCooldown {
+				atomic.StoreInt32(&scc.adaptiveM, 0)
+				scc.logger.Infof("adaptive FEC: TX M=%d→0 (no peer loss for %v)", currentM, time.Since(lastLoss).Round(time.Second))
+			}
 		}
-	} else if peerLoss == 0 && currentM > 0 {
-		// No loss from peer — disable parity after cooldown
-		if time.Since(lastLoss) > adaptiveFECCooldown {
-			atomic.StoreInt32(&scc.adaptiveM, 0)
-			scc.logger.Infof("adaptive FEC: TX M=%d→0 (no peer loss for %v)", currentM, time.Since(lastLoss).Round(time.Second))
+	}
+
+	// ── XOR adaptive (xorTx != nil) ──
+	if scc.xorTx != nil {
+		currentXor := atomic.LoadInt32(&scc.xorActive)
+		if peerLoss > uint32(adaptiveFECLossThreshold) {
+			if currentXor == 0 {
+				atomic.StoreInt32(&scc.xorActive, 1)
+				scc.logger.Infof("adaptive XOR FEC: ON (peer reports %d%% loss)", peerLoss)
+			}
+		} else if peerLoss == 0 && currentXor == 1 {
+			if time.Since(lastLoss) > adaptiveFECCooldown {
+				atomic.StoreInt32(&scc.xorActive, 0)
+				scc.logger.Infof("adaptive XOR FEC: OFF (no peer loss for %v)", time.Since(lastLoss).Round(time.Second))
+			}
 		}
 	}
 }
@@ -1695,9 +1721,10 @@ type stripeSession struct {
 	adaptiveM int32  // atomic: current TX parity M (0..parityM)
 
 	// XOR FEC (sliding-window, alternative to RS)
-	fecType string          // "rs" (default) or "xor"
-	xorTx   *xorFECSender   // XOR TX accumulator (nil if fecType != "xor")
-	xorRx   *xorFECReceiver // XOR RX recovery buffer (nil if fecType != "xor")
+	fecType   string          // "rs" (default) or "xor"
+	xorTx     *xorFECSender   // XOR TX accumulator (nil if fecType != "xor")
+	xorRx     *xorFECReceiver // XOR RX recovery buffer (nil if fecType != "xor")
+	xorActive int32           // atomic: 1=emit XOR repairs, 0=skip (adaptive gate)
 
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
@@ -1831,7 +1858,8 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 		atomic.AddUint64(&sess.txBytes, uint64(len(pkt)))
 
 		// XOR FEC: feed source to accumulator, emit repair when window completes.
-		if sess.xorTx != nil {
+		// In adaptive mode, only emit repairs when xorActive=1 (peer loss > threshold).
+		if sess.xorTx != nil && atomic.LoadInt32(&sess.xorActive) == 1 {
 			if repair, firstSeq, ok := sess.xorTx.addSource(seq, shardData); ok {
 				sdc.sendXorRepairLocked(firstSeq, uint8(sess.xorTx.window), repair, activePipes)
 			}
@@ -2418,6 +2446,12 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 		if ss.fecType == "xor" && ss.fecMode != "off" {
 			sess.xorTx = newXorFECSender(ss.fecWindow)
 			sess.xorRx = newXorFECReceiver(ss.fecWindow)
+			// Adaptive: start XOR off; always: start XOR on.
+			if ss.fecMode == "adaptive" {
+				atomic.StoreInt32(&sess.xorActive, 0)
+			} else {
+				atomic.StoreInt32(&sess.xorActive, 1)
+			}
 		}
 		// Set initial adaptive M
 		if ss.fecMode == "adaptive" {
@@ -2459,7 +2493,7 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 				sdc.sendFECGroupLocked()
 			}
 			// Flush partial XOR window (emit repair for accumulated sources).
-			if sess.xorTx != nil && len(sess.txActivePipes) > 0 {
+			if sess.xorTx != nil && atomic.LoadInt32(&sess.xorActive) == 1 && len(sess.txActivePipes) > 0 {
 				if repair, firstSeq, window, ok := sess.xorTx.flush(); ok {
 					sdc.sendXorRepairLocked(firstSeq, uint8(window), repair, sess.txActivePipes)
 				}
@@ -2929,25 +2963,44 @@ func (ss *stripeServer) computeSessionRxLoss(sess *stripeSession) uint8 {
 // updateSessionAdaptiveM adjusts server TX parity M for a session based on
 // client-reported loss (which is loss on data WE send TO the client).
 func (ss *stripeServer) updateSessionAdaptiveM(sess *stripeSession) {
-	if sess.fecMode != "adaptive" || sess.parityM == 0 {
+	if sess.fecMode != "adaptive" {
 		return
 	}
 
 	peerLoss := atomic.LoadUint32(&sess.peerLossRate)
-	currentM := atomic.LoadInt32(&sess.adaptiveM)
 	lastLoss := time.Unix(0, atomic.LoadInt64(&sess.lastPeerLoss))
 
-	if peerLoss > uint32(adaptiveFECLossThreshold) {
-		if currentM == 0 {
-			atomic.StoreInt32(&sess.adaptiveM, int32(sess.parityM))
-			ss.logger.Infof("adaptive FEC: server TX M=0→%d session=%08x (client reports %d%% loss)",
-				sess.parityM, sess.sessionID, peerLoss)
+	// ── RS adaptive (parityM > 0) ──
+	if sess.parityM > 0 {
+		currentM := atomic.LoadInt32(&sess.adaptiveM)
+		if peerLoss > uint32(adaptiveFECLossThreshold) {
+			if currentM == 0 {
+				atomic.StoreInt32(&sess.adaptiveM, int32(sess.parityM))
+				ss.logger.Infof("adaptive FEC: server TX M=0→%d session=%08x (client reports %d%% loss)",
+					sess.parityM, sess.sessionID, peerLoss)
+			}
+		} else if peerLoss == 0 && currentM > 0 {
+			if time.Since(lastLoss) > adaptiveFECCooldown {
+				atomic.StoreInt32(&sess.adaptiveM, 0)
+				ss.logger.Infof("adaptive FEC: server TX M=%d→0 session=%08x (no client loss for %v)",
+					currentM, sess.sessionID, time.Since(lastLoss).Round(time.Second))
+			}
 		}
-	} else if peerLoss == 0 && currentM > 0 {
-		if time.Since(lastLoss) > adaptiveFECCooldown {
-			atomic.StoreInt32(&sess.adaptiveM, 0)
-			ss.logger.Infof("adaptive FEC: server TX M=%d→0 session=%08x (no client loss for %v)",
-				currentM, sess.sessionID, time.Since(lastLoss).Round(time.Second))
+	}
+
+	// ── XOR adaptive (xorTx != nil) ──
+	if sess.xorTx != nil {
+		currentXor := atomic.LoadInt32(&sess.xorActive)
+		if peerLoss > uint32(adaptiveFECLossThreshold) {
+			if currentXor == 0 {
+				atomic.StoreInt32(&sess.xorActive, 1)
+				ss.logger.Infof("adaptive XOR FEC: ON session=%08x (client reports %d%% loss)", sess.sessionID, peerLoss)
+			}
+		} else if peerLoss == 0 && currentXor == 1 {
+			if time.Since(lastLoss) > adaptiveFECCooldown {
+				atomic.StoreInt32(&sess.xorActive, 0)
+				ss.logger.Infof("adaptive XOR FEC: OFF session=%08x (no client loss for %v)", sess.sessionID, time.Since(lastLoss).Round(time.Second))
+			}
 		}
 	}
 }
