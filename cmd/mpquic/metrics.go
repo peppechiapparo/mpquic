@@ -289,8 +289,8 @@ func snapshotDispatchStats(ss *stripeServer) []DispatchPathStats {
 	for _, grp := range ct.byIP {
 		// Count flows per pathIdx
 		flowCounts := make(map[int]int, len(grp.paths))
-		for _, fe := range grp.flowPaths {
-			flowCounts[fe.pathIdx]++
+		for _, fpIdx := range grp.flowPaths {
+			flowCounts[fpIdx]++
 		}
 		for i, pc := range grp.paths {
 			if pc == nil {
