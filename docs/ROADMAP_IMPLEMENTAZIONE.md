@@ -1,6 +1,25 @@
 # Roadmap implementazione MPQUIC
 
-*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-15*
+*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-16*
+
+### Nota post-deploy XOR FEC (2026-03-16)
+- **Bug feedback loop rxDirectCount** (commit `1596413`): quando XOR FEC recuperava
+  un pacchetto, `rxDirectCount` NON veniva incrementato. Il loss estimator (seq-gap)
+  calcolava `loss = dSeqHigh - dDirectCount`, quindi i pacchetti XOR-recovered
+  apparivano come "persi" → inflazione loss percepita → gate XOR ON permanente
+  (positive feedback loop). Fix: `atomic.AddUint64(&scc.rxDirectCount, 1)` dopo
+  ogni XOR recovery (client e server). 8 righe aggiunte.
+- **Metrica Prometheus `xor_active`** (commit `7b8ad47`): gauge 0/1 per il gate
+  adattivo XOR. Server: `mpquic_session_xor_active`, client: `mpquic_path_stripe_xor_active`.
+  Anche in JSON `/api/v1/stats`.
+- **Dashboard Grafana v10** (commit `8bd6fcf`, `6b71912`):
+  - Pannello 35: "Adaptive FEC Gate (RS M + XOR active)" con min:0/max:100, connectNulls, override arancione XOR gate
+  - Pannello 38: "FEC recovery + XOR gate (client stripe)" con query xor_recovered, xor_emitted, xor_active su asse destro (bool)
+  - Fix visibilità: constant-zero ora visibile con connectNulls + min/max espliciti
+- **Benchmark post-fix** (5 run × 30s, P30 -R): 336, 360, 357, 311, 303 Mbps.
+  Media **333 Mbps** (vs 336 baseline = −0.9%). Fix confermato neutro su throughput.
+- **Stato Prometheus** (10.10.11.201:9090): tutte le metriche xor_active presenti
+  e a 0 (corretto: loss 0.02% < soglia 2%, gate OFF)
 
 ### Nota deploy monitoraggio (2026-03-15)
 - Fix `metrics_listen: auto` mancante in mpq4/5/6 (commit `af14a2d`) — i single-link
@@ -1603,6 +1622,10 @@ Vantaggi rispetto a Reed-Solomon:
 - `8b3f2c2` — feat: Step 4.26 Sliding Window XOR FEC (RFC 8681)
 - `7c8396a` — perf: xorFECReceiver ring buffer — zero allocs on RX hot path
 - `ba010f2` — feat: adaptive XOR FEC — emit repairs only when peer loss > 2%
+- `1596413` — fix: rxDirectCount feedback loop — XOR-recovered packets counted in loss estimator
+- `7b8ad47` — feat: xor_active Prometheus metric (gauge 0/1)
+- `8bd6fcf` — dashboard: update FEC panels for XOR mode
+- `6b71912` — dashboard v10: fix panel visibility for constant-zero metrics
 
 **File nuovi**:
 - `stripe_fec_xor.go` (257 LOC): `xorFECSender` + `xorFECReceiver` (ring buffer)
@@ -1628,6 +1651,9 @@ Vantaggi rispetto a Reed-Solomon:
 - [x] UDP GSO implementato e testato (Step 4.24)
 - [x] Kernel pacing SO_TXTIME implementato, deployato e benchmarkato (Step 4.25)
 - [x] Sliding window XOR FEC implementato e deployato (Step 4.26)
+- [x] Bug rxDirectCount feedback loop corretto (commit `1596413`) — XOR recovery non inflazionava più loss percepita
+- [x] Metrica `xor_active` Prometheus (commit `7b8ad47`) + Dashboard Grafana v10 (commit `6b71912`)
+- [x] Benchmark post-fix: 333 Mbps media (neutro), gate XOR OFF confermato (loss 0.02%)
 - [ ] **Media ≥ 400 Mbps su 30-60s, dual Starlink, tempo buono** — best run 400 Mbps (GSO), media 6 run 333 (dominata da variabilità Starlink 23% CoV)
 - [ ] Profiling CPU confronto con v4.3 baseline
 - [x] Benchmark GSO 7 run: picco **548 Mbps** (+9.8%), best 30s **400 Mbps** (+6.9%), retransmit +80%

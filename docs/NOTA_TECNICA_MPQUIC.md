@@ -1,7 +1,7 @@
 # Nota Tecnica — Piattaforma MPQUIC: Test e Risultati
 
 **Data**: 16 marzo 2026  
-**Versione**: 4.4  
+**Versione**: 4.5  
 **Autori**: Team Engineering SATCOMVAS  
 **Classificazione**: Interna / Clienti
 
@@ -74,6 +74,10 @@
 
 18f. [Kernel Pacing SO_TXTIME — Benchmark e Analisi](#18f-kernel-pacing-so_txtime--benchmark-e-analisi)
 
+**Fase 4c — Sliding Window XOR FEC (RFC 8681)**
+
+18g. [Step 4.26 — Sliding Window XOR FEC](#18g-step-426--sliding-window-xor-fec-rfc-8681)
+
 **Conclusioni e Appendice**
 
 19. [Vantaggi per il Cliente](#19-vantaggi-per-il-cliente)
@@ -91,7 +95,7 @@
 La piattaforma MPQUIC implementa un'architettura a **tunnel QUIC multipli per link
 fisico** con capacità **multi-path** (failover e bonding su link WAN multipli).
 Questa nota documenta l'evoluzione completa dei test condotti tra il 28 febbraio e
-il 1 marzo 2026, organizzati per fase di sviluppo.
+il 16 marzo 2026, organizzati per fase di sviluppo.
 
 ### Fase 2 — Isolamento multi-tunnel (28 febbraio 2026)
 
@@ -2946,6 +2950,108 @@ Il hot path (addSource + storeShard) è **zero-allocation** in steady state.
 3. **v3 (ba010f2)**: adaptive gate (`xorActive` flag)
    → ~neutro (0% overhead sotto soglia loss)
 
+### 18g.8 Bug critico: feedback loop rxDirectCount (commit 1596413)
+
+**Problema osservato**: dopo il deploy dell'XOR adaptive (v3), i dashboard Grafana
+mostravano il FEC recovery rate **costantemente attivo** (45-145 ops/s) nonostante
+la loss rate fosse solo 0.02% — ben sotto la soglia del 2%. Il gate XOR avrebbe
+dovuto restare OFF, ma era permanentemente ON.
+
+**Root cause analysis**:
+
+Il loss estimator del peer si basa sul confronto tra progressione di sequenza e
+pacchetti effettivamente ricevuti:
+
+```
+loss_stimata = (dSeqHigh - dDirectCount) / dSeqHigh
+```
+
+Dove:
+- `dSeqHigh` = incremento del sequence number più alto ricevuto
+- `dDirectCount` = incremento del contatore `rxDirectCount` (pacchetti consegnati)
+
+Quando XOR FEC **recuperava** un pacchetto perso, il pacchetto ricostruito veniva
+consegnato al TUN (correttamente), ma `rxDirectCount` **non veniva incrementato**.
+Di conseguenza:
+
+1. Il peer vedeva `dSeqHigh` avanzare (perché il pacchetto è stato elaborato)
+2. Ma `dDirectCount` non avanzava per quel pacchetto
+3. Il rapporto `(dSeqHigh - dDirectCount) / dSeqHigh` risultava > 2%
+4. Il peer manteneva il gate XOR ON per il sender remoto
+5. Il sender emetteva repair packets → recovery → rxDirectCount non incrementato
+6. Loop infinito: XOR ON → recovery → loss percepita alta → XOR ON
+
+**Positive feedback loop**: il meccanismo di protezione generava esattamente il
+segnale necessario per mantenersi attivo, indipendentemente dalla loss reale.
+
+**Fix applicato** (`stripe.go`, 8 righe):
+
+```go
+// Client: handleXorRepair()
+atomic.AddUint64(&scc.rxDirectCount, 1)  // count recovery as received
+
+// Server: handleXorRepairServer()
+atomic.AddUint64(&sess.rxDirectCount, 1) // count recovery as received
+```
+
+L'incremento di `rxDirectCount` dopo ogni XOR recovery fa sì che il loss estimator
+veda la loss **netta** (dopo FEC), non la loss **lorda** (prima di FEC). In questo
+modo il gate adattivo riflette la qualità effettiva del canale.
+
+**Verifica**: dopo il fix, i log mostrano `adaptive XOR FEC: OFF` e zero repairs
+emessi. Prometheus conferma `mpquic_session_xor_active = 0` e
+`mpquic_path_stripe_xor_active = 0` su entrambe le sessioni.
+
+### 18g.9 Osservabilità XOR FEC: metrica Prometheus e Dashboard (commit 7b8ad47, 6b71912)
+
+Per verificare il comportamento del gate adattivo in produzione, sono state aggiunte
+metriche dedicate:
+
+**Prometheus gauges**:
+
+| Metrica | Tipo | Label | Descrizione |
+|---|---|---|---|
+| `mpquic_session_xor_active` | Gauge | `session` | Gate XOR del server: 0=OFF, 1=ON |
+| `mpquic_path_stripe_xor_active` | Gauge | `path` | Gate XOR del client: 0=OFF, 1=ON |
+
+**JSON** (`/api/v1/stats`):
+- `SessionStats.XorActive` (server)
+- `PathStats.StripeXorActive` (client)
+
+**Dashboard Grafana v10**:
+- Pannello 35 ("Adaptive FEC Gate"): RS adaptive M + XOR gate sovrapposti.
+  Asse Y: 0–100, arancione per XOR gate (lineWidth 3). `connectNulls: true`
+  per rendere visibili valori costanti a zero.
+- Pannello 38 ("FEC recovery + XOR gate"): FEC recovered (RS) + XOR recovered +
+  XOR emitted + XOR gate su asse destro (unit: bool, arancione, fillOpacity 30).
+
+**Note Grafana**: valori costanti a zero vengono renderizzati come linea piatta alla
+base del grafico grazie a `connectNulls` e range fissato `min:0`. Senza questi
+override, Grafana nasconde le time series a valore costante.
+
+### 18g.10 Benchmark post-fix feedback loop
+
+Per verificare che il fix non introducesse regressione, benchmark eseguito il
+16 marzo 2026, dual Starlink, iperf3 -R -P30, 5 run × 30s:
+
+| Run | Throughput (Mbps) |
+|-----|-------------------|
+| 1   | 336               |
+| 2   | 360               |
+| 3   | 357               |
+| 4   | 311               |
+| 5   | 303               |
+| **Media** | **333 Mbps** |
+
+**Confronto**: 333 Mbps vs 336 Mbps baseline (v4.4 GSO) = **−0.9%** (nel rumore).
+
+**Stato confermato**:
+- XOR gate OFF (loss 0.02% < soglia 2%)
+- Zero repairs emessi
+- ARQ NACK attivo come fallback per loss sporadiche
+- Prometheus: tutte le metriche xor_active = 0 su server e client
+- Nessun impatto su throughput, latenza, o stabilità del canale
+
 ---
 
 ## 19. Vantaggi per il Cliente
@@ -3001,12 +3107,15 @@ L'architettura è stata progettata per scalare:
 
 ## 20. Conclusioni
 
-I test condotti tra il 28 febbraio e il 13 marzo 2026 dimostrano in modo
+I test condotti tra il 28 febbraio e il 16 marzo 2026 dimostrano in modo
 **quantitativo e riproducibile** che la piattaforma MPQUIC soddisfa tutti gli
 obbiettivi delle fasi di sviluppo: isolamento multi-tunnel, resilienza BBR su
 satellite, failover automatico, aggregazione multi-link, **bypass del traffic
-shaping Starlink con throughput medio di 374 Mbps (+56% vs baseline, picco
-499 Mbps — record assoluto)**, e ottimizzazione profiling-driven del data path
+shaping Starlink con throughput medio di 336 Mbps (+41% vs baseline, picco
+548 Mbps — record assoluto)**, ottimizzazione profiling-driven del data path
+con sendmmsg batch TX, UDP GSO, kernel pacing, TUN multiqueue — e **FEC ibrido
+adattivo** (XOR sliding window + ARQ selettivo) con feedback loop corretto e
+osservabilità Prometheus completa.
 con sendmmsg batch TX, TUN multiqueue e riduzione CPU del 19%.
 
 **Risultati chiave per fase:**
@@ -3165,11 +3274,10 @@ con sendmmsg batch TX, TUN multiqueue e riduzione CPU del 19%.
 
 **Prossimi sviluppi:**
 
-- **Metriche strutturate** (Fase 5): endpoint `/metrics` per osservabilità, post-analysis
-  e input AI/ML per tuning dinamico parametri
-- **Sliding Window FEC** (Step 4.15): evoluzione gruppi fissi → finestra scorrevole
-  per migliorare recovery durante burst di loss
-- **UDP GRO** (deprioritizzato): impatto marginale (RX path solo 5.2%)
+- **Fix asimmetria wan5/wan6** (Issue #2): bilanciamento inter-sessione per distribuzione
+  uniforme del traffico tra path (attualmente 36/64%). Round-robin server-side per
+  assegnamento pacchetti IP tra sessioni, indipendente dall'hashing kernel TUN multiqueue.
+- **AI/ML feedback loop** (Fase 6): tuning dinamico parametri basato su telemetria real-time
 
 ---
 
@@ -3306,8 +3414,8 @@ Per riprodurre i test è necessario:
 
 ---
 
-*Documento aggiornato il 10/03/2026 — Piattaforma MPQUIC v4.3*  
-*Commit di riferimento: 6ca7052 (main)*
+*Documento aggiornato il 16/03/2026 — Piattaforma MPQUIC v4.5*  
+*Commit di riferimento: 6b71912 (main), tag v4.5*
 
 ---
 
