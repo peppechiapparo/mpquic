@@ -115,6 +115,7 @@ type SessionStats struct {
 	FECMode     string `json:"fec_mode"`
 	FECType     string `json:"fec_type,omitempty"`
 	AdaptiveM   int    `json:"adaptive_m"`
+	XorActive   int    `json:"xor_active"`                   // 1=XOR TX on, 0=off (adaptive gate)
 	FECEncoded  uint64 `json:"fec_encoded"`  // FEC groups encoded (TX)
 	FECRecov    uint64 `json:"fec_recovered"`
 
@@ -148,6 +149,7 @@ type PathStats struct {
 	StripeRxBytes uint64 `json:"stripe_rx_bytes,omitempty"`
 	StripeRxPkts  uint64 `json:"stripe_rx_pkts,omitempty"`
 	StripeFECRecov uint64 `json:"stripe_fec_recovered,omitempty"`
+	StripeXorActive      int    `json:"stripe_xor_active,omitempty"`
 	StripeXorEmitted     uint64 `json:"stripe_xor_emitted,omitempty"`
 	StripeXorRecovered   uint64 `json:"stripe_xor_recovered,omitempty"`
 	StripeXorUnrecoverable uint64 `json:"stripe_xor_unrecoverable,omitempty"`
@@ -192,6 +194,7 @@ func snapshotServerSessions(ss *stripeServer) []SessionStats {
 			FECMode:   sess.fecMode,
 			FECType:   sess.fecType,
 			AdaptiveM: int(atomic.LoadInt32(&sess.adaptiveM)),
+			XorActive: int(atomic.LoadInt32(&sess.xorActive)),
 			FECEncoded: atomic.LoadUint64(&sess.fecEncoded),
 			FECRecov:   atomic.LoadUint64(&sess.rxFECRecov),
 			LossRate:   atomic.LoadUint32(&sess.peerLossRate),
@@ -232,6 +235,7 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 			ps.StripeRxBytes = atomic.LoadUint64(&p.stripeConn.rxBytes)
 			ps.StripeRxPkts = atomic.LoadUint64(&p.stripeConn.rxPkts)
 			ps.StripeFECRecov = atomic.LoadUint64(&p.stripeConn.fecRecov)
+			ps.StripeXorActive = int(atomic.LoadInt32(&p.stripeConn.xorActive))
 			if p.stripeConn.xorTx != nil {
 				ps.StripeXorEmitted = atomic.LoadUint64(&p.stripeConn.xorTx.emitted)
 			}
@@ -349,10 +353,16 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "mpquic_session_pipes{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.Pipes)
 		}
 
-		fmt.Fprintf(w, "\n# HELP mpquic_session_adaptive_m Current FEC parity M per session.\n")
+		fmt.Fprintf(w, "\n# HELP mpquic_session_adaptive_m Current FEC parity M per session (RS mode).\n")
 		fmt.Fprintf(w, "# TYPE mpquic_session_adaptive_m gauge\n")
 		for _, s := range gs.Sessions {
 			fmt.Fprintf(w, "mpquic_session_adaptive_m{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.AdaptiveM)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_xor_active XOR FEC adaptive gate per session (1=ON, 0=OFF).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_xor_active gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_xor_active{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.XorActive)
 		}
 
 		fmt.Fprintf(w, "\n# HELP mpquic_session_fec_encoded FEC groups encoded (TX) per session.\n")
@@ -445,6 +455,12 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_fec_recovered counter\n")
 		for _, p := range gs.Paths {
 			fmt.Fprintf(w, "mpquic_path_stripe_fec_recovered{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeFECRecov)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_xor_active XOR FEC adaptive gate per path (1=ON, 0=OFF).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_active gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_xor_active{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeXorActive)
 		}
 
 		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_xor_emitted XOR FEC repair packets emitted per path.\n")
