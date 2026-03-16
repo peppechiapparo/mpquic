@@ -641,7 +641,9 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 			scc.arqTx.store(seq, shardData, uint16(len(pkt)))
 		}
 
-		scc.pacer.pace(len(wirePkt))
+		if scc.pacer != nil {
+			scc.pacer.pace(len(wirePkt))
+		}
 		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 		pipeIdx := int(idx) % len(scc.pipes)
 		if scc.gsoEnabled && atomic.LoadUint32(&scc.gsoDisabled) == 0 {
@@ -783,7 +785,9 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 			GroupDataN: groupDataN,
 			DataLen:    binary.BigEndian.Uint16(scc.txGroup[i][:2]),
 		}, shard)
-		scc.pacer.pace(len(wirePkt))
+		if scc.pacer != nil {
+			scc.pacer.pace(len(wirePkt))
+		}
 		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 		pipeIdx := int(idx) % len(scc.pipes)
 		if gsoActive {
@@ -805,7 +809,9 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 			GroupDataN: groupDataN,
 			DataLen:    0,
 		}, shard)
-		scc.pacer.pace(len(wirePkt))
+		if scc.pacer != nil {
+			scc.pacer.pace(len(wirePkt))
+		}
 		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 		pipeIdx := int(idx) % len(scc.pipes)
 		if gsoActive {
@@ -1697,7 +1703,9 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 			sess.arqTx.store(seq, shardData, uint16(len(pkt)))
 		}
 
-		sess.pacer.pace(len(wirePkt))
+		if sess.pacer != nil {
+			sess.pacer.pace(len(wirePkt))
+		}
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
 		atomic.AddUint64(&sess.txPkts, 1)
@@ -1827,7 +1835,9 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 			DataLen:    binary.BigEndian.Uint16(sess.txGroup[i][:2]),
 		}, shard)
 
-		sess.pacer.pace(len(wirePkt))
+		if sess.pacer != nil {
+			sess.pacer.pace(len(wirePkt))
+		}
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
 	}
@@ -1845,7 +1855,9 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 			DataLen:    0,
 		}, shard)
 
-		sess.pacer.pace(len(wirePkt))
+		if sess.pacer != nil {
+			sess.pacer.pace(len(wirePkt))
+		}
 		pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
 		sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
 	}
