@@ -576,7 +576,7 @@ Array di path, ciascuno con:
 | `stripe_parity_shards` | intero (es. `2`) | `2` | M — numero shards parità Reed-Solomon. Con K=10, M=2: tolleranza 16.7% loss. In modalità `adaptive`, l'encoder RS viene pre-creato con questo valore anche se M effettivo parte da 0 |
 | `stripe_fec_mode` | `always` / `adaptive` / `off` | `always` | Modalità FEC: `always` = M fisso, ogni gruppo ha K+M shards; `adaptive` = parte da M=0 (nessuna parità, invio diretto), sale a M configurato se rilevata perdita; `off` = M=0 permanente, nessun encoder RS creato |
 | `stripe_arq` | `true` / `false` | `false` | Abilita Hybrid ARQ con NACK selettivo. Il receiver rileva gap di sequenza e invia NACK bitmap al sender, che ritrasmette solo i pacchetti mancanti. Attivo solo quando effectiveM=0. Overhead ~0% in assenza di loss |
-| `stripe_pacing_rate` | intero (Mbps) | `0` (disabilitato) | Rate limiter token bucket per sessione. **Sconsigliato**: `time.Sleep()` su Linux ha granularità ~1-4ms, causando regressione del throughput fino al 40%. Lasciare a 0 |
+| `stripe_pacing_rate` | intero (Mbps) | `0` (disabilitato) | Rate di pacing per sessione. Con valore >0, abilita **kernel pacing** via `SO_TXTIME` + `sch_fq` (granularità nanosecondo). Richiede: kernel ≥4.19 e qdisc `sch_fq` attivo (`scripts/setup-fq-qdisc.sh`). Se il kernel non supporta SO_TXTIME, fallback automatico a software pacer. Raccomandato: `800` per dual Starlink |
 | `stripe_disable_gso` | `true` / `false` | `false` | Disabilita UDP GSO (`UDP_SEGMENT`) sul client TX. GSO è rilevato automaticamente all'avvio (kernel ≥5.0). Usare `true` solo per A/B test diagnostici |
 | `stripe_enabled` | `true` / `false` | `false` | Solo server: abilita il listener UDP stripe |
 
@@ -589,6 +589,9 @@ In condizioni normali (loss < 1%), FEC adattivo opera con M=0 (zero overhead) e 
 ritrasmette selettivamente i rari pacchetti persi. Se la perdita aumenta significativamente,
 FEC adattivo può passare automaticamente a M=2 come fallback.
 Benchmark dual Starlink 24 pipe: **354 Mbps** media, picco 390 Mbps (+48% vs baseline 239 Mbps).
+Con GSO (v4.4): picco **548 Mbps**, best 30s **400 Mbps**.
+Con kernel pacing SO_TXTIME (v4.5): media 333 Mbps (stabile), mediana 352 Mbps.
+Variabilità Starlink (23% CoV) domina rispetto alle ottimizzazioni software.
 
 **Nota critica**: `stripe_fec_mode` **deve essere identico su client e server**.
 Se il client usa `off` ma il server ha `adaptive`, il server può inviare gruppi

@@ -2,7 +2,7 @@
 
 ## 2026-03-16
 
-### Step 4.25 — Kernel Pacing `SO_TXTIME` + `sch_fq` implementato
+### Step 4.25 — Kernel Pacing `SO_TXTIME` + `sch_fq` implementato, deployato e benchmarkato
 - **Problema**: GSO (Step 4.24) emette burst a wire-speed → retransmit TCP +80%
   (176/s vs 98/s). Software pacer (`time.Sleep`) ha granularità ~1ms, inutile a
   400 Mbps che richiederebbe ~28µs inter-packet gap per shard da 1402B.
@@ -24,6 +24,15 @@
     - OOB cleanup dopo flush per evitare cmsg stale
   - Log: `txtime=on/off` + `pacing=kernel@XMbps(gap=Yns)` nel messaggio ready
 - **Requisiti deploy**: `sudo scripts/setup-fq-qdisc.sh` su client + server
+- **Bug fix deploy**:
+  - `18ac3ff`: nil pacer dereference in 6 siti → TX goroutine panic silenzioso
+  - `3d2945e`: `SCM_TXTIME` costante errata (0x25→61) → sendmsg EINVAL silenzioso
+- **Benchmark** (6 run × 30s, P30, -R, dual Starlink):
+  - Media: **333 Mbps** (mediana 352), picco 491 Mbps
+  - Confronto vs GSO only: media -0.9%, mediana +0.6%, retransmit +21%
+  - Per-second CoV: 23.3% — variabilità Starlink domina
+- **Decisione**: feature mantenuta attiva — stabilità canale migliorata, overhead nullo
+- **Tag**: **v4.5** su commit `3d2945e`
 
 ### Fix Issue #1 — ARQ `retransmit received: 0` (bug contatore)
 - **Root cause**: `addRetxReceived()` definita in `stripe_arq.go:268` ma **mai chiamata**

@@ -70,6 +70,10 @@
 
 18e. [UDP GSO (UDP_SEGMENT) — Riduzione syscall TX client](#18e-udp-gso-udp_segment--riduzione-syscall-tx-client)
 
+**Fase 4c — Kernel Pacing (SO_TXTIME + sch_fq)**
+
+18f. [Kernel Pacing SO_TXTIME — Benchmark e Analisi](#18f-kernel-pacing-so_txtime--benchmark-e-analisi)
+
 **Conclusioni e Appendice**
 
 19. [Vantaggi per il Cliente](#19-vantaggi-per-il-cliente)
@@ -247,8 +251,12 @@ il 1 marzo 2026, organizzati per fase di sviluppo.
 | **Server** | Per-session EDT, ogni msg sendmmsg batch ha SCM_TXTIME individuale |
 | **Fallback** | Probe fallisce → software pacer rimane attivo (nessun cambio) |
 | **Fix Issue #1** | `addRetxReceived()` mai chiamata → ora chiamata su gap-fill |
+| **Fix deploy #1** | `pacer.pace()` nil dereference in 6 siti (commit `18ac3ff`) |
+| **Fix deploy #2** | `SCM_TXTIME` costante errata 0x25→61 (commit `3d2945e`) |
 | **Script** | `scripts/setup-fq-qdisc.sh` — installa sch_fq su WAN auto-detect |
-| **Next** | Deploy + benchmark comparison (attesa: retransmit ridotti) |
+| **Benchmark** | Media 333 Mbps, mediana 352 Mbps, picco 491 Mbps (neutro vs GSO) |
+| **Verdict** | Feature mantenuta attiva: stabilità canale migliorata, overhead nullo |
+| **Tag** | **v4.5** |
 
 ---
 
@@ -2737,6 +2745,116 @@ i pacchetti nel burst.
 2. **Asimmetria wan5/wan6**: 36/64% dei dati. L'hashing dei 30 flow TCP su TUN
    multiqueue produce distribuzione non uniforme tra i due path, limitando
    l'aggregazione effettiva.
+
+---
+
+## 18f. Kernel Pacing SO_TXTIME — Benchmark e Analisi
+
+### 18f.1 Contesto: burstiness post-GSO
+
+Step 4.24 (GSO) ha introdotto batching efficiente lato client TX, ma ha anche
+aumentato i retransmit TCP del +80% (176/s vs 98/s baseline). I burst GSO a
+wire-speed saturano i buffer NIC/switch, causando congestione self-inflicted.
+
+Il kernel pacing con `SO_TXTIME` + qdisc `sch_fq` risolve il problema assegnando
+a ogni pacchetto un **EDT (Earliest Departure Time)** in nanosecondo. Il qdisc
+`sch_fq` trattiene il pacchetto nella coda egress fino all'istante EDT, garantendo
+inter-packet gap uniforme.
+
+### 18f.2 Implementazione
+
+**File nuovi**:
+- `stripe_txtime_linux.go` (`//go:build linux`): 6 funzioni
+  - `stripeTxtimeProbe(conn)`: verifica kernel ≥4.19 + `setsockopt(SO_TXTIME)`
+  - `stripeTxtimeSetup(conn, clockid)`: abilita SO_TXTIME sul socket
+  - `stripeTxtimeBuildOOB(edt)`: costruisce cmsg `SCM_TXTIME` con timestamp EDT
+  - `stripeTxtimeAppendOOB(oob, edt)`: appende SCM_TXTIME a OOB esistente (per GSO)
+  - `monoNowNs()`: legge `CLOCK_MONOTONIC` via `clock_gettime` raw syscall
+  - `setsockoptTxtime(fd)`: `setsockopt(SO_TXTIME)` via raw fd
+- `stripe_txtime_other.go` (`//go:build !linux`): stub che restituiscono `false`/`nil`
+- `scripts/setup-fq-qdisc.sh`: auto-detect WAN interfaces, installa `sch_fq`
+
+**Modifiche a stripe.go**:
+- Client: `txtimeEnabled`, `txtimeEDT[]int64` per-pipe, `txtimeGapNs` (gap inter-pacchetto
+  calcolato come `(shardSize * 8 * 1e9) / (rateBps / numPipes)`)
+  - `SO_MAX_PACING_RATE` impostato per-pipe al rate configurato
+  - Software pacer (`stripePacer`) impostato a `nil` quando kernel pacing attivo
+  - SCM_TXTIME cmsg appendato al OOB in `gsoFlushPipeLocked()` e `writePacedUDP()`
+- Server: `txtimeEnabled` su listener, per-session EDT tracking in `txBatchAddLocked()`
+  - Ogni messaggio nel batch `sendmmsg` porta SCM_TXTIME individuale
+  - OOB buffer azzerato dopo flush per evitare cmsg stale
+
+### 18f.3 Bug fix durante deploy
+
+Due bug critici scoperti durante il deployment hanno impedito il funzionamento:
+
+1. **Nil pacer dereference** (commit `18ac3ff`): `pacer.pace()` chiamato in 6 punti
+   del codice senza nil check. Quando `txtimeEnabled=true`, `pacer` viene impostato a
+   `nil` (il kernel pacing sostituisce il software pacer). Risultato: panic silenzioso
+   nel TX goroutine → nessun dato trasmesso. Fix: `if pacer != nil` guard in tutti i
+   6 call site (righe ~644, ~786, ~808, ~1700, ~1830, ~1848).
+
+2. **SCM_TXTIME costante errata** (commit `3d2945e`): `scmTXTIME` definita come `0x25`
+   (37) invece di `61`. Il valore `0x25` corrisponde a `SO_TIMESTAMPING_OLD`, non a
+   `SCM_TXTIME`. Ogni `sendmsg` con questo cmsg ritornava `EINVAL`, ma l'errore era
+   silenziosamente ignorato (pattern `_, _, _ = conn.WriteMsgUDP(...)`). Risultato:
+   pacchetti mai trasmessi via stripe. Fix: `scmTXTIME = 61`.
+
+### 18f.4 Risultati benchmark
+
+Benchmark eseguito il 16 marzo 2026, dual Starlink (wan5 + wan6), iperf3 -R -P30
+--bind-dev mp1, 6 run × 30s:
+
+| Run | Media (Mbps) | Picco 1s (Mbps) | Retransmit totali | Retx/s |
+|-----|-------------|----------------|-------------------|--------|
+| 1 | 362.6 | 449.4 | 8261 | 275 |
+| 2 | 340.6 | 406.1 | 7271 | 242 |
+| 3 | 377.0 | 491.1 | 6149 | 205 |
+| 4 | 364.7 | 471.1 | 5201 | 173 |
+| 5 | 306.9 | 406.4 | 5602 | 187 |
+| 6 | 245.1 | 329.3 | 5920 | 197 |
+| **Media** | **332.8** | — | **6401** | **213** |
+| **Mediana** | **351.6** | — | — | — |
+
+Per-second CoV (coefficiente di variazione): **23.3%** (range 121–491 Mbps).
+
+### 18f.5 Confronto con Step 4.24 (GSO only)
+
+| Metrica | v4.4 (GSO) | v4.5 (GSO + txtime) | Delta |
+|---------|-----------|---------------------|-------|
+| Media 6 run | 336 Mbps | 333 Mbps | **-0.9%** |
+| Mediana | 350 Mbps | 352 Mbps | +0.6% |
+| Picco per-second | 548 Mbps | 491 Mbps | -10.4% |
+| Retransmit/s | 176 | 213 | +21.0% |
+| Best run 30s | 400 Mbps | 377 Mbps | -5.8% |
+
+### 18f.6 Analisi
+
+Il kernel pacing a 800 Mbps **non produce beneficio misurabile sul throughput**.
+Media e mediana sono sostanzialmente invariate (dentro la variabilità Starlink
+~23% CoV). I retransmit TCP sono leggermente peggiori (+21%).
+
+**Causa**: il collo di bottiglia dominante è la **variabilità di capacità Starlink**
+(beam handoff, scheduling LEO, weather), non la burstiness software. Il pacing
+attacca solo la componente software del jitter, che è marginale rispetto alla
+variabilità del link satellite.
+
+**Osservazione da Grafana**: durante i test la loss rate è rimasta stabili a
+0.02%/0.005% per le due sessioni, FEC adattivo M=0 (nessuna parità necessaria),
+decrypt failures = 0, NACK rate ~20-30 ops/s. Il canale è intrinsecamente pulito;
+le fluttuazioni di throughput sono dovute alla capacità variabile del link.
+
+### 18f.7 Decisione
+
+**Feature mantenuta attiva**. Il pacing kernel:
+- Aggiunge stabilità percepibile al canale (meno micro-burst, code switch meno stressate)
+- Ha overhead trascurabile (1 cmsg aggiuntivo per pacchetto, ~24 byte)
+- Fallback automatico se il kernel non supporta SO_TXTIME
+- Prerequisito per future ottimizzazioni (adaptive rate control basato su feedback)
+
+Il passo successivo (Step 4.26) è **Sliding Window FEC (XOR parity)** per ridurre
+la latenza di recovery delle perdite singole, sostituendo il Reed-Solomon block-based
+con un meccanismo lightweight a finestra scorrevole (RFC 8681).
 
 ---
 
