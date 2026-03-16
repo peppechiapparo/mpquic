@@ -113,9 +113,14 @@ type SessionStats struct {
 	RxPkts   uint64 `json:"rx_pkts"`
 
 	FECMode     string `json:"fec_mode"`
+	FECType     string `json:"fec_type,omitempty"`
 	AdaptiveM   int    `json:"adaptive_m"`
 	FECEncoded  uint64 `json:"fec_encoded"`  // FEC groups encoded (TX)
 	FECRecov    uint64 `json:"fec_recovered"`
+
+	XorEmitted      uint64 `json:"xor_emitted,omitempty"`       // XOR repair packets sent
+	XorRecovered    uint64 `json:"xor_recovered,omitempty"`     // packets recovered via XOR
+	XorUnrecoverable uint64 `json:"xor_unrecoverable,omitempty"` // multi-loss windows (fell back to ARQ)
 
 	ARQNackSent    uint64 `json:"arq_nack_sent"`
 	ARQRetxRecv    uint64 `json:"arq_retx_recv"`
@@ -143,6 +148,9 @@ type PathStats struct {
 	StripeRxBytes uint64 `json:"stripe_rx_bytes,omitempty"`
 	StripeRxPkts  uint64 `json:"stripe_rx_pkts,omitempty"`
 	StripeFECRecov uint64 `json:"stripe_fec_recovered,omitempty"`
+	StripeXorEmitted     uint64 `json:"stripe_xor_emitted,omitempty"`
+	StripeXorRecovered   uint64 `json:"stripe_xor_recovered,omitempty"`
+	StripeXorUnrecoverable uint64 `json:"stripe_xor_unrecoverable,omitempty"`
 }
 
 // GlobalStats is the top-level JSON response.
@@ -182,12 +190,20 @@ func snapshotServerSessions(ss *stripeServer) []SessionStats {
 			RxBytes:   atomic.LoadUint64(&sess.rxBytes),
 			RxPkts:    atomic.LoadUint64(&sess.rxPkts),
 			FECMode:   sess.fecMode,
+			FECType:   sess.fecType,
 			AdaptiveM: int(atomic.LoadInt32(&sess.adaptiveM)),
 			FECEncoded: atomic.LoadUint64(&sess.fecEncoded),
 			FECRecov:   atomic.LoadUint64(&sess.rxFECRecov),
 			LossRate:   atomic.LoadUint32(&sess.peerLossRate),
 			UptimeSec:  now.Sub(sess.createdAt).Seconds(),
 			DecryptFail: atomic.LoadUint64(&sess.securityDecryptFail),
+		}
+		if sess.xorTx != nil {
+			s.XorEmitted = atomic.LoadUint64(&sess.xorTx.emitted)
+		}
+		if sess.xorRx != nil {
+			s.XorRecovered = atomic.LoadUint64(&sess.xorRx.recovered)
+			s.XorUnrecoverable = atomic.LoadUint64(&sess.xorRx.unrecoverable)
 		}
 		if sess.arqRx != nil {
 			s.ARQNackSent, s.ARQRetxRecv, s.ARQDupFiltered = sess.arqRx.stats()
@@ -216,6 +232,13 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 			ps.StripeRxBytes = atomic.LoadUint64(&p.stripeConn.rxBytes)
 			ps.StripeRxPkts = atomic.LoadUint64(&p.stripeConn.rxPkts)
 			ps.StripeFECRecov = atomic.LoadUint64(&p.stripeConn.fecRecov)
+			if p.stripeConn.xorTx != nil {
+				ps.StripeXorEmitted = atomic.LoadUint64(&p.stripeConn.xorTx.emitted)
+			}
+			if p.stripeConn.xorRx != nil {
+				ps.StripeXorRecovered = atomic.LoadUint64(&p.stripeConn.xorRx.recovered)
+				ps.StripeXorUnrecoverable = atomic.LoadUint64(&p.stripeConn.xorRx.unrecoverable)
+			}
 		}
 		stats = append(stats, ps)
 	}
@@ -422,6 +445,24 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_fec_recovered counter\n")
 		for _, p := range gs.Paths {
 			fmt.Fprintf(w, "mpquic_path_stripe_fec_recovered{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeFECRecov)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_xor_emitted XOR FEC repair packets emitted per path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_emitted counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_xor_emitted{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeXorEmitted)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_xor_recovered Packets recovered via XOR FEC per path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_recovered counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_xor_recovered{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeXorRecovered)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_xor_unrecoverable XOR FEC multi-loss windows (ARQ fallback) per path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_unrecoverable counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_xor_unrecoverable{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeXorUnrecoverable)
 		}
 		fmt.Fprintln(w)
 	}

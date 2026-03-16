@@ -48,7 +48,8 @@ const (
 	stripePARITY    uint8 = 0x02
 	stripeREGISTER  uint8 = 0x03
 	stripeKEEPALIVE uint8 = 0x04
-	stripeNACK      uint8 = 0x05
+	stripeNACK        uint8 = 0x05
+	stripeXOR_REPAIR  uint8 = 0x06
 
 	// Header: magic(2) + ver(1) + type(1) + session(4) + groupSeq(4) + shardIdx(1) + groupDataN(1) + dataLen(2) = 16
 	stripeHdrLen = 16
@@ -241,6 +242,11 @@ type stripeClientConn struct {
 	fecMode   string // "always", "adaptive", "off"
 	adaptiveM int32  // atomic: current TX parity M (0..parityM)
 
+	// XOR FEC (sliding-window, alternative to RS)
+	fecType string          // "rs" (default) or "xor"
+	xorTx   *xorFECSender   // XOR TX accumulator (nil if fecType != "xor")
+	xorRx   *xorFECReceiver // XOR RX recovery buffer (nil if fecType != "xor")
+
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
 
@@ -417,10 +423,25 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		fecMode = "always"
 	}
 
+	fecType := cfg.StripeFECType
+	if fecType == "" {
+		fecType = "rs"
+	}
+	fecWindow := cfg.StripeFECWindow
+	if fecWindow <= 0 {
+		fecWindow = xorFECDefaultWindow
+	}
+
 	// In "off" mode, force M=0 and skip encoder creation.
 	// In "adaptive" mode, create encoder but start with adaptiveM=0.
+	// When fecType="xor", RS encoder is still created (kept as fallback)
+	// but the M=0 fast path is used for data with XOR repair alongside.
 	var enc reedsolomon.Encoder
 	if fecMode == "off" {
+		parityM = 0
+	} else if fecType == "xor" {
+		// XOR mode: RS encoder not needed, force M=0 so data goes through fast path.
+		// XOR repair packets are generated separately.
 		parityM = 0
 	} else if parityM > 0 {
 		enc, err = reedsolomon.New(dataK, parityM)
@@ -454,6 +475,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		parityM:    parityM,
 		enc:        enc,
 		fecMode:    fecMode,
+		fecType:    fecType,
 		txGroup:    make([][]byte, 0, dataK),
 		rxCh:       make(chan []byte, 512),
 		rxGroups:   make(map[uint32]*fecGroup),
@@ -465,6 +487,13 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	atomic.StoreInt32(&scc.adaptiveM, initialAdaptiveM)
 	atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
 	scc.pacer = newStripePacer(cfg.StripePacingRate)
+
+	// XOR FEC: create sender/receiver when fec_type=xor and not off
+	if fecType == "xor" && fecMode != "off" {
+		scc.xorTx = newXorFECSender(fecWindow)
+		scc.xorRx = newXorFECReceiver(fecWindow)
+	}
+
 	if cfg.StripeARQ {
 		scc.arqTx = &arqTxBuf{}
 		scc.arqRx = newArqRxTracker()
@@ -603,8 +632,12 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	if scc.txtimeEnabled {
 		txtimeStr = "on"
 	}
-	logger.Infof("stripe client ready: session=%08x pipes=%d FEC=%d+%d mode=%s pacing=%s arq=%s gso=%s txtime=%s server=%s encrypted=AES-256-GCM",
-		sessionID, len(scc.pipes), dataK, parityM, fecMode, pacingStr, arqStr, gsoStr, txtimeStr, serverAddr)
+	fecStr := fmt.Sprintf("FEC=%d+%d mode=%s type=%s", dataK, parityM, fecMode, fecType)
+	if fecType == "xor" && scc.xorTx != nil {
+		fecStr = fmt.Sprintf("FEC=xor W=%d mode=%s", scc.xorTx.window, fecMode)
+	}
+	logger.Infof("stripe client ready: session=%08x pipes=%d %s pacing=%s arq=%s gso=%s txtime=%s server=%s encrypted=AES-256-GCM",
+		sessionID, len(scc.pipes), fecStr, pacingStr, arqStr, gsoStr, txtimeStr, serverAddr)
 
 	return scc, nil
 }
@@ -654,6 +687,14 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 
 		atomic.AddUint64(&scc.txPkts, 1)
 		atomic.AddUint64(&scc.txBytes, uint64(len(pkt)))
+
+		// XOR FEC: feed source to accumulator, emit repair when window completes.
+		if scc.xorTx != nil {
+			if repair, firstSeq, ok := scc.xorTx.addSource(seq, shardData); ok {
+				scc.sendXorRepairLocked(firstSeq, uint8(scc.xorTx.window), repair)
+			}
+		}
+
 		return nil
 	}
 
@@ -824,6 +865,31 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 	scc.txGroup = scc.txGroup[:0]
 }
 
+// sendXorRepairLocked encrypts and sends an XOR FEC repair packet.
+// Caller must hold txMu.
+func (scc *stripeClientConn) sendXorRepairLocked(firstSeq uint32, window uint8, repairData []byte) {
+	wirePkt := stripeEncryptShard(scc.txCipher, &stripeHdr{
+		Magic:      stripeMagic,
+		Version:    stripeVersion,
+		Type:       stripeXOR_REPAIR,
+		Session:    scc.sessionID,
+		GroupSeq:   firstSeq,
+		ShardIdx:   0,
+		GroupDataN: window,
+		DataLen:    0,
+	}, repairData)
+	if scc.pacer != nil {
+		scc.pacer.pace(len(wirePkt))
+	}
+	idx := atomic.AddUint32(&scc.txPipe, 1) - 1
+	pipeIdx := int(idx) % len(scc.pipes)
+	if scc.gsoEnabled && atomic.LoadUint32(&scc.gsoDisabled) == 0 {
+		scc.gsoAccumLocked(pipeIdx, wirePkt)
+	} else {
+		scc.writePacedUDP(pipeIdx, wirePkt)
+	}
+}
+
 func (scc *stripeClientConn) flushTxGroup() {
 	// Don't flush if connection is closing/closed
 	select {
@@ -835,6 +901,12 @@ func (scc *stripeClientConn) flushTxGroup() {
 	defer scc.txMu.Unlock()
 	if len(scc.txGroup) > 0 {
 		scc.sendFECGroupLocked()
+	}
+	// Flush partial XOR window (emit repair for accumulated sources).
+	if scc.xorTx != nil {
+		if repair, firstSeq, window, ok := scc.xorTx.flush(); ok {
+			scc.sendXorRepairLocked(firstSeq, uint8(window), repair)
+		}
 	}
 	// Flush any GSO-accumulated packets from the FEC group above.
 	scc.gsoFlushAllLocked()
@@ -1146,6 +1218,8 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 				}
 			case stripeNACK:
 				scc.handleNack(hdr, payload)
+			case stripeXOR_REPAIR:
+				scc.handleXorRepair(hdr, payload)
 			}
 		}
 	}
@@ -1183,6 +1257,10 @@ func (scc *stripeClientConn) handleRxShard(hdr stripeHdr, payload []byte, isPari
 			}
 		}
 		scc.deliverDataDirect(hdr, payload)
+		// XOR FEC: store source shard for potential recovery.
+		if scc.xorRx != nil {
+			scc.xorRx.storeShard(hdr.GroupSeq, payload)
+		}
 		return
 	}
 
@@ -1190,6 +1268,10 @@ func (scc *stripeClientConn) handleRxShard(hdr stripeHdr, payload []byte, isPari
 		// No FEC configured — deliver data directly
 		if !isParity {
 			scc.deliverDataDirect(hdr, payload)
+			// XOR FEC: store source shard for potential recovery.
+			if scc.xorRx != nil {
+				scc.xorRx.storeShard(hdr.GroupSeq, payload)
+			}
 		}
 		return
 	}
@@ -1297,6 +1379,34 @@ func (scc *stripeClientConn) deliverGroupData(grp *fecGroup) {
 		default:
 			// Drop if full
 		}
+	}
+}
+
+// handleXorRepair processes a received XOR FEC repair packet.
+// Attempts to recover a single missing source packet from the window.
+func (scc *stripeClientConn) handleXorRepair(hdr stripeHdr, payload []byte) {
+	if scc.xorRx == nil || len(payload) == 0 {
+		return
+	}
+	W := int(hdr.GroupDataN)
+	if W <= 0 {
+		return
+	}
+	pkt, recoveredSeq, ok := scc.xorRx.tryRecover(hdr.GroupSeq, W, payload)
+	if !ok || pkt == nil {
+		return
+	}
+	// Deliver recovered IP packet.
+	atomic.AddUint64(&scc.fecRecov, 1)
+	// ARQ: mark recovered seq as received so it won't be NACKed.
+	if scc.arqRx != nil {
+		scc.arqRx.markReceived(recoveredSeq)
+		scc.arqRx.addRetxReceived(1)
+	}
+	select {
+	case scc.rxCh <- pkt:
+	case <-scc.closeCh:
+	default:
 	}
 }
 
@@ -1467,6 +1577,10 @@ func (scc *stripeClientConn) gcRxGroups() {
 			delete(scc.rxGroups, seq)
 		}
 	}
+	// GC XOR FEC receiver buffer.
+	if scc.xorRx != nil {
+		scc.xorRx.gc()
+	}
 }
 
 // ─── Client ARQ: NACK handler + generation loop ──────────────────────────
@@ -1579,6 +1693,11 @@ type stripeSession struct {
 	// Adaptive FEC
 	fecMode   string // "always", "adaptive", "off"
 	adaptiveM int32  // atomic: current TX parity M (0..parityM)
+
+	// XOR FEC (sliding-window, alternative to RS)
+	fecType string          // "rs" (default) or "xor"
+	xorTx   *xorFECSender   // XOR TX accumulator (nil if fecType != "xor")
+	xorRx   *xorFECReceiver // XOR RX recovery buffer (nil if fecType != "xor")
 
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
@@ -1710,6 +1829,14 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 		sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
 		atomic.AddUint64(&sess.txPkts, 1)
 		atomic.AddUint64(&sess.txBytes, uint64(len(pkt)))
+
+		// XOR FEC: feed source to accumulator, emit repair when window completes.
+		if sess.xorTx != nil {
+			if repair, firstSeq, ok := sess.xorTx.addSource(seq, shardData); ok {
+				sdc.sendXorRepairLocked(firstSeq, uint8(sess.xorTx.window), repair, activePipes)
+			}
+		}
+
 		return nil
 	}
 
@@ -1866,6 +1993,27 @@ func (sdc *stripeServerDC) sendFECGroupLocked() {
 	atomic.AddUint64(&sess.fecEncoded, 1)
 }
 
+// sendXorRepairLocked encrypts and sends an XOR FEC repair packet (server side).
+// Caller must hold sess.txMu.
+func (sdc *stripeServerDC) sendXorRepairLocked(firstSeq uint32, window uint8, repairData []byte, activePipes []*net.UDPAddr) {
+	sess := sdc.session
+	wirePkt := stripeEncryptShard(sess.txCipher, &stripeHdr{
+		Magic:      stripeMagic,
+		Version:    stripeVersion,
+		Type:       stripeXOR_REPAIR,
+		Session:    sess.sessionID,
+		GroupSeq:   firstSeq,
+		ShardIdx:   0,
+		GroupDataN: window,
+		DataLen:    0,
+	}, repairData)
+	if sess.pacer != nil {
+		sess.pacer.pace(len(wirePkt))
+	}
+	pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
+	sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
+}
+
 func (sdc *stripeServerDC) resetFlushTimer() {
 	sess := sdc.session
 	if sess.txTimer != nil {
@@ -1890,6 +2038,8 @@ type stripeServer struct {
 	dataK   int
 	parityM int
 	fecMode    string // "always", "adaptive", "off"
+	fecType    string // "rs" (default), "xor"
+	fecWindow  int    // XOR window W (only used when fecType=xor)
 	pacingRate int    // Mbps per session (0 = disabled)
 	arqEnabled bool   // Hybrid ARQ enabled
 	txtimeEnabled bool // SO_TXTIME probed OK on listener socket
@@ -1934,7 +2084,18 @@ func newStripeServer(cfg *Config, tun *water.Interface, tunMultiQueue bool, ct *
 	if fecMode == "" {
 		fecMode = "always"
 	}
+	fecType := cfg.StripeFECType
+	if fecType == "" {
+		fecType = "rs"
+	}
+	fecWindow := cfg.StripeFECWindow
+	if fecWindow <= 0 {
+		fecWindow = xorFECDefaultWindow
+	}
 	if fecMode == "off" {
+		parityM = 0
+	} else if fecType == "xor" {
+		// XOR mode: RS not needed, force M=0 so data goes through fast path.
 		parityM = 0
 	}
 
@@ -1949,6 +2110,8 @@ func newStripeServer(cfg *Config, tun *water.Interface, tunMultiQueue bool, ct *
 		dataK:      dataK,
 		parityM:    parityM,
 		fecMode:    fecMode,
+		fecType:    fecType,
+		fecWindow:  fecWindow,
 		pacingRate: cfg.StripePacingRate,
 		arqEnabled: cfg.StripeARQ,
 		logger:     logger,
@@ -1984,7 +2147,11 @@ func newStripeServer(cfg *Config, tun *water.Interface, tunMultiQueue bool, ct *
 	if ss.txtimeEnabled {
 		txtimeStr = "on"
 	}
-	logger.Infof("stripe server listening on %s, FEC=%d+%d mode=%s pacing=%s arq=%s txtime=%s encrypted=AES-256-GCM", listenAddr, dataK, parityM, fecMode, pacingStr, arqStr, txtimeStr)
+	fecStr := fmt.Sprintf("FEC=%d+%d mode=%s type=%s", dataK, parityM, fecMode, fecType)
+	if fecType == "xor" {
+		fecStr = fmt.Sprintf("FEC=xor W=%d mode=%s", fecWindow, fecMode)
+	}
+	logger.Infof("stripe server listening on %s, %s pacing=%s arq=%s txtime=%s encrypted=AES-256-GCM", listenAddr, fecStr, pacingStr, arqStr, txtimeStr)
 	return ss, nil
 }
 
@@ -2177,6 +2344,8 @@ dispatch:
 		ss.handleKeepalive(hdr, payload, from)
 	case stripeNACK:
 		ss.handleNack(hdr, payload, from)
+	case stripeXOR_REPAIR:
+		ss.handleXorRepairServer(hdr, payload, from)
 	}
 }
 
@@ -2196,9 +2365,9 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 	sess, exists := ss.sessions[sessionID]
 	if !exists {
 		var enc reedsolomon.Encoder
-		// Create FEC encoder unless mode is "off". In adaptive mode, encoder is needed
-		// when M dynamically switches from 0 to parityM.
-		if ss.fecMode != "off" && ss.parityM > 0 {
+		// Create FEC encoder unless mode is "off" or fecType is "xor".
+		// In adaptive mode, encoder is needed when M dynamically switches from 0 to parityM.
+		if ss.fecMode != "off" && ss.fecType != "xor" && ss.parityM > 0 {
 			var err error
 			enc, err = reedsolomon.New(ss.dataK, ss.parityM)
 			if err != nil {
@@ -2236,6 +2405,7 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			dataK:        ss.dataK,
 			parityM:      ss.parityM,
 			fecMode:      ss.fecMode,
+			fecType:      ss.fecType,
 			enc:          enc,
 			rxGroups:     make(map[uint32]*fecGroup),
 			rxCh:         rxCh,
@@ -2243,6 +2413,11 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			lastActivity: time.Now(),
 			createdAt:    time.Now(),
 			logger:       ss.logger,
+		}
+		// Initialize XOR FEC sender/receiver when fec_type=xor and not off.
+		if ss.fecType == "xor" && ss.fecMode != "off" {
+			sess.xorTx = newXorFECSender(ss.fecWindow)
+			sess.xorRx = newXorFECReceiver(ss.fecWindow)
 		}
 		// Set initial adaptive M
 		if ss.fecMode == "adaptive" {
@@ -2282,6 +2457,12 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			sess.txMu.Lock()
 			if len(sess.txGroup) > 0 {
 				sdc.sendFECGroupLocked()
+			}
+			// Flush partial XOR window (emit repair for accumulated sources).
+			if sess.xorTx != nil && len(sess.txActivePipes) > 0 {
+				if repair, firstSeq, window, ok := sess.xorTx.flush(); ok {
+					sdc.sendXorRepairLocked(firstSeq, uint8(window), repair, sess.txActivePipes)
+				}
 			}
 			sdc.txBatchFlushLocked() // flush any partial batch from FEC timer
 			sdc.resetFlushTimer()
@@ -2542,6 +2723,10 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 			atomic.AddUint64(&sess.rxDirectCount, 1)
 			atomic.AddUint64(&sess.rxPkts, 1)
 			atomic.AddUint64(&sess.rxBytes, uint64(hdr.DataLen))
+			// XOR FEC: store source shard for potential recovery.
+			if sess.xorRx != nil {
+				sess.xorRx.storeShard(hdr.GroupSeq, payload)
+			}
 			select {
 			case sess.rxCh <- pkt:
 			default:
@@ -2583,6 +2768,37 @@ func (ss *stripeServer) handleParityShard(hdr stripeHdr, payload []byte, from *n
 
 	if decodable {
 		ss.decodeAndDeliver(sess, hdr.GroupSeq, grp)
+	}
+}
+
+// handleXorRepairServer processes an XOR FEC repair packet from a client.
+func (ss *stripeServer) handleXorRepairServer(hdr stripeHdr, payload []byte, from *net.UDPAddr) {
+	sess := ss.lookupSession(hdr.Session, from)
+	if sess == nil || sess.xorRx == nil || len(payload) == 0 {
+		return
+	}
+	sess.lastActivity = time.Now()
+
+	W := int(hdr.GroupDataN)
+	if W <= 0 {
+		return
+	}
+	pkt, recoveredSeq, ok := sess.xorRx.tryRecover(hdr.GroupSeq, W, payload)
+	if !ok || pkt == nil {
+		return
+	}
+	// Deliver recovered IP packet.
+	atomic.AddUint64(&sess.rxFECRecov, 1)
+	atomic.AddUint64(&sess.rxPkts, 1)
+	atomic.AddUint64(&sess.rxBytes, uint64(len(pkt)))
+	// ARQ: mark recovered seq as received so it won't be NACKed.
+	if sess.arqRx != nil {
+		sess.arqRx.markReceived(recoveredSeq)
+		sess.arqRx.addRetxReceived(1)
+	}
+	select {
+	case sess.rxCh <- pkt:
+	default:
 	}
 }
 
@@ -2986,6 +3202,10 @@ func (ss *stripeServer) runGC() {
 			}
 		}
 		sess.rxMu.Unlock()
+		// GC XOR FEC receiver buffer.
+		if sess.xorRx != nil {
+			sess.xorRx.gc()
+		}
 	}
 
 	if df := atomic.LoadUint64(&ss.securityDecryptFail); df > 0 {
