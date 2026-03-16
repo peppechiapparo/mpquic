@@ -578,22 +578,26 @@ Array di path, ciascuno con:
 | `stripe_arq` | `true` / `false` | `false` | Abilita Hybrid ARQ con NACK selettivo. Il receiver rileva gap di sequenza e invia NACK bitmap al sender, che ritrasmette solo i pacchetti mancanti. Attivo solo quando effectiveM=0. Overhead ~0% in assenza di loss |
 | `stripe_pacing_rate` | intero (Mbps) | `0` (disabilitato) | Rate di pacing per sessione. Con valore >0, abilita **kernel pacing** via `SO_TXTIME` + `sch_fq` (granularità nanosecondo). Richiede: kernel ≥4.19 e qdisc `sch_fq` attivo (`scripts/setup-fq-qdisc.sh`). Se il kernel non supporta SO_TXTIME, fallback automatico a software pacer. Raccomandato: `800` per dual Starlink |
 | `stripe_disable_gso` | `true` / `false` | `false` | Disabilita UDP GSO (`UDP_SEGMENT`) sul client TX. GSO è rilevato automaticamente all'avvio (kernel ≥5.0). Usare `true` solo per A/B test diagnostici |
+| `stripe_fec_type` | `rs` / `xor` | `rs` | Tipo FEC: `rs` = Reed-Solomon (blocco K+M), `xor` = Sliding Window XOR (RFC 8681). Quando `xor`: RS disabilitato (parityM forzato a 0), i dati vanno tramite fast path M=0, repair XOR generato a fianco — zero impatto latenza. **Deve essere identico su client e server** |
+| `stripe_fec_window` | intero (es. `10`) | `10` | W — dimensione finestra XOR. Ogni W pacchetti sorgente consecutivi generano 1 pacchetto di riparazione XOR. Recupera esattamente 1 perdita per finestra. Solo usato quando `stripe_fec_type: xor`. Valori consigliati: 5-20 |
 | `stripe_enabled` | `true` / `false` | `false` | Solo server: abilita il listener UDP stripe |
 
 **Formula FEC**: può recuperare fino a M shards persi su K+M totali.
 Con K=10, M=2: gruppo di 12 shards, tolleranza 2 shards persi (16.7%).
 Aumentando M si migliora la resilienza al costo di più overhead di rete.
 
-**Configurazione raccomandata per Starlink**: `stripe_fec_mode: adaptive` + `stripe_arq: true`.
-In condizioni normali (loss < 1%), FEC adattivo opera con M=0 (zero overhead) e ARQ
-ritrasmette selettivamente i rari pacchetti persi. Se la perdita aumenta significativamente,
-FEC adattivo può passare automaticamente a M=2 come fallback.
+**Configurazione raccomandata per Starlink**: `stripe_fec_type: xor` + `stripe_fec_window: 10` + `stripe_arq: true`.
+XOR FEC genera 1 pacchetto di riparazione ogni W sorgenti (10% overhead con W=10),
+recupera esattamente 1 perdita per finestra senza latenza aggiuntiva sul data path.
+ARQ ritrasmette selettivamente le perdite multiple (rare).
+Alternativa RS: `stripe_fec_type: rs` + `stripe_fec_mode: adaptive` per quando servono
+recovery multi-loss più aggressive (M=2: tolleranza 16.7% loss per gruppo).
 Benchmark dual Starlink 24 pipe: **354 Mbps** media, picco 390 Mbps (+48% vs baseline 239 Mbps).
 Con GSO (v4.4): picco **548 Mbps**, best 30s **400 Mbps**.
 Con kernel pacing SO_TXTIME (v4.5): media 333 Mbps (stabile), mediana 352 Mbps.
 Variabilità Starlink (23% CoV) domina rispetto alle ottimizzazioni software.
 
-**Nota critica**: `stripe_fec_mode` **deve essere identico su client e server**.
+**Nota critica**: `stripe_fec_type` e `stripe_fec_mode` **devono essere identici su client e server**.
 Se il client usa `off` ma il server ha `adaptive`, il server può inviare gruppi
 FEC con parità che il client non sa decodificare. Dopo qualsiasi modifica,
 riavviare **entrambi** i nodi.
@@ -732,6 +736,8 @@ stripe_port: 46017
 stripe_data_shards: 10
 stripe_parity_shards: 2
 stripe_fec_mode: adaptive
+stripe_fec_type: xor
+stripe_fec_window: 10
 stripe_arq: true
 multipath_paths:
 - name: wan5
@@ -765,6 +771,8 @@ stripe_port: 46017
 stripe_data_shards: 10
 stripe_parity_shards: 2
 stripe_fec_mode: adaptive
+stripe_fec_type: xor
+stripe_fec_window: 10
 stripe_arq: true
 tun_name: mp1
 tun_cidr: 10.200.17.254/24

@@ -9,6 +9,8 @@ stripe_port: 46017
 stripe_data_shards: 10
 stripe_parity_shards: 2
 stripe_fec_mode: adaptive
+stripe_fec_type: xor
+stripe_fec_window: 10
 stripe_arq: true
 tun_name: mp1
 tun_cidr: 10.200.17.254/24
