@@ -3096,6 +3096,23 @@ lento, causando:
 proporzionalmente alla capacità effettiva — migliore di qualsiasi scheduler statico.
 Issue #2 chiuso come **won't fix**.
 
+**Benchmark post-revert** (commit `c2e021a`, 17 marzo 2026, iperf3 -R -P30, 4 run × 30s):
+
+| Run | Throughput (Mbps) |
+|-----|-------------------|
+| 1   | 385               |
+| 2   | 403               |
+| 3   | 349               |
+| 4   | 361               |
+| **Media** | **374 Mbps** |
+
+Throughput completamente ripristinato e **superiore al baseline** di 336 Mbps
+(**+11.3%**). I run 1-2 a 385-403 Mbps sono tra i migliori risultati mai registrati
+sulla piattaforma dopo il record assoluto di 499 Mbps (picco GSO). Il miglioramento
+rispetto al baseline precedente è attribuibile a condizioni Starlink favorevoli e
+alla conferma che il dispatch round-robin con distribuzione naturale ~67/33 opera
+già al regime ottimale per link con capacità asimmetrica.
+
 ---
 
 ## 19. Vantaggi per il Cliente
@@ -3164,6 +3181,10 @@ osservabilità Prometheus completa.
 L'esperimento Step 4.27 (weighted scheduler) ha dimostrato che la distribuzione
 asimmetrica wan5/wan6 (67/33%) è **ottimale** per link Starlink con capacità
 differente, confermando che la piattaforma opera già al regime migliore possibile.
+Il benchmark post-revert (4 run × 30s, iperf3 -R -P30) ha prodotto risultati
+eccezionali: **385, 403, 349, 361 Mbps** (media **374 Mbps**, +11.3% vs baseline
+336). I run a 385-403 Mbps sono tra i migliori risultati sostenuti mai registrati
+sulla piattaforma.
 
 **Risultati chiave per fase:**
 
@@ -3317,7 +3338,8 @@ differente, confermando che la piattaforma opera già al regime migliore possibi
 
 31. **Confronto complessivo**: da v4.0 (239 Mbps, ~160% CPU) a v4.2 (374 Mbps media,
     499 Mbps picco, 116% CPU). Guadagno +56% throughput con −28% CPU.
-    **Il bottleneck è ora Starlink, non il software.**
+    Benchmark post-revert Step 4.27: **385, 403, 349, 361 Mbps** (media **374 Mbps**,
+    +11.3% vs baseline 336). **Il bottleneck è ora Starlink, non il software.**
 
 **Prossimi sviluppi:**
 
