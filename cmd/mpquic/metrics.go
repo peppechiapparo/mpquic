@@ -304,7 +304,6 @@ func snapshotDispatchStats(ss *stripeServer) []DispatchPathStats {
 			}
 			a.hit += atomic.LoadUint64(&pc.dispatchHit)
 			a.drop += atomic.LoadUint64(&pc.dispatchDrop)
-			a.tx += atomic.LoadUint64(&pc.txBytes)
 			a.qLen += len(pc.sendCh)
 			a.flows += flowCounts[i]
 		}

@@ -275,16 +275,8 @@ type pathConn struct {
 	sendDone     chan struct{}  // closed when the drain goroutine exits
 	dispatchHit  uint64        // atomic: packets successfully queued via dispatch
 	dispatchDrop uint64        // atomic: packets dropped (sendCh full)
-	txBytes      uint64        // atomic: total bytes queued through this path (for weighted scheduling)
 	fecCapable   bool          // true for stripe paths (FEC handles reordering)
 }
-
-const (
-	// flowTableMaxSize triggers a reset of the flow table to prevent
-	// unbounded growth. Old entries are simply discarded; the next packet
-	// for that flow will trigger a fresh weighted assignment.
-	flowTableMaxSize = 512
-)
 
 // connGroup holds all QUIC connections from the same peer (same TUN IP).
 // For single-path clients this has exactly one entry; for multi-path clients
@@ -295,13 +287,11 @@ type connGroup struct {
 	rr         int  // round-robin index for send distribution
 	allFEC     bool // cached: true when all paths are fecCapable
 	// flowPaths assigns each TCP/UDP flow (by hash) to a specific active
-	// path index via weighted scheduling. All packets in the same flow go
-	// through the same path (prevents TCP reordering). New flows are
-	// assigned to the path with the lowest load score:
-	//   score = len(sendCh)*1e6 + txBytes/1e6
-	// Zero-alloc fast path: existing flows do a single map lookup, no
-	// syscalls, no atomic loads, no map writes.
+	// path index via round-robin. All packets in the same flow go through
+	// the same path (prevents TCP reordering) but different flows are spread
+	// evenly across paths (prevents load imbalance from hash collisions).
 	flowPaths  map[uint32]int
+	flowRR     int  // round-robin for new flow assignment
 }
 
 // flowHash extracts a lightweight hash from an IP packet's 5-tuple
@@ -450,7 +440,6 @@ func (pc *pathConn) drainSendCh() {
 	batcher, hasBatch := pc.dc.(txBatcher)
 	for pkt := range pc.sendCh {
 		_ = pc.dc.SendDatagram(pkt)
-		atomic.AddUint64(&pc.txBytes, uint64(len(pkt)))
 		if !hasBatch {
 			continue
 		}
@@ -464,7 +453,6 @@ func (pc *pathConn) drainSendCh() {
 					return
 				}
 				_ = pc.dc.SendDatagram(pkt2)
-				atomic.AddUint64(&pc.txBytes, uint64(len(pkt2)))
 			default:
 				drain = false
 			}
@@ -684,50 +672,37 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 
 	var idx int
 	if grp.allFEC {
-		// FEC-capable paths: per-flow affinity with weighted assignment.
-		// Fast path (existing flow): single map[uint32]int lookup +
-		// active-set check. Zero syscalls, zero atomic loads, zero map writes.
-		// Slow path (new/stale flow): weighted least-loaded scoring.
+		// FEC-capable paths: per-flow affinity with round-robin assignment.
+		// Each unique flow is assigned to the next active path in order;
+		// all packets in the same flow reuse that assignment.
+		// This prevents TCP reordering while distributing flows evenly.
 		if h, ok := flowHash(pkt); ok {
 			if grp.flowPaths == nil {
 				grp.flowPaths = make(map[uint32]int, 8)
 			}
 			assignedIdx, exists := grp.flowPaths[h]
-			// Fast path: check if assigned path is still active
+			// Check if assigned path is still in the active set
+			isActive := false
 			if exists {
 				for _, ai := range active {
 					if ai == assignedIdx {
-						idx = assignedIdx
-						goto send
+						isActive = true
+						break
 					}
 				}
 			}
-			// Slow path: new flow or path went stale → weighted assignment.
-			// score = queue_depth * 1e6 + txBytes / 1e6
-			// Rotating start so tied scores round-robin across paths.
-			{
-				n := len(active)
-				startPos := grp.rr % n
-				grp.rr = (startPos + 1) % n
-				bestIdx := active[startPos]
-				bestScore := int64(len(grp.paths[bestIdx].sendCh))*1e6 +
-					int64(atomic.LoadUint64(&grp.paths[bestIdx].txBytes)/1e6)
-				for k := 1; k < n; k++ {
-					ai := active[(startPos+k)%n]
-					s := int64(len(grp.paths[ai].sendCh))*1e6 +
-						int64(atomic.LoadUint64(&grp.paths[ai].txBytes)/1e6)
-					if s < bestScore {
-						bestScore = s
-						bestIdx = ai
-					}
-				}
-				grp.flowPaths[h] = bestIdx
-				idx = bestIdx
-				// GC: nuke table if too large; stale flows re-assign on next pkt
-				if len(grp.flowPaths) > flowTableMaxSize {
-					grp.flowPaths = map[uint32]int{h: bestIdx}
+			if !exists || !isActive {
+				// New flow or stale assignment → round-robin assign
+				pos := grp.flowRR % len(active)
+				assignedIdx = active[pos]
+				grp.flowRR = pos + 1
+				grp.flowPaths[h] = assignedIdx
+				// Evict stale entries if map grows too large
+				if len(grp.flowPaths) > 1024 {
+					grp.flowPaths = map[uint32]int{h: assignedIdx}
 				}
 			}
+			idx = assignedIdx
 		} else {
 			// Non-TCP/UDP: round-robin
 			start := grp.rr % len(active)
@@ -746,15 +721,16 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 		}
 	}
 
-send:
+	var dispatched bool
 	select {
 	case grp.paths[idx].sendCh <- pkt:
 		atomic.AddUint64(&grp.paths[idx].dispatchHit, 1)
-		return true
+		dispatched = true
 	default:
 		atomic.AddUint64(&grp.paths[idx].dispatchDrop, 1)
-		return false
 	}
+
+	return dispatched
 }
 
 // pathCount returns the number of active path connections for a peer.
