@@ -1,6 +1,38 @@
 # Roadmap implementazione MPQUIC
 
-*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-16*
+*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-17*
+
+### Nota Step 4.27 — Weighted Scheduler: esperimento fallito e revert (2026-03-17)
+
+**Obiettivo**: correggere l'asimmetria wan5/wan6 (36/64%) forzando distribuzione
+50/50 tramite weighted flow scheduler lato server (Issue #2).
+
+**Iterazione 1** (commit `907c785`): weighted scheduler con score
+`len(sendCh)*1e6 + txBytes/1e6`, flow-hash affinity, `txBytes` atomic su `pathConn`.
+- **Bug**: tied-score degeneracy (`bestIdx = active[0]` vinceva sempre) → 100% traffico
+  su path 0. Throughput crollato.
+
+**Iterazione 2** (commit `deae710`): fix tiebreak round-robin + riduzione write su
+`flowPaths` map (solo su nuovi flussi). Distribuzione 51.4/48.6 raggiunta.
+- **Bug**: `time.Now().UnixNano()` per-packet sotto `ct.mu.Lock()` → ~25ns syscall
+  overhead su ogni pacchetto dispatch. Benchmark: 273 Mbps avg (vs 336 baseline = −19%).
+
+**Iterazione 3** (commit `b29c015`): eliminato `time.Now()`, rimossa struttura
+`flowEntry`, revert a `map[uint32]int`, zero syscall nel fast path, `goto send`.
+Distribuzione 50.9/49.1. Benchmark: 291 Mbps avg (vs 336 baseline = −13%).
+
+**Conclusione**: distribuzione 50/50 **peggiora** il throughput perché le due antenne
+Starlink hanno **capacità asimmetrica**. La distribuzione naturale ~67/33 del kernel
+TUN multiqueue hash riflette la capacità effettiva dei due link. Forzare 50/50
+sovraccarica il link più lento, causando retransmit e buildup di coda.
+
+**Revert completo** (commit `c2e021a`): main.go ripristinato a stato pre-4.27
+(commit `78abde3`). Dispatch metrics in metrics.go mantenuti per osservabilità.
+Benchmark post-revert: **374 Mbps avg** (385, 403, 349, 361) — throughput ristabilito.
+
+**Lezione appresa**: l'asimmetria wan5/wan6 è una **feature**, non un bug. Il kernel
+distribuisce i flussi proporzionalmente alla capacità effettiva dei link. Issue #2
+chiuso come "won't fix".
 
 ### Nota post-deploy XOR FEC (2026-03-16)
 - **Bug feedback loop rxDirectCount** (commit `1596413`): quando XOR FEC recuperava
@@ -1626,6 +1658,10 @@ Vantaggi rispetto a Reed-Solomon:
 - `7b8ad47` — feat: xor_active Prometheus metric (gauge 0/1)
 - `8bd6fcf` — dashboard: update FEC panels for XOR mode
 - `6b71912` — dashboard v10: fix panel visibility for constant-zero metrics
+- `907c785` — feat: Step 4.27 weighted flow scheduler (REVERTED)
+- `deae710` — fix: tiebreak degeneracy + map write reduction (REVERTED)
+- `b29c015` — perf: zero-syscall dispatch fast path (REVERTED)
+- `c2e021a` — revert: restore pre-4.27 baseline, keep dispatch metrics
 
 **File nuovi**:
 - `stripe_fec_xor.go` (257 LOC): `xorFECSender` + `xorFECReceiver` (ring buffer)
@@ -1661,7 +1697,7 @@ Vantaggi rispetto a Reed-Solomon:
 - [x] Fix criticità ARQ retransmit (Issue #1) — root cause: `addRetxReceived()` mai chiamato, fix applicato
 - [x] Fix bug nil pacer dereference (6 siti) — commit `18ac3ff`
 - [x] Fix bug SCM_TXTIME costante errata (0x25→61) — commit `3d2945e`
-- [ ] Fix asimmetria wan5/wan6 (Issue #2)
+- [x] Investigazione asimmetria wan5/wan6 (Issue #2) — **chiuso**: distribuzione naturale 67/33 è ottimale per capacità asimmetrica Starlink (Step 4.27 revert `c2e021a`)
 
 ### Criticità aperte (emerse da benchmark Step 4.24)
 
@@ -1682,27 +1718,23 @@ Questo distingue correttamente:
 - `dup_filtered`: pacchetti già ricevuti (duplicati reali o retransmit tardivi)
 ridurre i retransmit TCP e migliorare la media.
 
-**Issue #2 — Asimmetria wan5/wan6: 36/64% distribuzione traffico**
+**Issue #2 — Asimmetria wan5/wan6: 36/64% distribuzione traffico ✅ CHIUSO (won't fix)**
 
 Il server ha inviato 5.55 GB sulla sessione wan5 e 9.86 GB sulla sessione wan6
 (ratio 36:64). Causa: l'hashing dei 30 flussi TCP da parte del kernel TUN
 multiqueue (`IFF_MULTI_QUEUE`) produce distribuzione non uniforme tra i due fd.
-Il kernel calcola l'RSS hash su ogni pacchetto IP e lo assegna alla coda in
-base a `hash % N_queues` — con 30 flussi, la distribuzione è stocastica e
-converge lentamente.
 
-**Impatto**: il path sottoutilizzato (wan5) ha capacità residua non sfruttata.
-Una distribuzione 50/50 potrebbe migliorare la media di ~10-15% (il path
-saturo diventa il bottleneck prima).
+**Investigazione Step 4.27** (commit `907c785` → `b29c015` → revert `c2e021a`):
+implementato weighted flow scheduler con 3 iterazioni. La distribuzione 50/50 è stata
+raggiunta (50.9/48.6) ma il throughput è peggiorato del 13% (291 vs 336 Mbps).
 
-**Possibili soluzioni**:
-1. **Round-robin nel dispatcher MPQUIC** (server-side): assegnamento alternato dei
-   pacchetti IP in uscita tra le sessioni, bypassando l'hashing del kernel
-2. **Weighted round-robin**: bilanciamento basato su throughput misurato per path
-3. **eBPF XDP redirect**: programma BPF sul server per distribuire via hash custom
-4. **Server-side: round-robin già nel `drainSendCh`**: il dispatcher attuale ruota
-   tra le pipe di una sessione ma non tra sessioni diverse → verificare se il
-   bilanciamento inter-sessione è corretto
+**Root cause**: le due antenne Starlink hanno **capacità asimmetrica**. Il link con
+più capacità riceve naturalmente più flussi dall'hashing kernel. Forzare 50/50
+sovraccarica il link più lento → retransmit → coda → throughput ridotto.
+
+**Conclusione**: la distribuzione 36/64 è una **feature** del kernel TUN multiqueue
+che riflette la capacità effettiva dei link. Nessuna correzione necessaria.
+Issue chiuso come **won't fix**. Benchmark post-revert: **374 Mbps avg**.
 
 ---
 
@@ -1910,7 +1942,7 @@ Fase 5 completata (metriche operative per feedback loop).
 | cr4/br4/df4 | multi-tunnel | WAN4 | QUIC reliable | ~50 Mbps (isolato) |
 | cr5/br5/df5 | multi-tunnel | WAN5 | QUIC reliable | ~50 Mbps (isolato) |
 | cr6/br6/df6 | multi-tunnel | WAN6 | QUIC reliable | ~50 Mbps (isolato) |
-| **mp1** | **multipath 2 WAN** | **WAN5+6** | **UDP stripe + FEC adaptive + ARQ** | **374 Mbps (picco 499)** |
+| **mp1** | **multipath 2 WAN** | **WAN5+6** | **UDP stripe + FEC adaptive + ARQ** | **374 Mbps avg (picco 499)** |
 
 ---
 

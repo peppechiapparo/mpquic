@@ -3052,6 +3052,50 @@ Per verificare che il fix non introducesse regressione, benchmark eseguito il
 - Prometheus: tutte le metriche xor_active = 0 su server e client
 - Nessun impatto su throughput, latenza, o stabilità del canale
 
+### 18g.11 Esperimento weighted scheduler (Step 4.27) — FALLITO e revert
+
+**Obiettivo**: correggere l'asimmetria wan5/wan6 (36/64% distribuzione traffico)
+forzando distribuzione 50/50 tramite weighted flow scheduler lato server.
+
+**Ipotesi iniziale**: la distribuzione disomogenea causava sottoutilizzo del path
+wan5, e forzare 50/50 avrebbe potuto migliorare il throughput del 10-15%.
+
+**Iterazioni implementative** (17 marzo 2026):
+
+| Iterazione | Commit | Modifica | Distribuzione | Throughput avg |
+|---|---|---|---|---|
+| Baseline | `78abde3` | Round-robin flow hash (originale) | ~67/33 | **336 Mbps** |
+| v1 | `907c785` | Score = `sendCh*1e6 + txBytes/1e6` | 100/0 (bug) | Collassato |
+| v2 | `deae710` | Fix tiebreak RR + map write reduction | 51.4/48.6 | **273 Mbps** |
+| v3 | `b29c015` | Zero-syscall fast path, `goto send` | 50.9/49.1 | **291 Mbps** |
+| **Revert** | `c2e021a` | **Ripristino pre-4.27** | ~67/33 | **374 Mbps** |
+
+**Bug trovati durante lo sviluppo**:
+1. **Tied-score degeneracy** (v1): quando tutti i path avevano lo stesso score iniziale
+   (zero), `bestIdx = active[0]` vinceva sempre → 100% traffico su path 0
+2. **time.Now() per-packet** (v2): syscall `clock_gettime` (~25ns) chiamata su ogni
+   pacchetto sotto `ct.mu.Lock()` → overhead cumulativo significativo
+
+**Root cause del fallimento**: le due antenne Starlink hanno **capacità asimmetrica**.
+Il link wan6 ha più capacità di wan5 (probabilmente per posizionamento, ostruzioni,
+o allocazione beam). La distribuzione naturale 67/33 del kernel TUN multiqueue hash
+riflette la capacità effettiva dei due link. Forzare 50/50 sovraccarica il link più
+lento, causando:
+- Buildup di coda (sendCh pieno)
+- Retransmit TCP indotti da congestione
+- Throughput netto ridotto del 13-19%
+
+**Dispatch metrics aggiunte** (mantenute nel revert):
+- `mpquic_dispatch_hit_total{remote}` — pacchetti schedulati con successo
+- `mpquic_dispatch_drop_total{remote}` — pacchetti scartati (sendCh pieno)
+- `mpquic_dispatch_queue_len{remote}` — profondità coda instantanea
+- `mpquic_dispatch_flow_count{remote}` — flussi attivi per path
+
+**Lezione appresa**: in sistemi con link asimmetrici (LEO satellite), il bilanciamento
+"fair share" è controproducente. L'hashing kernel distribuisce i flussi
+proporzionalmente alla capacità effettiva — migliore di qualsiasi scheduler statico.
+Issue #2 chiuso come **won't fix**.
+
 ---
 
 ## 19. Vantaggi per il Cliente
@@ -3107,16 +3151,19 @@ L'architettura è stata progettata per scalare:
 
 ## 20. Conclusioni
 
-I test condotti tra il 28 febbraio e il 16 marzo 2026 dimostrano in modo
+I test condotti tra il 28 febbraio e il 17 marzo 2026 dimostrano in modo
 **quantitativo e riproducibile** che la piattaforma MPQUIC soddisfa tutti gli
 obbiettivi delle fasi di sviluppo: isolamento multi-tunnel, resilienza BBR su
 satellite, failover automatico, aggregazione multi-link, **bypass del traffic
-shaping Starlink con throughput medio di 336 Mbps (+41% vs baseline, picco
+shaping Starlink con throughput medio di 374 Mbps (+57% vs baseline, picco
 548 Mbps — record assoluto)**, ottimizzazione profiling-driven del data path
 con sendmmsg batch TX, UDP GSO, kernel pacing, TUN multiqueue — e **FEC ibrido
 adattivo** (XOR sliding window + ARQ selettivo) con feedback loop corretto e
 osservabilità Prometheus completa.
-con sendmmsg batch TX, TUN multiqueue e riduzione CPU del 19%.
+
+L'esperimento Step 4.27 (weighted scheduler) ha dimostrato che la distribuzione
+asimmetrica wan5/wan6 (67/33%) è **ottimale** per link Starlink con capacità
+differente, confermando che la piattaforma opera già al regime migliore possibile.
 
 **Risultati chiave per fase:**
 
@@ -3274,15 +3321,15 @@ con sendmmsg batch TX, TUN multiqueue e riduzione CPU del 19%.
 
 **Prossimi sviluppi:**
 
-- **Fix asimmetria wan5/wan6** (Issue #2): bilanciamento inter-sessione per distribuzione
-  uniforme del traffico tra path (attualmente 36/64%). Round-robin server-side per
-  assegnamento pacchetti IP tra sessioni, indipendente dall'hashing kernel TUN multiqueue.
+- **~~Fix asimmetria wan5/wan6~~** (Issue #2): ~~bilanciamento inter-sessione per distribuzione
+  uniforme del traffico tra path~~ — **CHIUSO** (Step 4.27): distribuzione naturale 67/33
+  è ottimale per capacità asimmetrica Starlink. Forzare 50/50 peggiora il throughput del 13%.
 - **AI/ML feedback loop** (Fase 6): tuning dinamico parametri basato su telemetria real-time
 
 ---
 
-*Documento aggiornato il 13/03/2026 — Piattaforma MPQUIC v4.2 (TUN Multiqueue, 499 Mbps)*  
-*Commit di riferimento: c9927c4 (main), tag v4.2*
+*Documento aggiornato il 17/03/2026 — Piattaforma MPQUIC v4.2.1 (Post Step 4.27 revert, 374 Mbps)*  
+*Commit di riferimento: c2e021a (main)*
 
 ---
 

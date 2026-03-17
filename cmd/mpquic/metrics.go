@@ -176,7 +176,6 @@ type DispatchPathStats struct {
 	RemoteAddr   string `json:"remote_addr"`
 	DispatchHit  uint64 `json:"dispatch_hit"`
 	DispatchDrop uint64 `json:"dispatch_drop"`
-	TxBytes      uint64 `json:"tx_bytes"`
 	SendQueueLen int    `json:"send_queue_len"`
 	FlowCount    int    `json:"flow_count"` // number of flows assigned to this path
 }
@@ -280,7 +279,6 @@ func snapshotDispatchStats(ss *stripeServer) []DispatchPathStats {
 		remote   string
 		hit      uint64
 		drop     uint64
-		tx       uint64
 		qLen     int
 		flows    int
 	}
@@ -316,7 +314,6 @@ func snapshotDispatchStats(ss *stripeServer) []DispatchPathStats {
 			RemoteAddr:   a.remote,
 			DispatchHit:  a.hit,
 			DispatchDrop: a.drop,
-			TxBytes:      a.tx,
 			SendQueueLen: a.qLen,
 			FlowCount:    a.flows,
 		})
@@ -503,12 +500,6 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_dispatch_drop_total counter\n")
 		for _, d := range gs.Dispatch {
 			fmt.Fprintf(w, "mpquic_dispatch_drop_total{remote=\"%s\"} %d\n", d.RemoteAddr, d.DispatchDrop)
-		}
-
-		fmt.Fprintf(w, "\n# HELP mpquic_dispatch_tx_bytes Total bytes queued via dispatch scheduler.\n")
-		fmt.Fprintf(w, "# TYPE mpquic_dispatch_tx_bytes counter\n")
-		for _, d := range gs.Dispatch {
-			fmt.Fprintf(w, "mpquic_dispatch_tx_bytes{remote=\"%s\"} %d\n", d.RemoteAddr, d.TxBytes)
 		}
 
 		fmt.Fprintf(w, "\n# HELP mpquic_dispatch_queue_len Current sendCh queue depth.\n")
