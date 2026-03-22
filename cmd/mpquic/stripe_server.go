@@ -76,6 +76,8 @@ type stripeSession struct {
 	rxLossPrevDirectCnt  uint64
 	rxLossPrevFECRecov   uint64
 	rxLossPrevFECGroups  uint64
+	rxLossPrevXorRecov   uint64
+	rxLossPrevXorUnrecov uint64
 
 	// TX (server → client): FEC encode + stripe
 	txSeq    uint32 // atomic
@@ -950,6 +952,8 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 		if sess.arqRx != nil {
 			go ss.startArqNackLoop(context.Background(), sess)
 		}
+
+		go ss.dynamicPacingLoop(context.Background(), sess)
 	} else {
 		// Session exists — detect client reconnect (address change or pipe
 		// count change) and reset pipe state so stale NAT addresses are purged.
@@ -1350,6 +1354,24 @@ func (ss *stripeServer) computeSessionRxLoss(sess *stripeSession) uint8 {
 		return uint8(rate)
 	}
 
+	// XOR FEC Anti-Waste (Step 4.28): 
+	// If burst loss prevents XOR from recovering anything, suspend it.
+	if sess.fecType == "xor" && sess.xorRx != nil {
+		xorRecov := atomic.LoadUint64(&sess.xorRx.recovered)
+		xorUnrecov := atomic.LoadUint64(&sess.xorRx.unrecoverable)
+		dXorRecov := xorRecov - sess.rxLossPrevXorRecov
+		dXorUnrecov := xorUnrecov - sess.rxLossPrevXorUnrecov
+		
+		sess.rxLossPrevXorRecov = xorRecov
+		sess.rxLossPrevXorUnrecov = xorUnrecov
+
+		// If we had multi-loss windows but NO successful recoveries, XOR is failing.
+		if dXorUnrecov > 5 && dXorRecov == 0 {
+			// Return a sentinel value so the peer suspends XOR.
+			return 255
+		}
+	}
+
 	// M=0 fallback: sequence-gap based loss detection.
 	seqHigh := atomic.LoadUint64(&sess.rxSeqHighest)
 	directCnt := atomic.LoadUint64(&sess.rxDirectCount)
@@ -1381,6 +1403,17 @@ func (ss *stripeServer) updateSessionAdaptiveM(sess *stripeSession) {
 
 	peerLoss := atomic.LoadUint32(&sess.peerLossRate)
 	lastLoss := time.Unix(0, atomic.LoadInt64(&sess.lastPeerLoss))
+
+	// Step 4.28 Anti-waste sentinel: Client says "your XOR is useless"
+	if peerLoss == 255 {
+		if sess.xorTx != nil && atomic.LoadInt32(&sess.xorActive) == 1 {
+			atomic.StoreInt32(&sess.xorActive, 0)
+			ss.logger.Infof("adaptive XOR FEC: SUSPENDED session=%08x (anti-waste: client reports 0 recoveries)", sess.sessionID)
+		}
+		// Reset peerLossRate to 0 locally so we don't repeatedly trigger or get stuck
+		atomic.StoreUint32(&sess.peerLossRate, 0)
+		return
+	}
 
 	// ── RS adaptive (parityM > 0) ──
 	if sess.parityM > 0 {
@@ -1728,3 +1761,28 @@ func pathSessionID(tunIP net.IP, pathName string) uint32 {
 
 // Ensure stripeClientConn implements io.Closer for clean shutdown.
 var _ io.Closer = (*stripeClientConn)(nil)
+
+// dynamicPacingLoop adjusts session pacing speed based on reported peer loss.
+func (ss *stripeServer) dynamicPacingLoop(ctx context.Context, sess *stripeSession) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	// Initial pacing rate.
+	baseNs := int64(1000000000 / ss.pacingRate)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			targetNs := baseNs
+			// Read peer loss from keepalives.
+			loss := atomic.LoadUint32(&sess.peerLossRate)
+			if loss > 0 && loss < 255 {
+				// E.g., at 10% loss (25), pacing slows by 25% to relieve congestion.
+				targetNs += targetNs * int64(loss) / 100
+			}
+			atomic.StoreInt64(&sess.txtimeGapNs, targetNs)
+		}
+	}
+}

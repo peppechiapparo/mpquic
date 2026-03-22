@@ -75,6 +75,8 @@ type stripeClientConn struct {
 	rxLossPrevDirectCnt  uint64
 	rxLossPrevFECRecov   uint64
 	rxLossPrevFECGroups  uint64
+	rxLossPrevXorRecov   uint64
+	rxLossPrevXorUnrecov uint64
 
 	// GSO TX batch (UDP Generic Segmentation Offload).
 	// Per-pipe accumulation: encrypted wire packets are buffered and flushed
@@ -409,6 +411,11 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	// Start ARQ NACK generation loop if enabled
 	if scc.arqRx != nil {
 		go scc.arqNackLoop(ctx)
+	}
+
+	// Start dynamic pacing adaptation (Step 4.29)
+	if scc.txtimeEnabled && cfg.StripePacingRate > 0 {
+		go scc.dynamicPacingLoop(ctx, cfg.StripePacingRate)
 	}
 
 	// Flush timer for partial FEC groups
@@ -1246,6 +1253,24 @@ func (scc *stripeClientConn) computeRxLoss() uint8 {
 		return uint8(rate)
 	}
 
+	// XOR FEC Anti-Waste (Step 4.28): 
+	// If burst loss prevents XOR from recovering anything, suspend it.
+	if scc.fecType == "xor" && scc.xorRx != nil {
+		xorRecov := atomic.LoadUint64(&scc.xorRx.recovered)
+		xorUnrecov := atomic.LoadUint64(&scc.xorRx.unrecoverable)
+		dXorRecov := xorRecov - scc.rxLossPrevXorRecov
+		dXorUnrecov := xorUnrecov - scc.rxLossPrevXorUnrecov
+		
+		scc.rxLossPrevXorRecov = xorRecov
+		scc.rxLossPrevXorUnrecov = xorUnrecov
+
+		// If we had multi-loss windows but NO successful recoveries, XOR is failing.
+		if dXorUnrecov > 5 && dXorRecov == 0 {
+			// Return a sentinel value so the server suspends XOR.
+			return 255
+		}
+	}
+
 	// M=0 fallback: sequence-gap based loss detection.
 	// expected = delta in highest seq seen, received = delta in direct-delivered packets.
 	seqHigh := atomic.LoadUint64(&scc.rxSeqHighest)
@@ -1279,6 +1304,17 @@ func (scc *stripeClientConn) updateAdaptiveM() {
 
 	peerLoss := atomic.LoadUint32(&scc.peerLossRate)
 	lastLoss := time.Unix(0, atomic.LoadInt64(&scc.lastPeerLoss))
+
+	// Step 4.28 Anti-waste sentinel: Server says "your XOR is useless"
+	if peerLoss == 255 {
+		if scc.xorTx != nil && atomic.LoadInt32(&scc.xorActive) == 1 {
+			atomic.StoreInt32(&scc.xorActive, 0)
+			scc.logger.Infof("adaptive XOR FEC: SUSPENDED (anti-waste: server reports 0 recoveries)")
+		}
+		// Reset peerLossRate to 0 locally so we don't repeatedly trigger or get stuck
+		atomic.StoreUint32(&scc.peerLossRate, 0)
+		return
+	}
 
 	// ── RS adaptive (parityM > 0) ──
 	if scc.parityM > 0 {
@@ -1424,4 +1460,35 @@ func (scc *stripeClientConn) arqNackLoop(ctx context.Context) {
 			scc.logger.Debugf("stripe ARQ: NACK sent base=%d count=%d", baseSeq, count)
 		}
 	}
+}
+
+// dynamicPacingLoop dynamically adjusts the pacing rate (txtimeGapNs) based on
+// current throughput and RTT to avoid queue buildup when bandwidth drops.
+func (scc *stripeClientConn) dynamicPacingLoop(ctx context.Context, baseRate int) {
+ticker := time.NewTicker(200 * time.Millisecond)
+defer ticker.Stop()
+
+// Target base pacing converted to nanoseconds
+baseNs := int64(1000000000 / baseRate)
+
+for {
+select {
+case <-ctx.Done():
+return
+case <-ticker.C:
+// Minimal dynamic pacing: 
+// In Phase 4d we scale pacing off RTT jitter & loss.
+// Currently this is a base implementation avoiding panic.
+// TODO: Add real scaling based on srtt and ewma bandwidth
+targetNs := baseNs
+
+// Increase pacing gap slightly if loss is high
+loss := atomic.LoadUint32(&scc.peerLossRate)
+if loss > 0 && loss < 255 {
+targetNs += targetNs * int64(loss) / 100 // up to 2x slower
+}
+
+atomic.StoreInt64(&scc.txtimeGapNs, targetNs)
+}
+}
 }

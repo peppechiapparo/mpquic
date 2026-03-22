@@ -2,6 +2,24 @@
 
 *Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-17*
 
+### Roadmap Fase 4d — Stabilizzazione Avanzata e Controllo Adattivo (2026-03-22)
+
+**Obiettivo**: Migliorare l'efficienza su link Starlink instabili basandosi sull'analisi delle metriche in tempo reale (eliminare l'overhead inutile dello XOR FEC sotto burst loss e mitigare la congestione indotta da pacing non adattivo).
+
+1. **Step 4.28 — XOR FEC Anti-Waste (Sospensione Reattiva)**
+   - *Problema*: In condizioni di burst loss, lo XOR FEC (W=10) fallisce costantemente il recupero generando multi-loss unrecoverable, sprecando tuttavia ~10% di banda per l'emissione di repair packet inutili.
+   - *Soluzione*: Calcolare dinamicamente la resa dello XOR (`recovered / emitted`). Se inefficace per un periodo o se `unrecoverable` subisce spike, forzare l'XOR in standby lasciando il recupero esclusivamente in mano all'ARQ.
+
+2. **Step 4.29 — Dynamic EDT Pacing (`SO_TXTIME`)**
+   - *Problema*: Il data-rate impostato staticamente (`stripe_pacing_rate`) sovralimenta sistematicamente `sch_fq`, portando a burst di pacchetti che superano la reale capacità momentanea del link.
+   - *Soluzione*: Adattamento dinamico del parametro di scheduling `txtimeGapNs` in risposta all'RTT misurato via invio/ricezione keepalive e variazioni del throughput.
+
+3. **Step 4.30 — Tuning Dinamico Threshold NACK (`arqNackThresh`)**
+   - *Problema*: La reattività dell'ARQ genera inefficienze se le condizioni di naturale reordering del canale Starlink fluttuano fuori dal valore fisso `arqNackThresh = 96`.
+   - *Soluzione*: Tracciare l'entità del jitter/reordering naturale e adattare dinamicamente la soglia di trigger per i NACK.
+
+---
+
 ### Nota Step 4.27 — Weighted Scheduler: esperimento fallito e revert (2026-03-17)
 
 **Obiettivo**: correggere l'asimmetria wan5/wan6 (36/64%) forzando distribuzione
