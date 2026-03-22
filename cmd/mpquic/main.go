@@ -666,7 +666,8 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 		}
 	}
 	staleThreshold := newest.Add(-3 * time.Second)
-	active := make([]int, 0, len(grp.paths))
+	var activeArr [8]int // stack-allocated — avoids heap escape on hot path
+	active := activeArr[:0]
 	for i, pc := range grp.paths {
 		if pc.lastRecv.After(staleThreshold) {
 			active = append(active, i)

@@ -182,6 +182,39 @@ func stripeEncryptShard(sc *stripeCipher, hdr *stripeHdr, shard []byte) []byte {
 	return out
 }
 
+// stripeEncryptShardReuse is like stripeEncryptShard but reuses a caller-provided
+// output buffer when capacity is sufficient (zero-alloc hot path).
+// The returned slice shares backing memory with *buf. Caller must not retain
+// the result beyond the next call with the same buf (it will be overwritten).
+// Used on the client TX M=0 fast path where gsoAccumLocked/writePacedUDP
+// copy the wire packet before returning.
+func stripeEncryptShardReuse(sc *stripeCipher, hdr *stripeHdr, shard []byte, buf *[]byte) []byte {
+	if sc == nil {
+		pkt := make([]byte, stripeHdrLen+len(shard))
+		encodeStripeHdr(pkt, hdr)
+		copy(pkt[stripeHdrLen:], shard)
+		return pkt
+	}
+
+	seq := atomic.AddUint64(&sc.txNonce, 1) - 1
+
+	var nonce [12]byte
+	binary.BigEndian.PutUint64(nonce[4:], seq)
+
+	var aad [stripeHdrLen + stripeCryptoSeqLen]byte
+	encodeStripeHdr(aad[:stripeHdrLen], hdr)
+	binary.BigEndian.PutUint64(aad[stripeHdrLen:], seq)
+
+	outLen := stripeHdrLen + stripeCryptoSeqLen + len(shard) + sc.aead.Overhead()
+	if cap(*buf) < outLen {
+		*buf = make([]byte, outLen)
+	}
+	out := (*buf)[:stripeHdrLen+stripeCryptoSeqLen]
+	copy(out, aad[:])
+	out = sc.aead.Seal(out, nonce[:], shard, aad[:])
+	return out
+}
+
 // stripeDecryptPkt decrypts an AES-GCM encrypted stripe packet.
 // Returns the reconstructed cleartext [hdr][payload] on success.
 //

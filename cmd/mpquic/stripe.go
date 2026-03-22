@@ -39,6 +39,31 @@ import (
 
 // ─── Constants ────────────────────────────────────────────────────────────
 
+// stripePktPool provides reusable packet buffers for the server RX → TUN path.
+// Avoids per-packet allocation in the handleDataShard → rxCh → tunWriter pipeline.
+// Buffers are MTU-sized; resliced to actual packet length on Get.
+var stripePktPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, stripeMaxPayload)
+		return b
+	},
+}
+
+func getPktBuf(n int) []byte {
+	b := stripePktPool.Get().([]byte)
+	if cap(b) >= n {
+		return b[:n]
+	}
+	// Rare: oversized packet, allocate fresh.
+	return make([]byte, n)
+}
+
+func putPktBuf(b []byte) {
+	if cap(b) >= stripeMaxPayload {
+		stripePktPool.Put(b[:cap(b)])
+	}
+}
+
 const (
 	stripeMagic   uint16 = 0x5354 // "ST"
 	stripeVersion uint8  = 1
@@ -256,12 +281,14 @@ type stripeClientConn struct {
 	arqRx *arqRxTracker // RX gap detector + NACK generator
 
 	// TX state
-	txSeq    uint32 // atomic: next data sequence number
-	txPipe   uint32 // atomic: round-robin pipe selector
-	txGroup  [][]byte
-	txGrpSeq uint32
-	txMu     sync.Mutex
-	txTimer  *time.Timer
+	txSeq      uint32 // atomic: next data sequence number
+	txPipe     uint32 // atomic: round-robin pipe selector
+	txGroup    [][]byte
+	txGrpSeq   uint32
+	txMu       sync.Mutex
+	txTimer    *time.Timer
+	txShardBuf []byte // reusable M=0 shard buffer (under txMu, avoids alloc/pkt)
+	txEncBuf   []byte // reusable encrypt output buffer (under txMu, client only)
 
 	// RX state
 	rxCh     chan []byte // decoded IP packets delivered here
@@ -662,11 +689,19 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 	if effectiveM == 0 {
 		seq := atomic.AddUint32(&scc.txSeq, 1) - 1
 
-		shardData := make([]byte, 2+len(pkt))
-		binary.BigEndian.PutUint16(shardData[0:2], uint16(len(pkt)))
-		copy(shardData[2:], pkt)
+		// Reuse TX shard buffer (safe: encrypt copies, arqTx copies, xorTx XORs in-place).
+		need := 2 + len(pkt)
+		if cap(scc.txShardBuf) < need {
+			scc.txShardBuf = make([]byte, need)
+		} else {
+			scc.txShardBuf = scc.txShardBuf[:need]
+		}
+		binary.BigEndian.PutUint16(scc.txShardBuf[0:2], uint16(len(pkt)))
+		copy(scc.txShardBuf[2:], pkt)
+		shardData := scc.txShardBuf
 
-		wirePkt := stripeEncryptShard(scc.txCipher, &stripeHdr{
+		// Reuse encrypt output buffer (safe: gsoAccum copies, kernel copies).
+		wirePkt := stripeEncryptShardReuse(scc.txCipher, &stripeHdr{
 			Magic:      stripeMagic,
 			Version:    stripeVersion,
 			Type:       stripeDATA,
@@ -675,7 +710,7 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 			ShardIdx:   0,
 			GroupDataN: 1, // signals RX to deliver directly (< K)
 			DataLen:    uint16(len(pkt)),
-		}, shardData)
+		}, shardData, &scc.txEncBuf)
 
 		// ARQ: store plaintext in retransmit buffer before sending
 		if scc.arqTx != nil {
@@ -1772,6 +1807,7 @@ type stripeSession struct {
 	txActivePipes []*net.UDPAddr // cached non-nil pipes, rebuilt on REGISTER (under txMu)
 	txMu          sync.Mutex
 	txTimer       *time.Timer
+	txShardBuf    []byte // reusable M=0 shard buffer (under txMu, avoids alloc/pkt)
 
 	// TX batch (sendmmsg) — reduces per-packet syscall overhead by ~8×.
 	// All fields protected by txMu.
@@ -1834,9 +1870,18 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 
 		seq := atomic.AddUint32(&sess.txSeq, 1) - 1
 
-		shardData := make([]byte, 2+len(pkt))
-		binary.BigEndian.PutUint16(shardData[0:2], uint16(len(pkt)))
-		copy(shardData[2:], pkt)
+		// Reuse TX shard buffer (safe: encrypt copies, arqTx copies, xorTx XORs in-place).
+		// Note: encrypt output is NOT reused server-side because txBatchAddLocked
+		// stores a reference until flush (sendmmsg batch).
+		need := 2 + len(pkt)
+		if cap(sess.txShardBuf) < need {
+			sess.txShardBuf = make([]byte, need)
+		} else {
+			sess.txShardBuf = sess.txShardBuf[:need]
+		}
+		binary.BigEndian.PutUint16(sess.txShardBuf[0:2], uint16(len(pkt)))
+		copy(sess.txShardBuf[2:], pkt)
+		shardData := sess.txShardBuf
 
 		wirePkt := stripeEncryptShard(sess.txCipher, &stripeHdr{
 			Magic:      stripeMagic,
@@ -2706,6 +2751,7 @@ func (ss *stripeServer) tunWriter(sess *stripeSession) {
 	// touchPath is called only on the first packet of each batch.
 	for pkt := range sess.rxCh {
 		writePkt(pkt, true) // first packet: touchPath + learnRoute
+		putPktBuf(pkt)      // return pooled buffer after TUN write
 		// Non-blocking drain
 		drain := true
 		for drain {
@@ -2715,6 +2761,7 @@ func (ss *stripeServer) tunWriter(sess *stripeSession) {
 					return
 				}
 				writePkt(pkt2, false) // subsequent: learnRoute only
+				putPktBuf(pkt2)
 			default:
 				drain = false
 			}
@@ -2757,7 +2804,7 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 			}
 		}
 		if hdr.DataLen > 0 && len(payload) >= 2+int(hdr.DataLen) {
-			pkt := make([]byte, hdr.DataLen)
+			pkt := getPktBuf(int(hdr.DataLen))
 			copy(pkt, payload[2:2+hdr.DataLen])
 			atomic.AddUint64(&sess.rxDirectCount, 1)
 			atomic.AddUint64(&sess.rxPkts, 1)
@@ -2769,6 +2816,7 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 			select {
 			case sess.rxCh <- pkt:
 			default:
+				putPktBuf(pkt)
 			}
 		}
 		return
@@ -2905,14 +2953,14 @@ func (ss *stripeServer) deliverGroupToTUN(sess *stripeSession, grp *fecGroup) {
 		if dataLen == 0 || int(dataLen)+2 > len(grp.shards[i]) {
 			continue
 		}
-		pkt := make([]byte, dataLen)
+		pkt := getPktBuf(int(dataLen))
 		copy(pkt, grp.shards[i][2:2+dataLen])
 		atomic.AddUint64(&sess.rxPkts, 1)
 		atomic.AddUint64(&sess.rxBytes, uint64(dataLen))
 		select {
 		case sess.rxCh <- pkt:
 		default:
-			// Drop if buffer full
+			putPktBuf(pkt)
 		}
 	}
 }
