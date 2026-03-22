@@ -62,6 +62,7 @@ const (
 	stripeKEEPALIVE uint8 = 0x04
 	stripeNACK        uint8 = 0x05
 	stripeXOR_REPAIR  uint8 = 0x06
+	stripeRLC_REPAIR  uint8 = 0x07
 
 	// Header: magic(2) + ver(1) + type(1) + session(4) + groupSeq(4) + shardIdx(1) + groupDataN(1) + dataLen(2) = 16
 	stripeHdrLen = 16

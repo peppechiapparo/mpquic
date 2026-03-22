@@ -43,6 +43,9 @@ type stripeSession struct {
 	xorTx     *xorFECSender   // XOR TX accumulator (nil if fecType != "xor")
 	xorRx     *xorFECReceiver // XOR RX recovery buffer (nil if fecType != "xor")
 	xorActive int32           // atomic: 1=emit XOR repairs, 0=skip (adaptive gate)
+	rlcTx     *rlcFECSender   // RLC TX accumulator (nil if fecType != "rlc")
+	rlcRx     *rlcFECReceiver // RLC RX decoder (nil if fecType != "rlc")
+	rlcActive int32           // atomic: 1=emit RLC repairs, 0=skip (adaptive gate)
 
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
@@ -265,11 +268,15 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 		atomic.AddUint64(&sess.txPkts, 1)
 		atomic.AddUint64(&sess.txBytes, uint64(len(pkt)))
 
-		// XOR FEC: feed source to accumulator, emit repair when window completes.
-		// In adaptive mode, only emit repairs when xorActive=1 (peer loss > threshold).
+		// Sliding-window FEC: feed source to accumulator, emit repair when window completes.
 		if sess.xorTx != nil && atomic.LoadInt32(&sess.xorActive) == 1 {
 			if repair, firstSeq, ok := sess.xorTx.addSource(seq, shardData); ok {
 				sdc.sendXorRepairLocked(firstSeq, uint8(sess.xorTx.window), repair, activePipes)
+			}
+		}
+		if sess.rlcTx != nil && atomic.LoadInt32(&sess.rlcActive) == 1 {
+			if repair, firstSeq, count, ok := sess.rlcTx.addSource(seq, shardData); ok {
+				sdc.sendRLCRepairLocked(firstSeq, uint8(count), repair, activePipes)
 			}
 		}
 
@@ -450,6 +457,27 @@ func (sdc *stripeServerDC) sendXorRepairLocked(firstSeq uint32, window uint8, re
 	sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
 }
 
+// sendRLCRepairLocked encrypts and sends a sliding-window RLC repair packet.
+// Caller must hold sess.txMu.
+func (sdc *stripeServerDC) sendRLCRepairLocked(firstSeq uint32, window uint8, repairData []byte, activePipes []*net.UDPAddr) {
+	sess := sdc.session
+	wirePkt := stripeEncryptShard(sess.txCipher, &stripeHdr{
+		Magic:      stripeMagic,
+		Version:    stripeVersion,
+		Type:       stripeRLC_REPAIR,
+		Session:    sess.sessionID,
+		GroupSeq:   firstSeq,
+		ShardIdx:   0,
+		GroupDataN: window,
+		DataLen:    0,
+	}, repairData)
+	if sess.pacer != nil {
+		sess.pacer.pace(len(wirePkt))
+	}
+	pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
+	sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
+}
+
 func (sdc *stripeServerDC) resetFlushTimer() {
 	sess := sdc.session
 	if sess.txTimer != nil {
@@ -474,8 +502,8 @@ type stripeServer struct {
 	dataK   int
 	parityM int
 	fecMode    string // "always", "adaptive", "off"
-	fecType    string // "rs" (default), "xor"
-	fecWindow  int    // XOR window W (only used when fecType=xor)
+	fecType    string // "rs" (default), "xor", "rlc"
+	fecWindow  int    // sliding-window size W (used when fecType=xor|rlc)
 	pacingRate int    // Mbps per session (0 = disabled)
 	arqEnabled bool   // Hybrid ARQ enabled
 	txtimeEnabled bool // SO_TXTIME probed OK on listener socket
@@ -530,8 +558,8 @@ func newStripeServer(cfg *Config, tun *water.Interface, tunMultiQueue bool, ct *
 	}
 	if fecMode == "off" {
 		parityM = 0
-	} else if fecType == "xor" {
-		// XOR mode: RS not needed, force M=0 so data goes through fast path.
+	} else if fecType == "xor" || fecType == "rlc" {
+		// Sliding-window mode: RS not needed, force M=0 so data goes through fast path.
 		parityM = 0
 	}
 
@@ -586,6 +614,8 @@ func newStripeServer(cfg *Config, tun *water.Interface, tunMultiQueue bool, ct *
 	fecStr := fmt.Sprintf("FEC=%d+%d mode=%s type=%s", dataK, parityM, fecMode, fecType)
 	if fecType == "xor" {
 		fecStr = fmt.Sprintf("FEC=xor W=%d mode=%s", fecWindow, fecMode)
+	} else if fecType == "rlc" {
+		fecStr = fmt.Sprintf("FEC=rlc W=%d mode=%s", fecWindow, fecMode)
 	}
 	logger.Infof("stripe server listening on %s, %s pacing=%s arq=%s txtime=%s encrypted=AES-256-GCM", listenAddr, fecStr, pacingStr, arqStr, txtimeStr)
 	return ss, nil
@@ -782,6 +812,8 @@ dispatch:
 		ss.handleNack(hdr, payload, from)
 	case stripeXOR_REPAIR:
 		ss.handleXorRepairServer(hdr, payload, from)
+	case stripeRLC_REPAIR:
+		ss.handleRLCRepairServer(hdr, payload, from)
 	}
 }
 
@@ -801,9 +833,9 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 	sess, exists := ss.sessions[sessionID]
 	if !exists {
 		var enc reedsolomon.Encoder
-		// Create FEC encoder unless mode is "off" or fecType is "xor".
+		// Create FEC encoder unless mode is "off" or fecType is a sliding-window codec.
 		// In adaptive mode, encoder is needed when M dynamically switches from 0 to parityM.
-		if ss.fecMode != "off" && ss.fecType != "xor" && ss.parityM > 0 {
+		if ss.fecMode != "off" && ss.fecType != "xor" && ss.fecType != "rlc" && ss.parityM > 0 {
 			var err error
 			enc, err = reedsolomon.New(ss.dataK, ss.parityM)
 			if err != nil {
@@ -850,7 +882,7 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			createdAt:    time.Now(),
 			logger:       ss.logger,
 		}
-		// Initialize XOR FEC sender/receiver when fec_type=xor and not off.
+		// Initialize sliding-window FEC sender/receiver when fec_type=xor|rlc and not off.
 		if ss.fecType == "xor" && ss.fecMode != "off" {
 			sess.xorTx = newXorFECSender(ss.fecWindow)
 			sess.xorRx = newXorFECReceiver(ss.fecWindow)
@@ -859,6 +891,14 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 				atomic.StoreInt32(&sess.xorActive, 0)
 			} else {
 				atomic.StoreInt32(&sess.xorActive, 1)
+			}
+		} else if ss.fecType == "rlc" && ss.fecMode != "off" {
+			sess.rlcTx = newRLCFECSender(ss.fecWindow)
+			sess.rlcRx = newRLCFECReceiver(ss.fecWindow)
+			if ss.fecMode == "adaptive" {
+				atomic.StoreInt32(&sess.rlcActive, 0)
+			} else {
+				atomic.StoreInt32(&sess.rlcActive, 1)
 			}
 		}
 		// Set initial adaptive M
@@ -904,6 +944,11 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			if sess.xorTx != nil && atomic.LoadInt32(&sess.xorActive) == 1 && len(sess.txActivePipes) > 0 {
 				if repair, firstSeq, window, ok := sess.xorTx.flush(); ok {
 					sdc.sendXorRepairLocked(firstSeq, uint8(window), repair, sess.txActivePipes)
+				}
+			}
+			if sess.rlcTx != nil && atomic.LoadInt32(&sess.rlcActive) == 1 && len(sess.txActivePipes) > 0 {
+				if repair, firstSeq, window, ok := sess.rlcTx.flush(); ok {
+					sdc.sendRLCRepairLocked(firstSeq, uint8(window), repair, sess.txActivePipes)
 				}
 			}
 			sdc.txBatchFlushLocked() // flush any partial batch from FEC timer
@@ -1169,9 +1214,12 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 			atomic.AddUint64(&sess.rxDirectCount, 1)
 			atomic.AddUint64(&sess.rxPkts, 1)
 			atomic.AddUint64(&sess.rxBytes, uint64(hdr.DataLen))
-			// XOR FEC: store source shard for potential recovery.
+			// Sliding-window FEC: store source shard for potential recovery.
 			if sess.xorRx != nil {
 				sess.xorRx.storeShard(hdr.GroupSeq, payload)
+			}
+			if sess.rlcRx != nil {
+				sess.rlcRx.storeShard(hdr.GroupSeq, payload)
 			}
 			select {
 			case sess.rxCh <- pkt:
@@ -1252,6 +1300,41 @@ func (ss *stripeServer) handleXorRepairServer(hdr stripeHdr, payload []byte, fro
 	select {
 	case sess.rxCh <- pkt:
 	default:
+	}
+}
+
+// handleRLCRepairServer processes a sliding-window RLC repair packet from a client.
+func (ss *stripeServer) handleRLCRepairServer(hdr stripeHdr, payload []byte, from *net.UDPAddr) {
+	sess := ss.lookupSession(hdr.Session, from)
+	if sess == nil || sess.rlcRx == nil || len(payload) <= rlcSeedLen {
+		return
+	}
+	sess.lastActivity = time.Now()
+
+	window := int(hdr.GroupDataN)
+	if window <= 0 {
+		return
+	}
+	recovered := sess.rlcRx.addRepair(hdr.GroupSeq, window, payload)
+	for _, rp := range recovered {
+		atomic.AddUint64(&sess.rxFECRecov, 1)
+		atomic.AddUint64(&sess.rxPkts, 1)
+		atomic.AddUint64(&sess.rxBytes, uint64(len(rp.pkt)))
+		if sess.arqRx != nil {
+			if !sess.arqRx.markReceived(rp.seq) {
+				sess.arqRx.addDupFiltered(1)
+				continue
+			}
+			sess.arqRx.addRetxReceived(1)
+		}
+		atomic.AddUint64(&sess.rxDirectCount, 1)
+		pkt := getPktBuf(len(rp.pkt))
+		copy(pkt, rp.pkt)
+		select {
+		case sess.rxCh <- pkt:
+		default:
+			putPktBuf(pkt)
+		}
 	}
 }
 
@@ -1451,6 +1534,21 @@ func (ss *stripeServer) updateSessionAdaptiveM(sess *stripeSession) {
 			}
 		}
 	}
+
+	if sess.rlcTx != nil {
+		currentRLC := atomic.LoadInt32(&sess.rlcActive)
+		if peerLoss > uint32(adaptiveFECLossThreshold) {
+			if currentRLC == 0 {
+				atomic.StoreInt32(&sess.rlcActive, 1)
+				ss.logger.Infof("adaptive RLC FEC: ON session=%08x (client reports %d%% loss)", sess.sessionID, peerLoss)
+			}
+		} else if peerLoss == 0 && currentRLC == 1 {
+			if time.Since(lastLoss) > adaptiveFECCooldown {
+				atomic.StoreInt32(&sess.rlcActive, 0)
+				ss.logger.Infof("adaptive RLC FEC: OFF session=%08x (no client loss for %v)", sess.sessionID, time.Since(lastLoss).Round(time.Second))
+			}
+		}
+	}
 }
 
 func (ss *stripeServer) handleKeepalive(hdr stripeHdr, payload []byte, from *net.UDPAddr) {
@@ -1510,6 +1608,7 @@ func (ss *stripeServer) handleKeepalive(hdr stripeHdr, payload []byte, from *net
 	rxLoss := ss.computeSessionRxLoss(sess)
 	ss.updateSessionAdaptiveM(sess)
 	ss.tuneSessionXorRuntime(sess)
+	ss.tuneSessionRLCRuntime(sess)
 
 	// Reply with server-measured RX loss (tells client about loss on data CLIENT sent)
 	reply := make([]byte, stripeHdrLen+1)
@@ -1560,6 +1659,45 @@ func (ss *stripeServer) tuneSessionXorRuntime(sess *stripeSession) {
 			}
 		}
 		sess.xorTx.setStride(stride)
+	}
+}
+
+func (ss *stripeServer) tuneSessionRLCRuntime(sess *stripeSession) {
+	if sess.rlcTx == nil && sess.rlcRx == nil {
+		return
+	}
+
+	var maxOOO uint32
+	if sess.arqRx != nil {
+		_, maxOOO, _ = sess.arqRx.dynamicStats()
+	}
+	peerLoss := atomic.LoadUint32(&sess.peerLossRate)
+
+	if sess.rlcRx != nil {
+		window, _ := sess.rlcRx.stats()
+		desiredCap := rlcRxMinCapacity
+		if maxOOO > 0 {
+			desiredCap = int(maxOOO*2) + window*8
+		}
+		_ = sess.rlcRx.ensureCapacity(desiredCap)
+	}
+
+	if sess.rlcTx != nil {
+		window, _, _ := sess.rlcTx.stats()
+		stride := window / 2
+		if stride < 1 {
+			stride = 1
+		}
+		switch {
+		case peerLoss >= 10 || maxOOO >= uint32(window*32):
+			stride = 1
+		case peerLoss >= 5 || maxOOO >= uint32(window*16):
+			stride = window / 4
+			if stride < 1 {
+				stride = 1
+			}
+		}
+		sess.rlcTx.setStride(stride)
 	}
 }
 

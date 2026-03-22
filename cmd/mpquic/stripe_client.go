@@ -37,6 +37,9 @@ type stripeClientConn struct {
 	xorTx     *xorFECSender   // XOR TX accumulator (nil if fecType != "xor")
 	xorRx     *xorFECReceiver // XOR RX recovery buffer (nil if fecType != "xor")
 	xorActive int32           // atomic: 1=emit XOR repairs, 0=skip (adaptive gate)
+	rlcTx     *rlcFECSender   // RLC TX accumulator (nil if fecType != "rlc")
+	rlcRx     *rlcFECReceiver // RLC RX decoder (nil if fecType != "rlc")
+	rlcActive int32           // atomic: 1=emit RLC repairs, 0=skip (adaptive gate)
 
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
@@ -229,14 +232,14 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 
 	// In "off" mode, force M=0 and skip encoder creation.
 	// In "adaptive" mode, create encoder but start with adaptiveM=0.
-	// When fecType="xor", RS encoder is still created (kept as fallback)
-	// but the M=0 fast path is used for data with XOR repair alongside.
+	// When fecType is a sliding-window codec (xor / rlc), RS encoder is not used
+	// and the M=0 fast path carries source data while repair packets are emitted separately.
 	var enc reedsolomon.Encoder
 	if fecMode == "off" {
 		parityM = 0
-	} else if fecType == "xor" {
-		// XOR mode: RS encoder not needed, force M=0 so data goes through fast path.
-		// XOR repair packets are generated separately.
+	} else if fecType == "xor" || fecType == "rlc" {
+		// Sliding-window FEC mode: RS encoder not needed, force M=0 so data goes through fast path.
+		// Repair packets are generated separately.
 		parityM = 0
 	} else if parityM > 0 {
 		enc, err = reedsolomon.New(dataK, parityM)
@@ -283,7 +286,7 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
 	scc.pacer = newStripePacer(cfg.StripePacingRate)
 
-	// XOR FEC: create sender/receiver when fec_type=xor and not off
+	// Sliding-window FEC: create sender/receiver when fec_type=xor|rlc and not off
 	if fecType == "xor" && fecMode != "off" {
 		scc.xorTx = newXorFECSender(fecWindow)
 		scc.xorRx = newXorFECReceiver(fecWindow)
@@ -293,6 +296,14 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 			atomic.StoreInt32(&scc.xorActive, 0)
 		} else {
 			atomic.StoreInt32(&scc.xorActive, 1)
+		}
+	} else if fecType == "rlc" && fecMode != "off" {
+		scc.rlcTx = newRLCFECSender(fecWindow)
+		scc.rlcRx = newRLCFECReceiver(fecWindow)
+		if fecMode == "adaptive" {
+			atomic.StoreInt32(&scc.rlcActive, 0)
+		} else {
+			atomic.StoreInt32(&scc.rlcActive, 1)
 		}
 	}
 
@@ -442,6 +453,8 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	fecStr := fmt.Sprintf("FEC=%d+%d mode=%s type=%s", dataK, parityM, fecMode, fecType)
 	if fecType == "xor" && scc.xorTx != nil {
 		fecStr = fmt.Sprintf("FEC=xor W=%d mode=%s", scc.xorTx.window, fecMode)
+	} else if fecType == "rlc" && scc.rlcTx != nil {
+		fecStr = fmt.Sprintf("FEC=rlc W=%d mode=%s", scc.rlcTx.window, fecMode)
 	}
 	logger.Infof("stripe client ready: session=%08x pipes=%d %s pacing=%s arq=%s gso=%s txtime=%s server=%s encrypted=AES-256-GCM",
 		sessionID, len(scc.pipes), fecStr, pacingStr, arqStr, gsoStr, txtimeStr, serverAddr)
@@ -503,11 +516,15 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 		atomic.AddUint64(&scc.txPkts, 1)
 		atomic.AddUint64(&scc.txBytes, uint64(len(pkt)))
 
-		// XOR FEC: feed source to accumulator, emit repair when window completes.
-		// In adaptive mode, only emit repairs when xorActive=1 (peer loss > threshold).
+		// Sliding-window FEC: feed source to accumulator, emit repair when window completes.
 		if scc.xorTx != nil && atomic.LoadInt32(&scc.xorActive) == 1 {
 			if repair, firstSeq, ok := scc.xorTx.addSource(seq, shardData); ok {
 				scc.sendXorRepairLocked(firstSeq, uint8(scc.xorTx.window), repair)
+			}
+		}
+		if scc.rlcTx != nil && atomic.LoadInt32(&scc.rlcActive) == 1 {
+			if repair, firstSeq, count, ok := scc.rlcTx.addSource(seq, shardData); ok {
+				scc.sendRLCRepairLocked(firstSeq, uint8(count), repair)
 			}
 		}
 
@@ -706,6 +723,31 @@ func (scc *stripeClientConn) sendXorRepairLocked(firstSeq uint32, window uint8, 
 	}
 }
 
+// sendRLCRepairLocked encrypts and sends a sliding-window RLC repair packet.
+// Caller must hold txMu.
+func (scc *stripeClientConn) sendRLCRepairLocked(firstSeq uint32, window uint8, repairData []byte) {
+	wirePkt := stripeEncryptShard(scc.txCipher, &stripeHdr{
+		Magic:      stripeMagic,
+		Version:    stripeVersion,
+		Type:       stripeRLC_REPAIR,
+		Session:    scc.sessionID,
+		GroupSeq:   firstSeq,
+		ShardIdx:   0,
+		GroupDataN: window,
+		DataLen:    0,
+	}, repairData)
+	if scc.pacer != nil {
+		scc.pacer.pace(len(wirePkt))
+	}
+	idx := atomic.AddUint32(&scc.txPipe, 1) - 1
+	pipeIdx := int(idx) % len(scc.pipes)
+	if scc.gsoEnabled && atomic.LoadUint32(&scc.gsoDisabled) == 0 {
+		scc.gsoAccumLocked(pipeIdx, wirePkt)
+	} else {
+		scc.writePacedUDP(pipeIdx, wirePkt)
+	}
+}
+
 func (scc *stripeClientConn) flushTxGroup() {
 	// Don't flush if connection is closing/closed
 	select {
@@ -722,6 +764,11 @@ func (scc *stripeClientConn) flushTxGroup() {
 	if scc.xorTx != nil && atomic.LoadInt32(&scc.xorActive) == 1 {
 		if repair, firstSeq, window, ok := scc.xorTx.flush(); ok {
 			scc.sendXorRepairLocked(firstSeq, uint8(window), repair)
+		}
+	}
+	if scc.rlcTx != nil && atomic.LoadInt32(&scc.rlcActive) == 1 {
+		if repair, firstSeq, window, ok := scc.rlcTx.flush(); ok {
+			scc.sendRLCRepairLocked(firstSeq, uint8(window), repair)
 		}
 	}
 	// Flush any GSO-accumulated packets from the FEC group above.
@@ -958,6 +1005,8 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 				scc.handleNack(hdr, payload)
 			case stripeXOR_REPAIR:
 				scc.handleXorRepair(hdr, payload)
+			case stripeRLC_REPAIR:
+				scc.handleRLCRepair(hdr, payload)
 			}
 		}
 	}
@@ -995,9 +1044,12 @@ func (scc *stripeClientConn) handleRxShard(hdr stripeHdr, payload []byte, isPari
 			}
 		}
 		scc.deliverDataDirect(hdr, payload)
-		// XOR FEC: store source shard for potential recovery.
+		// Sliding-window FEC: store source shard for potential recovery.
 		if scc.xorRx != nil {
 			scc.xorRx.storeShard(hdr.GroupSeq, payload)
+		}
+		if scc.rlcRx != nil {
+			scc.rlcRx.storeShard(hdr.GroupSeq, payload)
 		}
 		return
 	}
@@ -1006,9 +1058,12 @@ func (scc *stripeClientConn) handleRxShard(hdr stripeHdr, payload []byte, isPari
 		// No FEC configured — deliver data directly
 		if !isParity {
 			scc.deliverDataDirect(hdr, payload)
-			// XOR FEC: store source shard for potential recovery.
+			// Sliding-window FEC: store source shard for potential recovery.
 			if scc.xorRx != nil {
 				scc.xorRx.storeShard(hdr.GroupSeq, payload)
+			}
+			if scc.rlcRx != nil {
+				scc.rlcRx.storeShard(hdr.GroupSeq, payload)
 			}
 		}
 		return
@@ -1156,6 +1211,35 @@ func (scc *stripeClientConn) handleXorRepair(hdr stripeHdr, payload []byte) {
 	}
 }
 
+// handleRLCRepair processes a received sliding-window RLC repair packet.
+func (scc *stripeClientConn) handleRLCRepair(hdr stripeHdr, payload []byte) {
+	if scc.rlcRx == nil || len(payload) <= rlcSeedLen {
+		return
+	}
+	window := int(hdr.GroupDataN)
+	if window <= 0 {
+		return
+	}
+	recovered := scc.rlcRx.addRepair(hdr.GroupSeq, window, payload)
+	for _, rp := range recovered {
+		atomic.AddUint64(&scc.fecRecov, 1)
+		if scc.arqRx != nil {
+			if !scc.arqRx.markReceived(rp.seq) {
+				scc.arqRx.addDupFiltered(1)
+				continue
+			}
+			scc.arqRx.addRetxReceived(1)
+		}
+		atomic.AddUint64(&scc.rxDirectCount, 1)
+		select {
+		case scc.rxCh <- rp.pkt:
+		case <-scc.closeCh:
+			return
+		default:
+		}
+	}
+}
+
 // ─── Client keepalive ─────────────────────────────────────────────────────
 
 func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
@@ -1186,6 +1270,7 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 			// ── Update our TX M based on peer's loss report ──
 			scc.updateAdaptiveM()
 			scc.tuneXorRuntime()
+			scc.tuneRLCRuntime()
 
 			// ── Periodic re-register (every 30s) for self-healing ──
 			// If the server lost pipe addresses (re-key race, GC, etc.),
@@ -1351,6 +1436,21 @@ func (scc *stripeClientConn) updateAdaptiveM() {
 			}
 		}
 	}
+
+	if scc.rlcTx != nil {
+		currentRLC := atomic.LoadInt32(&scc.rlcActive)
+		if peerLoss > uint32(adaptiveFECLossThreshold) {
+			if currentRLC == 0 {
+				atomic.StoreInt32(&scc.rlcActive, 1)
+				scc.logger.Infof("adaptive RLC FEC: ON (peer reports %d%% loss)", peerLoss)
+			}
+		} else if peerLoss == 0 && currentRLC == 1 {
+			if time.Since(lastLoss) > adaptiveFECCooldown {
+				atomic.StoreInt32(&scc.rlcActive, 0)
+				scc.logger.Infof("adaptive RLC FEC: OFF (no peer loss for %v)", time.Since(lastLoss).Round(time.Second))
+			}
+		}
+	}
 }
 
 func (scc *stripeClientConn) tuneXorRuntime() {
@@ -1389,6 +1489,45 @@ func (scc *stripeClientConn) tuneXorRuntime() {
 			}
 		}
 		scc.xorTx.setStride(stride)
+	}
+}
+
+func (scc *stripeClientConn) tuneRLCRuntime() {
+	if scc.rlcTx == nil && scc.rlcRx == nil {
+		return
+	}
+
+	var maxOOO uint32
+	if scc.arqRx != nil {
+		_, maxOOO, _ = scc.arqRx.dynamicStats()
+	}
+	peerLoss := atomic.LoadUint32(&scc.peerLossRate)
+
+	if scc.rlcRx != nil {
+		window, _ := scc.rlcRx.stats()
+		desiredCap := rlcRxMinCapacity
+		if maxOOO > 0 {
+			desiredCap = int(maxOOO*2) + window*8
+		}
+		_ = scc.rlcRx.ensureCapacity(desiredCap)
+	}
+
+	if scc.rlcTx != nil {
+		window, _, _ := scc.rlcTx.stats()
+		stride := window / 2
+		if stride < 1 {
+			stride = 1
+		}
+		switch {
+		case peerLoss >= 10 || maxOOO >= uint32(window*32):
+			stride = 1
+		case peerLoss >= 5 || maxOOO >= uint32(window*16):
+			stride = window / 4
+			if stride < 1 {
+				stride = 1
+			}
+		}
+		scc.rlcTx.setStride(stride)
 	}
 }
 

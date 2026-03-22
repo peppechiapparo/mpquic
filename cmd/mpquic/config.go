@@ -46,8 +46,8 @@ type Config struct {
 	StripePacingRate      int                   `yaml:"stripe_pacing_rate"` // Mbps per session (0 = disabled)
 	StripeARQ             bool                  `yaml:"stripe_arq"`         // Hybrid ARQ with NACK retransmission
 	StripeDisableGSO      bool                  `yaml:"stripe_disable_gso"` // Disable UDP GSO (for A/B testing)
-	StripeFECType         string                `yaml:"stripe_fec_type"`    // "rs" (default), "xor"
-	StripeFECWindow       int                   `yaml:"stripe_fec_window"`  // XOR window W (default 10, only used when fec_type=xor)
+	StripeFECType         string                `yaml:"stripe_fec_type"`    // "rs" (default), "xor" (legacy), "rlc"
+	StripeFECWindow       int                   `yaml:"stripe_fec_window"`  // Sliding-window size W (default 10, used by xor/rlc)
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
 	MetricsListen         string                `yaml:"metrics_listen"` // e.g. "10.200.17.254:9090" — bind to tunnel IP only
 }

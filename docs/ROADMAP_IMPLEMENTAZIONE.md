@@ -2,6 +2,35 @@
 
 *Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-17*
 
+### Roadmap Fase 4f — Sostituzione XOR con Sliding-Window RLC (2026-03-22)
+
+**Obiettivo**: archiviare l'esperimento XOR come non adatto al pattern reale di reorder/loss del progetto e sostituirlo con un codec sliding-window più robusto, mantenendo l'ARQ come rete di sicurezza.
+
+1. **Esito finale Step 4.32b — XOR runtime-adaptive non sufficiente** (Completato)
+  - *Campagna test reale*: 4 run `iperf3 -R -P 30 -t 20` eseguiti dal client verso `10.200.17.254`, con metriche raccolte sia lato client sia lato server.
+  - *Throughput ricevuto*: **328, 356, 300, 402 Mbps** — media **346.5 Mbps**.
+  - *Osservazioni metriche chiave*:
+    - `xor_stride` è sceso dinamicamente fino a **1**;
+    - `xor_rx_capacity` è cresciuto fino a **8192**;
+    - `arq_nack_thresh` è rimasto stabilmente a **512**;
+    - `arq_max_ooo` ha raggiunto valori dell'ordine di **2600–3900**;
+    - nonostante l'attivazione completa dei controlli adattivi, `xor_recovered = 0` e `xor_effectiveness_pct = 0` su tutti i run osservati.
+  - *Conclusione*: lo XOR sliding-window, anche dopo overlap, history growth e stride dinamico, resta strutturalmente troppo fragile rispetto al reorder naturale del data-plane reale. La recovery rimane di fatto ARQ-dominante.
+
+2. **Step 4.33 — Sliding-Window RLC iniziale** (In corso)
+  - *Problema*: serve un FEC capace di tollerare più perdite nella stessa finestra e reorder profondo, senza dipendere dalla singola-parità dello XOR.
+  - *Soluzione*: introdurre un codec **RLC over GF(256)** a finestra scorrevole con:
+    - repair packet codificati come combinazioni lineari casuali deterministiche dei source shard recenti;
+    - accumulo di più equazioni lato RX e risoluzione tramite eliminazione di Gauss su GF(256);
+    - integrazione nel fast path `M=0`, sia client che server, con pacing/ARQ invariati;
+    - tuning runtime di stride e capacità RX in funzione di `peer_loss_rate` e `arq_max_ooo`, replicando quanto già fatto per XOR ma su un codec più robusto.
+  - *Deliverable della prima iterazione*:
+    - nuovo packet type wire per repair RLC;
+    - `fec_type: rlc` in configurazione;
+    - sender/receiver sliding-window RLC con unit test di recovery multi-equazione;
+    - hook TX/RX client/server per emissione e decode dei repair.
+  - *Prossimo passo di validazione*: build, deploy e nuova campagna iperf3 remota con metriche lato client/server per verificare se la recovery smette di essere esclusivamente ARQ-driven.
+
 ### Roadmap Fase 4e — Osservabilità Runtime e Rifondazione XOR FEC (2026-03-22)
 
 **Obiettivo**: Rendere misurabili i meccanismi adattivi introdotti in Fase 4d e preparare una revisione strutturale dello XOR FEC, che nei test reali continua a emettere repair senza produrre recovery osservabile.

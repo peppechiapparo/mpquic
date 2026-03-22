@@ -127,6 +127,14 @@ type SessionStats struct {
 	XorWindow       int    `json:"xor_window,omitempty"`
 	XorStride       int    `json:"xor_stride,omitempty"`
 	XorRxCapacity   int    `json:"xor_rx_capacity,omitempty"`
+	RLCActive       int    `json:"rlc_active,omitempty"`
+	RLCEmitted      uint64 `json:"rlc_emitted,omitempty"`
+	RLCRecovered    uint64 `json:"rlc_recovered,omitempty"`
+	RLCDecodeFailures uint64 `json:"rlc_decode_failures,omitempty"`
+	RLCEffectivenessPct float64 `json:"rlc_effectiveness_pct,omitempty"`
+	RLCWindow       int    `json:"rlc_window,omitempty"`
+	RLCStride       int    `json:"rlc_stride,omitempty"`
+	RLCRxCapacity   int    `json:"rlc_rx_capacity,omitempty"`
 
 	ARQNackSent    uint64 `json:"arq_nack_sent"`
 	ARQRetxRecv    uint64 `json:"arq_retx_recv"`
@@ -168,6 +176,14 @@ type PathStats struct {
 	StripeXorWindow      int    `json:"stripe_xor_window,omitempty"`
 	StripeXorStride      int    `json:"stripe_xor_stride,omitempty"`
 	StripeXorRxCapacity  int    `json:"stripe_xor_rx_capacity,omitempty"`
+	StripeRLCActive      int    `json:"stripe_rlc_active,omitempty"`
+	StripeRLCEmitted     uint64 `json:"stripe_rlc_emitted,omitempty"`
+	StripeRLCRecovered   uint64 `json:"stripe_rlc_recovered,omitempty"`
+	StripeRLCDecodeFailures uint64 `json:"stripe_rlc_decode_failures,omitempty"`
+	StripeRLCEffectivenessPct float64 `json:"stripe_rlc_effectiveness_pct,omitempty"`
+	StripeRLCWindow      int    `json:"stripe_rlc_window,omitempty"`
+	StripeRLCStride      int    `json:"stripe_rlc_stride,omitempty"`
+	StripeRLCRxCapacity  int    `json:"stripe_rlc_rx_capacity,omitempty"`
 	StripeARQNackSent    uint64 `json:"stripe_arq_nack_sent,omitempty"`
 	StripeARQRetxRecv    uint64 `json:"stripe_arq_retx_recv,omitempty"`
 	StripeARQDupFiltered uint64 `json:"stripe_arq_dup_filtered,omitempty"`
@@ -228,6 +244,7 @@ func snapshotServerSessions(ss *stripeServer) []SessionStats {
 			FECType:   sess.fecType,
 			AdaptiveM: int(atomic.LoadInt32(&sess.adaptiveM)),
 			XorActive: int(atomic.LoadInt32(&sess.xorActive)),
+			RLCActive: int(atomic.LoadInt32(&sess.rlcActive)),
 			FECEncoded: atomic.LoadUint64(&sess.fecEncoded),
 			FECRecov:   atomic.LoadUint64(&sess.rxFECRecov),
 			TxtimeGapNs: atomic.LoadInt64(&sess.txtimeGapNs),
@@ -246,6 +263,18 @@ func snapshotServerSessions(ss *stripeServer) []SessionStats {
 		}
 		if s.XorEmitted > 0 {
 			s.XorEffectivenessPct = (float64(s.XorRecovered) * 100.0) / float64(s.XorEmitted)
+		}
+		if sess.rlcTx != nil {
+			s.RLCEmitted = atomic.LoadUint64(&sess.rlcTx.emitted)
+			s.RLCWindow, s.RLCStride, _ = sess.rlcTx.stats()
+		}
+		if sess.rlcRx != nil {
+			s.RLCRecovered = atomic.LoadUint64(&sess.rlcRx.recovered)
+			s.RLCDecodeFailures = atomic.LoadUint64(&sess.rlcRx.decodeFailures)
+			_, s.RLCRxCapacity = sess.rlcRx.stats()
+		}
+		if s.RLCEmitted > 0 {
+			s.RLCEffectivenessPct = (float64(s.RLCRecovered) * 100.0) / float64(s.RLCEmitted)
 		}
 		if sess.arqRx != nil {
 			s.ARQNackSent, s.ARQRetxRecv, s.ARQDupFiltered = sess.arqRx.stats()
@@ -279,6 +308,7 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 			ps.StripePeerLossRate = atomic.LoadUint32(&p.stripeConn.peerLossRate)
 			ps.StripeTxtimeGapNs = atomic.LoadInt64(&p.stripeConn.txtimeGapNs)
 			ps.StripeXorActive = int(atomic.LoadInt32(&p.stripeConn.xorActive))
+			ps.StripeRLCActive = int(atomic.LoadInt32(&p.stripeConn.rlcActive))
 			if p.stripeConn.xorTx != nil {
 				ps.StripeXorEmitted = atomic.LoadUint64(&p.stripeConn.xorTx.emitted)
 				ps.StripeXorWindow, ps.StripeXorStride, _ = p.stripeConn.xorTx.stats()
@@ -290,6 +320,18 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 			}
 			if ps.StripeXorEmitted > 0 {
 				ps.StripeXorEffectivenessPct = (float64(ps.StripeXorRecovered) * 100.0) / float64(ps.StripeXorEmitted)
+			}
+			if p.stripeConn.rlcTx != nil {
+				ps.StripeRLCEmitted = atomic.LoadUint64(&p.stripeConn.rlcTx.emitted)
+				ps.StripeRLCWindow, ps.StripeRLCStride, _ = p.stripeConn.rlcTx.stats()
+			}
+			if p.stripeConn.rlcRx != nil {
+				ps.StripeRLCRecovered = atomic.LoadUint64(&p.stripeConn.rlcRx.recovered)
+				ps.StripeRLCDecodeFailures = atomic.LoadUint64(&p.stripeConn.rlcRx.decodeFailures)
+				_, ps.StripeRLCRxCapacity = p.stripeConn.rlcRx.stats()
+			}
+			if ps.StripeRLCEmitted > 0 {
+				ps.StripeRLCEffectivenessPct = (float64(ps.StripeRLCRecovered) * 100.0) / float64(ps.StripeRLCEmitted)
 			}
 			if p.stripeConn.arqRx != nil {
 				ps.StripeARQNackSent, ps.StripeARQRetxRecv, ps.StripeARQDupFiltered = p.stripeConn.arqRx.stats()
@@ -478,6 +520,12 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "mpquic_session_xor_active{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.XorActive)
 		}
 
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rlc_active RLC FEC adaptive gate per session (1=ON, 0=OFF).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rlc_active gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rlc_active{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RLCActive)
+		}
+
 		fmt.Fprintf(w, "\n# HELP mpquic_session_txtime_gap_ns Current kernel pacing gap in nanoseconds per session.\n")
 		fmt.Fprintf(w, "# TYPE mpquic_session_txtime_gap_ns gauge\n")
 		for _, s := range gs.Sessions {
@@ -518,6 +566,48 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_session_xor_rx_capacity gauge\n")
 		for _, s := range gs.Sessions {
 			fmt.Fprintf(w, "mpquic_session_xor_rx_capacity{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.XorRxCapacity)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rlc_emitted RLC repair packets emitted per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rlc_emitted counter\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rlc_emitted{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RLCEmitted)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rlc_recovered Packets recovered via RLC per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rlc_recovered counter\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rlc_recovered{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RLCRecovered)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rlc_decode_failures RLC decode failures per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rlc_decode_failures counter\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rlc_decode_failures{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RLCDecodeFailures)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rlc_effectiveness_pct RLC recovery effectiveness (recovered/emitted*100).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rlc_effectiveness_pct gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rlc_effectiveness_pct{session=\"%s\",peer=\"%s\"} %.6f\n", s.SessionID, s.PeerIP, s.RLCEffectivenessPct)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rlc_window Current RLC protection window per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rlc_window gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rlc_window{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RLCWindow)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rlc_stride Current RLC repair stride per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rlc_stride gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rlc_stride{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RLCStride)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rlc_rx_capacity Current RLC receiver history capacity per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rlc_rx_capacity gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rlc_rx_capacity{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RLCRxCapacity)
 		}
 
 		fmt.Fprintf(w, "\n# HELP mpquic_session_arq_nack_sent ARQ NACKs sent per session.\n")
@@ -670,6 +760,12 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "mpquic_path_stripe_xor_active{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeXorActive)
 		}
 
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rlc_active RLC FEC adaptive gate per path (1=ON, 0=OFF).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rlc_active gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rlc_active{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRLCActive)
+		}
+
 		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_xor_emitted XOR FEC repair packets emitted per path.\n")
 		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_emitted counter\n")
 		for _, p := range gs.Paths {
@@ -710,6 +806,48 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_rx_capacity gauge\n")
 		for _, p := range gs.Paths {
 			fmt.Fprintf(w, "mpquic_path_stripe_xor_rx_capacity{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeXorRxCapacity)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rlc_emitted RLC repair packets emitted per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rlc_emitted counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rlc_emitted{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRLCEmitted)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rlc_recovered Packets recovered via RLC per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rlc_recovered counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rlc_recovered{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRLCRecovered)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rlc_decode_failures RLC decode failures per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rlc_decode_failures counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rlc_decode_failures{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRLCDecodeFailures)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rlc_effectiveness_pct RLC recovery effectiveness per client stripe path (recovered/emitted*100).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rlc_effectiveness_pct gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rlc_effectiveness_pct{path=\"%s\",bind=\"%s\"} %.6f\n", p.Name, p.BindIP, p.StripeRLCEffectivenessPct)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rlc_window Current RLC protection window per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rlc_window gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rlc_window{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRLCWindow)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rlc_stride Current RLC repair stride per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rlc_stride gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rlc_stride{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRLCStride)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rlc_rx_capacity Current RLC receiver history capacity per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rlc_rx_capacity gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rlc_rx_capacity{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRLCRxCapacity)
 		}
 
 		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_arq_nack_sent ARQ NACKs sent per client stripe path.\n")
