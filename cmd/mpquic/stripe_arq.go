@@ -32,7 +32,7 @@ const (
 	arqWinMask  = arqWinSize - 1
 	arqWinWords = arqWinSize / 64 // 128 uint64 words
 
-	arqNackThresh     uint32        = 96                   // wait this many newer seqs before NACKing a gap (96 reduces false NACKs on Starlink reorder)
+	// arqNackThresh is now dynamically computed in arqRxTracker (defaulting to 96)
 	arqNackInterval   time.Duration = 5 * time.Millisecond  // NACK check/send interval
 	arqNackCooldown   time.Duration = 30 * time.Millisecond // min time between NACKs (~1 Starlink RTT)
 	arqNackMaxBits                  = 64                   // max missing seqs per NACK packet
@@ -93,6 +93,10 @@ type arqRxTracker struct {
 	bitmap  [arqWinWords]uint64    // circular bitmap: bit set = received
 	started bool
 
+	// Dynamic NACK threshold (Step 4.30)
+	nackThresh uint32
+	maxOOO     uint32
+
 	// Stats (atomic, read outside lock)
 	nacksSent    uint64
 	retxReceived uint64
@@ -103,7 +107,10 @@ type arqRxTracker struct {
 }
 
 func newArqRxTracker() *arqRxTracker {
-	return &arqRxTracker{}
+	return &arqRxTracker{
+		nackThresh: 96,
+		maxOOO:     64, // roughly nackThresh - 32
+	}
 }
 
 func (t *arqRxTracker) bitWord(seq uint32) (wordIdx, bitPos uint32) {
@@ -156,6 +163,19 @@ func (t *arqRxTracker) markReceived(seq uint32) bool {
 		return false
 	}
 
+	// Step 4.30: Track Out-Of-Order distance to dynamically adjust NACK threshold
+	if int32(t.highest-seq) > 0 {
+		dist := t.highest - seq
+		if dist > t.maxOOO {
+			t.maxOOO = dist
+			newThresh := dist + 16 // Safety margin
+			if newThresh > 512 {   // Upper bound avoiding stalling forever
+				newThresh = 512
+			}
+			t.nackThresh = newThresh
+		}
+	}
+
 	t.setBit(seq)
 
 	if int32(seq-t.highest) > 0 {
@@ -195,7 +215,7 @@ func (t *arqRxTracker) advanceContiguousLocked() {
 }
 
 // getMissing scans for missing sequences and returns a NACK bitmap.
-// Only reports gaps that are at least arqNackThresh behind highest.
+// Only reports gaps that are at least t.nackThresh behind highest.
 // Returns count=0 if no qualifying gaps are found.
 func (t *arqRxTracker) getMissing() (baseSeq uint32, nackBitmap uint64, count int) {
 	t.mu.Lock()
@@ -205,11 +225,24 @@ func (t *arqRxTracker) getMissing() (baseSeq uint32, nackBitmap uint64, count in
 		return 0, 0, 0
 	}
 
+	// Decay maxOOO slowly: every 5ms interval reduces it by 1 (200/sec decay)
+	if t.maxOOO > 0 {
+		t.maxOOO--
+	}
+	// Recompute and clamp threshold
+	newThresh := t.maxOOO + 16
+	if newThresh < 32 {
+		newThresh = 32
+	} else if newThresh > 512 {
+		newThresh = 512
+	}
+	t.nackThresh = newThresh
+
 	// Only NACK gaps that are sufficiently old (threshold behind highest)
-	if int32(t.highest-t.base) < int32(arqNackThresh) {
+	if int32(t.highest-t.base) < int32(t.nackThresh) {
 		return 0, 0, 0
 	}
-	scanEnd := t.highest - arqNackThresh
+	scanEnd := t.highest - t.nackThresh
 
 	foundBase := false
 

@@ -14,9 +14,9 @@
    - *Problema*: Il data-rate impostato staticamente (`stripe_pacing_rate`) sovralimenta sistematicamente `sch_fq`, portando a burst di pacchetti che superano la reale capacità momentanea del link.
    - *Soluzione*: Adattamento dinamico del parametro di scheduling `txtimeGapNs` in risposta all'RTT misurato via invio/ricezione keepalive e variazioni del throughput.
 
-3. **Step 4.30 — Tuning Dinamico Threshold NACK (`arqNackThresh`)**
+3. **Step 4.30 — Tuning Dinamico Threshold NACK (`arqNackThresh`)** (Completato)
    - *Problema*: La reattività dell'ARQ genera inefficienze se le condizioni di naturale reordering del canale Starlink fluttuano fuori dal valore fisso `arqNackThresh = 96`.
-   - *Soluzione*: Tracciare l'entità del jitter/reordering naturale e adattare dinamicamente la soglia di trigger per i NACK.
+   - *Soluzione*: Tracciamento continuo del massimo Out-Of-Order arrival in `arqRxTracker` con decadimento lento. Adattamento dinamico di `nackThresh` (tra 32 e 512) per limitare invii di NACK spuri causati da percorsi lenti.
 
 ---
 
