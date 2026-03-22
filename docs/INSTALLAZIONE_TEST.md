@@ -360,81 +360,9 @@ ip -br a | grep '^mpq'
 sudo ss -unap | grep mpquic
 ```
 
-## 8) Troubleshooting rapido
-Log istanza:
-```bash
-journalctl -u mpquic@1.service -n 100 --no-pager
-```
+## 8) Troubleshooting
 
-Procedura iniziale consigliata (issue ricorrente interfaccia VM/OpenWRT):
-1. **non riavviare subito la VM**
-2. restart network stack lato client VM MPQUIC
-3. restart istanze `mpquic@*` + routing/watchdog
-4. rieseguire check/fix
-5. solo se ancora KO: reboot VM client (e in ultima istanza anche VPS)
-
-Esempio rapido lato client:
-```bash
-sudo systemctl restart networking || true
-sudo ifreload -a || true
-sudo systemctl restart mpquic@1.service mpquic@2.service mpquic@3.service mpquic@4.service mpquic@5.service mpquic@6.service
-sudo systemctl restart mpquic-routing.service
-sudo systemctl restart mpquic-watchdog.timer
-sudo /usr/local/sbin/mpquic-healthcheck.sh client fix
-sudo /usr/local/sbin/mpquic-lan-routing-check.sh fix all
-```
-
-Esempio rapido lato server:
-```bash
-sudo systemctl restart mpquic@1.service mpquic@2.service mpquic@3.service mpquic@4.service mpquic@5.service mpquic@6.service
-sudo /usr/local/sbin/mpquic-healthcheck.sh server fix
-```
-
-Check + auto-fix lato client:
-```bash
-sudo /usr/local/sbin/mpquic-healthcheck.sh client fix
-```
-
-Check + auto-fix lato server:
-```bash
-sudo /usr/local/sbin/mpquic-healthcheck.sh server fix
-```
-
-Diagnostica lunga (cattura eventi intermittenti/crash):
-
-Client:
-```bash
-sudo /usr/local/sbin/mpquic-long-diagnostics.sh client 21600 20
-```
-
-Server:
-```bash
-sudo /usr/local/sbin/mpquic-long-diagnostics.sh server 21600 20
-```
-
-Output:
-```bash
-ls -lh /var/log/mpquic-diag-*/
-```
-
-Post-mortem automatico (dopo crash/flap):
-```bash
-sudo /usr/local/sbin/mpquic-postmortem.sh \
-	/var/log/mpquic-diag-client-<timestamp> \
-	/var/log/mpquic-diag-server-<timestamp> \
-	/tmp/mpquic-postmortem.txt
-```
-
-Uso rapido (ultime cartelle disponibili):
-```bash
-sudo /usr/local/sbin/mpquic-postmortem.sh > /tmp/mpquic-postmortem-latest.txt
-```
-
-Post-mortem cross-host (client + server remoti, consigliato):
-```bash
-/usr/local/sbin/mpquic-postmortem-remote.sh \
-	mpquic vps-it-mpquic /tmp/mpquic-postmortem-remote.txt
-```
+Per troubleshooting completo (debug per sintomo, TLS, raccolta evidenze), vedere `docs/TUNNEL_OPERATIONS_DEBUG.md`.
 
 ## 9) Persistenza al reboot
 ```bash
@@ -445,46 +373,6 @@ Dopo reboot:
 for i in 1 2 3 4 5 6; do systemctl is-enabled mpquic@$i.service; systemctl is-active mpquic@$i.service; done
 ip -br a | grep '^mpq'
 ```
-
-## 10) Checklist roadmap (temporanea, da rimuovere a completamento)
-
-### 10.1 VPS (sessione dedicata)
-```bash
-ssh vps-it-mpquic
-sudo /usr/local/sbin/mpquic-update.sh
-sudo /usr/local/sbin/mpquic-healthcheck.sh server fix
-for i in 1 2 3 4 5 6; do systemctl is-active mpquic@$i.service; done
-ss -lunp | egrep '4500[1-6]'
-exit
-```
-
-### 10.2 Client (sessione dedicata)
-```bash
-ssh mpquic
-sudo /usr/local/sbin/mpquic-update.sh
-ip -4 -br a show dev enp7s3
-ip -4 -br a show dev enp7s4
-sudo systemctl restart mpquic@1.service mpquic@2.service mpquic@3.service mpquic@4.service mpquic@5.service mpquic@6.service
-sudo /usr/local/sbin/mpquic-healthcheck.sh client fix
-sudo /usr/local/sbin/mpquic-lan-routing-check.sh fix 1
-for i in 1 2 3 4 5 6; do systemctl is-active mpquic@$i.service; done
-ip -br a | egrep '^mpq[1-6]'
-ping -I mpq1 -c 3 10.200.1.2
-ping -I mpq2 -c 3 10.200.2.2
-sudo tcpdump -ni enp7s3 udp port 45001 -c 20
-exit
-```
-
-### 10.3 Fasi successive immediate (dopo LAN1 validata)
-```bash
-# estensione a LAN2..LAN6 (stessa logica Fase 3)
-sudo /usr/local/sbin/mpquic-lan-routing-check.sh check all
-
-# test resilienza modem unplug
-sudo /usr/local/sbin/mpquic-healthcheck.sh client check
-```
-
----
 
 ## 11) Riferimento completo attributi YAML
 
@@ -645,75 +533,6 @@ log_level: info
 tls_cert_file: /etc/mpquic/tls/server.crt
 tls_key_file: /etc/mpquic/tls/server.key
 ```
-
-### 11.11 ~~Esempio completo: client multi-tunnel per link (cr5/df5/bk5)~~ — DECOMMISSIONATO
-
-> **Nota**: Questo esempio usava la subnet 10.200.10.0/24 (Step 2.3) con server mt1.
-> È stato **decommissionato** il 15/03/2026. I tunnel WAN5 sono ora cr5/br5/df5
-> sulla subnet 10.200.15.0/24 via server mt5. Vedi sezione 23 per la configurazione attuale.
-
-<details><summary>Configurazione storica (non più attiva)</summary>
-
-Tre tunnel sullo stesso link WAN5, ciascuno per una classe di traffico:
-
-```yaml
-# /etc/mpquic/instances/cr5.yaml.tpl — VoIP, telemetria
-role: client
-bind_ip: if:enp7s7
-remote_addr: VPS_PUBLIC_IP
-remote_port: 45010
-tun_name: cr5
-tun_cidr: 10.200.10.1/24
-log_level: info
-tls_ca_file: /etc/mpquic/tls/ca.crt
-tls_server_name: mpquic-server
-tls_insecure_skip_verify: false
-```
-
-```yaml
-# /etc/mpquic/instances/df5.yaml.tpl — Web, HTTPS, API
-role: client
-bind_ip: if:enp7s7
-remote_addr: VPS_PUBLIC_IP
-remote_port: 45010
-tun_name: df5
-tun_cidr: 10.200.10.5/24
-log_level: info
-tls_ca_file: /etc/mpquic/tls/ca.crt
-tls_server_name: mpquic-server
-tls_insecure_skip_verify: false
-```
-
-```yaml
-# /etc/mpquic/instances/bk5.yaml.tpl — Backup, sync
-role: client
-bind_ip: if:enp7s7
-remote_addr: VPS_PUBLIC_IP
-remote_port: 45010
-tun_name: bk5
-tun_cidr: 10.200.10.9/24
-log_level: info
-tls_ca_file: /etc/mpquic/tls/ca.crt
-tls_server_name: mpquic-server
-tls_insecure_skip_verify: false
-```
-
-Corrispondente server (unica istanza multi-conn):
-
-```yaml
-# /etc/mpquic/instances/mt1.yaml.tpl (VPS)
-role: server
-bind_ip: 0.0.0.0
-remote_port: 45010
-multi_conn_enabled: true
-tun_name: mt1
-tun_cidr: 10.200.10.254/24
-log_level: info
-tls_cert_file: /etc/mpquic/tls/server.crt
-tls_key_file: /etc/mpquic/tls/server.key
-```
-
-</details>
 
 ### 11.12 Esempio completo: client multipath stripe dual Starlink (mp1)
 
@@ -1589,57 +1408,7 @@ curl http://10.200.14.1:9090/api/v1/stats
 
 ### 21.5 Metriche Prometheus esposte
 
-**Globali:**
-
-| Metrica | Tipo | Descrizione |
-|---------|------|-------------|
-| `mpquic_uptime_seconds` | gauge | Uptime del processo |
-| `mpquic_tx_bytes_total` | counter | Byte trasmessi totali |
-| `mpquic_rx_bytes_total` | counter | Byte ricevuti totali |
-| `mpquic_tx_packets_total` | counter | Pacchetti trasmessi totali |
-| `mpquic_rx_packets_total` | counter | Pacchetti ricevuti totali |
-
-**Per sessione (server, label: `session`, `peer`):**
-
-| Metrica | Tipo | Descrizione |
-|---------|------|-------------|
-| `mpquic_session_tx_bytes` | counter | Byte TX per sessione |
-| `mpquic_session_rx_bytes` | counter | Byte RX per sessione |
-| `mpquic_session_tx_packets` | counter | Pacchetti TX per sessione |
-| `mpquic_session_rx_packets` | counter | Pacchetti RX per sessione |
-| `mpquic_session_pipes` | gauge | Pipe attive per sessione |
-| `mpquic_session_adaptive_m` | gauge | Parità FEC corrente (M) |
-| `mpquic_session_fec_encoded` | counter | Gruppi FEC codificati (TX) |
-| `mpquic_session_fec_recovered` | counter | Gruppi FEC recuperati (RX) |
-| `mpquic_session_arq_nack_sent` | counter | NACK ARQ inviati |
-| `mpquic_session_arq_retx_recv` | counter | Ritrasmissioni ARQ ricevute |
-| `mpquic_session_arq_dup_filtered` | counter | Duplicati filtrati |
-| `mpquic_session_loss_rate_pct` | gauge | Loss rate riportata dal peer (0-100) |
-| `mpquic_session_uptime_seconds` | gauge | Uptime sessione |
-| `mpquic_session_decrypt_fail` | counter | Fallimenti decrittazione |
-
-**Per path (client, label: `path`, `bind`):**
-
-| Metrica | Tipo | Descrizione |
-|---------|------|-------------|
-| `mpquic_path_alive` | gauge | Path attivo (1) o down (0) |
-| `mpquic_path_tx_packets` | counter | Pacchetti TX per path |
-| `mpquic_path_rx_packets` | counter | Pacchetti RX per path |
-| `mpquic_path_stripe_tx_bytes` | counter | Byte stripe TX per path |
-| `mpquic_path_stripe_rx_bytes` | counter | Byte stripe RX per path |
-| `mpquic_path_stripe_fec_recovered` | counter | Recuperi FEC stripe per path |
-
-### 21.6 Note di sicurezza
-
-- Il server metriche è **separato** da pprof (che resta su `--pprof 127.0.0.1:6060`, solo per debug)
-- Il binding sull'IP tunnel (10.200.x.y) garantisce che **non** sia raggiungibile dall'esterno
-- Non è necessaria alcuna regola nftables aggiuntiva: il tunnel stesso è la protezione
-- Per ulteriore hardening, si può aggiungere una regola nftables:
-  ```bash
-  nft add rule inet filter input ip saddr != 10.200.0.0/16 tcp dport 9090 drop
-  ```
-
----
+Per la lista completa delle metriche Prometheus (globali, per sessione, per path), vedere `docs/METRICS.md`.
 
 ## 22) Stack di monitoraggio: Prometheus + Grafana (LXC Proxmox)
 

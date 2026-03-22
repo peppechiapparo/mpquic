@@ -339,3 +339,42 @@ ip -br a | egrep '^mpq[1-6]|^eth0'
 ip route show | egrep '172\.16\.[1-6]\.0/30|10\.200\.'
 nft list ruleset | sed -n '1,220p'
 ```
+
+---
+
+## Appendice A – Installazione watchdog
+
+### A.1 Client — tunnel watchdog + hook eventi interfaccia
+
+```bash
+sudo install -m 0755 scripts/mpquic-tunnel-watchdog.sh /usr/local/lib/mpquic/mpquic-tunnel-watchdog.sh
+sudo install -m 0755 scripts/mpquic-if-event.sh /usr/local/lib/mpquic/mpquic-if-event.sh
+sudo install -m 0644 deploy/systemd/mpquic-watchdog.service /etc/systemd/system/mpquic-watchdog.service
+sudo install -m 0644 deploy/systemd/mpquic-watchdog.timer /etc/systemd/system/mpquic-watchdog.timer
+sudo install -m 0755 deploy/hooks/mpquic-ifupdown-hook /etc/network/if-up.d/mpquic-auto
+sudo install -m 0755 deploy/hooks/mpquic-ifupdown-hook /etc/network/if-post-down.d/mpquic-auto
+sudo systemctl daemon-reload
+sudo systemctl enable --now mpquic-watchdog.timer
+```
+
+Verifica:
+```bash
+systemctl is-active mpquic-watchdog.timer
+journalctl -u mpquic-watchdog.service -n 20 --no-pager
+```
+
+### A.2 VPS — server watchdog
+
+```bash
+sudo install -m 0755 scripts/mpquic-server-watchdog.sh /usr/local/lib/mpquic/mpquic-server-watchdog.sh
+sudo install -m 0644 deploy/systemd/mpquic-server-watchdog.service /etc/systemd/system/mpquic-server-watchdog.service
+sudo install -m 0644 deploy/systemd/mpquic-server-watchdog.timer /etc/systemd/system/mpquic-server-watchdog.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now mpquic-server-watchdog.timer
+```
+
+Verifica:
+```bash
+systemctl is-active mpquic-server-watchdog.timer
+journalctl -u mpquic-server-watchdog.service -n 50 --no-pager
+```

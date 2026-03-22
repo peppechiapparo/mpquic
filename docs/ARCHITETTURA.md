@@ -54,30 +54,10 @@ Il POC si inserisce sopra il piano L3: ogni processo `mpquic@i` usa la WAN assoc
 - `scripts/install_client.sh`: installazione lato client
 - `scripts/install_server.sh`: installazione lato server
 
-## Parametri configurazione per istanza
-Ogni YAML include:
-- `role`: `client` o `server`
-- `bind_ip`: IP locale o `if:<ifname>` (con `if:` applica anche SO_BINDTODEVICE)
-- `remote_addr`: endpoint remoto (richiesto lato client)
-- `remote_port`: porta UDP/QUIC istanza
-- `tun_name`: nome TUN
-- `tun_cidr`: CIDR locale TUN
-- `log_level`: `debug|info|error`
-- `tls_ca_file`: path CA certificato (client)
-- `tls_cert_file` / `tls_key_file`: certificato e chiave (server)
-- `tls_server_name`: CN atteso nel certificato server (client)
-- `tls_insecure_skip_verify`: disabilita verifica TLS (solo test)
-- `congestion_algorithm`: `cubic` (default) o `bbr`
-- `transport_mode`: `datagram` (default) o `reliable` (QUIC streams)
-- `multipath_enabled`: `true/false` — abilita multipath
-- `multipath_policy`: `priority|failover|balanced`
-- `multi_conn_enabled`: `true/false` — server accetta N connessioni sulla stessa porta
-- `stripe_enabled`: `true/false` — server abilita listener stripe
-- `stripe_port`: porta UDP per protocollo stripe
-- `stripe_data_shards`: K shards dati FEC (default 10)
-- `stripe_parity_shards`: M shards parità FEC (default 2)
-- ~~`stripe_auth_key`~~: **RIMOSSO** — sostituito da AES-256-GCM con chiavi TLS Exporter
-- ~~`stripe_rekey_seconds`~~: **RIMOSSO** — PFS automatico per sessione
+
+## Parametri configurazione
+
+Per la lista completa dei parametri YAML per istanza, vedere `docs/INSTALLAZIONE_TEST.md` §11.
 
 ## Architettura a 3 livelli
 
@@ -150,27 +130,8 @@ Per ogni elemento `multipath_paths[i]`:
 
 La sessione multipath parte se almeno un path è up. Se uno o più path sono non disponibili (es. WAN senza IPv4), il runtime entra in modalità degradata controllata e avvia recovery path-level in background.
 
-### Campi `multipath_paths`
-- `name`: etichetta operativa del path
-- `bind_ip`: IP o `if:<ifname>` della WAN locale
-- `remote_addr`: endpoint server
-- `remote_port`: porta UDP del listener server
-- `priority`: priorità relativa (valore più basso = path più preferito)
-- `weight`: peso di preferenza (valore più alto = lieve favore in selezione)
-- `pipes`: numero di socket UDP paralleli per path (default: 1; usato con `transport: stripe`)
-- `transport`: tipo di trasporto per il path (`quic` default, `stripe` per UDP stripe + FEC)
 
-### Campi stripe (globali, livello root YAML)
-- `stripe_port`: porta UDP del server per il protocollo stripe (default: `remote_port` + 1000)
-- `stripe_data_shards`: K — numero shards dati per gruppo FEC (default: 10). Anche con M=0, K è usato come soglia nel protocollo RX (`GroupDataN < K` → consegna diretta). **Deve essere coerente tra client e server.**
-- `stripe_parity_shards`: M — numero shards parità per gruppo FEC (default: 2). In modalità `adaptive`, l'encoder RS viene pre-creato con questo valore anche se M effettivo parte da 0.
-- `stripe_fec_mode`: modalità FEC — `always` (default, M fisso), `adaptive` (M=0 iniziale, sale a M su loss), `off` (M=0 permanente, nessun encoder RS)
-- `stripe_arq`: `true/false` (default: `false`) — abilita Hybrid ARQ con NACK selettivo. Il receiver rileva gap di sequenza e invia NACK bitmap, il sender ritrasmette solo i pacchetti mancanti. Attivo solo quando effectiveM=0.
-- `stripe_pacing_rate`: rate limiter in Mbps per sessione (default: `0` = disabilitato). **Sconsigliato** per granularità timer Linux.
-- `stripe_disable_gso`: `true/false` (default: `false`) — disabilita UDP GSO (`UDP_SEGMENT`). Utile per A/B test. GSO è rilevato automaticamente all'avvio; se il kernel supporta `UDP_SEGMENT`, lo usa.
-- `stripe_enabled`: (solo server) abilita il listener stripe
-- ~~`stripe_auth_key`~~: **RIMOSSO** — cifratura AES-256-GCM automatica via TLS Exporter
-- ~~`stripe_rekey_seconds`~~: **RIMOSSO** — PFS per sessione (nuove chiavi ad ogni connessione)
+Per i campi di configurazione `multipath_paths` e `stripe_*`, vedere `docs/INSTALLAZIONE_TEST.md` §11.
 
 ### Policy multipath (`multipath_policy`)
 - `priority` (default): bilancia priorità/peso/penalità errori
@@ -181,7 +142,6 @@ La sessione multipath parte se almeno un path è up. Se uno o più path sono non
 - minimo configurabile: 1 path
 - minimo operativo: almeno 1 path inizialmente attivo
 - massimo: non hard-coded nel runtime; dipende da porte/listener disponibili e risorse host
-
 ## Scheduler path-aware
 
 Lo scheduler seleziona il path TX in base a score composto da:
@@ -197,33 +157,14 @@ In caso di errore TX/RX:
 
 Se il reconnect riesce, il path rientra nel pool attivo (`path recovered`).
 
-## Telemetria path-level (base)
 
-Il runtime multipath emette periodicamente log telemetrici per ciascun path:
-- stato (`up/down`)
-- contatori `tx_pkts/rx_pkts`
-- errori `tx_err/rx_err`
-- `consecutiveFails`
-- timestamp `last_up/last_down`
+## Telemetria e metriche
 
-Formato log: `path telemetry name=... state=... tx_pkts=...`.
+Per metriche Prometheus e telemetria path/classe, vedere `docs/METRICS.md`.
 
-Il runtime emette anche telemetria per classe dataplane:
-- `class telemetry class=... tx_pkts=... tx_err=... tx_dups=...`
+## QoS dataplane
 
-## QoS: stato reale e direzione roadmap
-
-QoS applicativa dataplane disponibile in runtime multipath:
-- classificazione L3/L4 per protocollo, CIDR src/dst, porte src/dst e DSCP
-- classi traffico con policy scheduler dedicate (`priority|failover|balanced`)
-- selezione path per classe con `preferred_paths` / `excluded_paths`
-- duplication per classi critiche (`duplicate` + `duplicate_copies`)
-
-Modalità di configurazione supportate:
-- `dataplane` inline nello YAML applicativo
-- `dataplane_config_file` separato (raccomandato per integrazione orchestrator)
-
-Per QoS L3/L2 avanzata si possono applicare policy Linux esterne (`tc`, queueing) sulle WAN fisiche.
+Per la documentazione completa QoS (classificazione, policy, orchestrator API), vedere `docs/DATAPLANE_ORCHESTRATOR.md`.
 
 ## Tuning operativo consigliato
 
@@ -259,40 +200,18 @@ più interfacce WAN sulla stessa macchina.
 3. Il nome interfaccia viene passato a `bindPipeToDevice()` che applica `SO_BINDTODEVICE`
 4. Il socket usa `udp4` (non `udp`) per forzare IPv4
 
-## UDP Socket Buffer Tuning (7 MB)
 
-Ogni socket UDP stripe (client pipe e server listener) viene configurato con
-buffer di lettura e scrittura da 7 MB tramite `setStripeSocketBuffers()`.
-Questo valore corrisponde a quello usato da quic-go (`DesiredReceiveBufferSize`).
+## Ottimizzazioni I/O implementate
 
-**Perché**: su Starlink, i jitter spike (20-50 ms) provocano burst di centinaia
-di pacchetti in arrivo nello stesso momento. Con il buffer default Linux (~208 KB),
-~140 pacchetti da 1500B saturano il buffer causando drop kernel invisibili
-all'applicazione. Con 7 MB si possono bufferizzare ~4700 pacchetti,
-coprendo burst fino a 100ms a 500 Mbps.
+| Ottimizzazione | Descrizione |
+|----------------|-------------|
+| UDP Socket Buffer 7 MB | Copre burst 100ms a 500 Mbps su Starlink jitter |
+| TX ActivePipes Cache | Slice pre-calcolata per zero-alloc dispatch |
+| UDP GSO (client TX) | `UDP_SEGMENT` — N shards in 1 `sendmsg` per pipe |
+| sendmmsg (server TX) | `WriteBatch` per N datagrammi in 1 syscall |
+| recvmmsg (batch RX) | Fino a 8 datagrammi per syscall (client + server) |
 
-**Requisito sysctl**: il kernel limita il buffer massimo a `net.core.rmem_max` /
-`net.core.wmem_max`. Per ottenere il beneficio completo, entrambi i nodi devono
-avere:
-
-```
-net.core.rmem_max = 7340032
-net.core.wmem_max = 7340032
-```
-
-Vedere sezione *Installazione* per i comandi di configurazione.
-
-## TX ActivePipes Cache (Zero-Alloc Dispatch)
-
-Il server stripe mantiene una slice `txActivePipes []*net.UDPAddr` pre-calcolata
-per ogni sessione (`stripeSession`). Questa cache viene ricostruita solo quando:
-- Un nuovo client pipe si registra (REGISTER)
-- Un indirizzo pipe cambia per CGNAT rebind (keepalive)
-
-La ricostruzione avviene sotto `txMu` per thread-safety. Tutti i path TX
-(`SendDatagram` M=0, `sendFECGroupLocked` M>0, `handleNack` retransmit)
-leggono la slice cached senza allocazioni, eliminando ~30K `make+append`/s
-a 341 Mbps.
+Dettagli implementativi in `docs/ROADMAP_IMPLEMENTAZIONE.md` (Step 4.17-4.24).
 
 ## Architettura UDP Stripe + FEC Transport
 
@@ -461,50 +380,11 @@ Pacchetto NACK (type 0x05):
 - Modalità adattiva (`stripe_fec_mode: adaptive`): M effettivo parte da 0 (nessuna parità),
   sale a M configurato se rilevata perdita significativa via feedback keepalive bidirezionale
 
+
 ### Hybrid ARQ (NACK selettivo)
-Meccanismo reattivo di ritrasmissione complementare a FEC adattivo:
-
-1. **TX retransmit buffer** (`arqTxBuf`): ring buffer 4096 entry (~200ms a 20K pps).
-   Ogni entry conserva il plaintext pronto per re-encrypt + retransmit.
-2. **RX gap tracker** (`arqRxTracker`): bitmap circolare 8192 bit.
-   `markReceived(seq)` setta il bit; `getMissing()` scansiona gap > 96 seqs dietro highest.
-3. **NACK generation loop**: goroutine dedicata, tick ogni 5ms, rate limit 1 NACK / 30ms.
-   Invia NACK bitmap (fino a 64 gap per pacchetto) al peer.
-4. **NACK handler**: riceve NACK, lookup in TX buffer, re-encrypt con nonce fresco,
-   retransmit round-robin sulle pipe (via `txActivePipes` cache, zero-alloc).
-5. **Dedup receiver**: `markReceived()` verificato prima della consegna al TUN.
-   Duplicati da retransmit ARQ scartati silenziosamente.
-6. **Bidirezionale**: sia client che server hanno TX buf + RX tracker.
-7. **Solo M=0**: ARQ attivo solo quando effectiveM = 0 (non compete con FEC grouping).
-
-**Benchmark ARQ v2 + Socket Tuning**: +48% throughput su dual Starlink (239 → 354 Mbps medio,
-picco 390 Mbps). Overhead ~0% in condizioni normali (solo pacchetti NACK quando ci sono gap).
-
-### UDP GSO — Client TX (UDP_SEGMENT)
-Il client non aveva alcun TX batching — ogni `SendDatagram` generava una
-`WriteToUDP` individuale. Con UDP GSO (`UDP_SEGMENT`, kernel Linux ≥5.0),
-gli shard criptati vengono concatenati in un buffer contiguo per pipe e
-inviati con un singolo `WriteMsgUDP` con ancillary `UDP_SEGMENT`. Il kernel
-spezza il buffer in datagrammi individuali nello stack di rete.
-
-- **Probe automatico**: `stripeGSOProbe()` verifica `UDP_SEGMENT` all'avvio
-- **Per-pipe accumulation**: ogni pipe accumula in un `gsoTxPipeBuf` da 64KB
-- **Flush**: `gsoFlushPipeLocked()` → `WriteMsgUDP(bigBuf, oob, serverAddr)`
-- **Fallback**: se `sendmsg` ritorna `EIO` (NIC senza TX checksum offload) →
-  `gsoDisabled=1`, resend individuale per la vita della connessione
-- **Config**: `stripe_disable_gso: true` per A/B test
-- Entrambi i path (M=0 fast path e M>0 FEC group) usano GSO
-- `FlushTxBatch()` disponibile su client → `drainSendCh` lo chiama automaticamente
-
-Il server mantiene `sendmmsg` (Step 4.20) perché il round-robin su N indirizzi
-client pipe rende il raggruppamento GSO impraticabile.
-
-### Batch I/O (recvmmsg)
-Sostituzione di `ReadFromUDP()` (1 syscall per pacchetto) con
-`ipv4.PacketConn.ReadBatch()` che legge fino a 8 datagrammi per syscall
-(recvmmsg su Linux). Applicato sia al server RX che al client RX per-pipe.
-Risultato benchmark: neutro (+1%), ma il codice resta perché è pulito e
-riduce il carico syscall.
+Ritrasmissione reattiva complementare a FEC. TX ring buffer 4096 entry, RX bitmap 8192 bit.
+NACK ogni 5ms (rate limit 30ms). Attivo solo quando effectiveM=0.
+Bidirezionale (client + server). Benchmark: +48% su dual Starlink (239 → 354 Mbps).
 
 ### Flow-hash dispatch (server → client)
 Il server usa hash FNV-1a sulla 5-tupla IP (srcIP, dstIP, proto, srcPort, dstPort)
