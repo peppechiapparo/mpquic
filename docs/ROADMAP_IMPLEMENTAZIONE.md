@@ -17,6 +17,11 @@
     - `wangyu-/UDPspeeder`: FEC production-grade per link lossy con tuning di queue/interval/scatter;
     - `xtaci/kcp-go`: integrazione FEC battle-tested e pipeline zero-allocation.
   - *Deliverable*: benchmark comparativo, PoC integrabile in Go, decisione tra (a) sostituzione dello XOR a finestra fissa con sliding-window più robusto oppure (b) fallback definitivo a schema FEC diverso.
+  - *Stato attuale PoC*: implementata una prima versione più robusta con:
+    - sliding-window XOR **overlappato** (repair ogni ~`W/2` nuovi pacchetti a finestra piena, invece di una sola repair per finestra disgiunta);
+    - storico RX molto più ampio (`capacity >= 512`) per tollerare reorder Starlink prima dell'arrivo del repair;
+    - dedup lato recovery per evitare doppia consegna dello stesso pacchetto quando più repair overlappati recuperano la stessa sequenza.
+  - *Prossimo criterio di validazione*: verificare via metriche nuove (`xor_effectiveness_pct`, `arq_nack_thresh`, `arq_max_ooo`, `txtime_gap_ns`) se il PoC produce finalmente recovery XOR misurabile in test iperf3 reali.
 
 ### Roadmap Fase 4d — Stabilizzazione Avanzata e Controllo Adattivo (2026-03-22)
 
@@ -1869,7 +1874,7 @@ per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
 │  │  10.200.x.y:9090 │    │                              │   │
 │  └──────────────────┘    └──────────────────────────────┘   │
 │         │                                                   │
-│         │  scrape ogni 15s via route tunnel                  │
+│         │  scrape ogni 15s via route tunnel                 │
 │         ▼                                                   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  VM 200 (Client MPQUIC)                              │   │
@@ -1882,7 +1887,7 @@ per raccolta, storicizzazione e visualizzazione delle metriche MPQUIC.
 │  │  10.200.6.1:9090   (mpq6 client)                     │   │
 │  └──────────────────────────────────────────────────────┘   │
 │         ▲                                                   │
-│         │  scrape via tunnel route                           │
+│         │  scrape via tunnel route                          │
 │         │                                                   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  VPS Server (172.238.232.223)                        │   │
@@ -1952,10 +1957,10 @@ Fase 5 completata (metriche operative per feedback loop).
 ### Client VM (VMID 200, Debian 12)
 | Interfaccia | Ruolo  | IP               | Stato |
 |-------------|------- |----------------  |-------|
-| enp6s18     | MGMT1  | 10.10.11.100/24  | ✅ |
-| enp6s19     | MGMT2  | 10.10.10.100/24  | ✅ |
-| enp6s20-23  | LAN1-4 | 172.16.{1-4}.1/30| ✅ |
-| enp7s1-2    | LAN5-6 | 172.16.{5-6}.1/30| ✅ |
+| enp6s18     | MGMT1  | 10.10.11.100/24  | ✅    |
+| enp6s19     | MGMT2  | 10.10.10.100/24  | ✅    |
+| enp6s20-23  | LAN1-4 | 172.16.{1-4}.1/30| ✅    |
+| enp7s1-2    | LAN5-6 | 172.16.{5-6}.1/30| ✅    |
 | enp7s3-5    | WAN1-3 | — | No modem     |
 | enp7s6      | WAN4   | 192.168.1.100    | ✅ mpq4 ~108ms |
 | enp7s7      | WAN5   | 10.150.19.95     | ✅ mpq5 ~13ms |

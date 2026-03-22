@@ -29,7 +29,12 @@ import (
 const (
 	xorFECDefaultWindow = 10
 	// Keep receiver buffer entries for this many windows beyond current highwater.
-	xorRxBufKeepWindows = 4
+	// The previous value (4) retained only 40 packets with W=10, far below the
+	// natural reorder span observed on Starlink multipath. A much larger history
+	// materially improves repair usefulness when the repair itself arrives late.
+	xorRxBufKeepWindows = 32
+	// Minimum number of source shards to retain regardless of W.
+	xorRxMinCapacity = 512
 )
 
 // ─── XOR FEC Sender ───────────────────────────────────────────────────────
@@ -37,84 +42,104 @@ const (
 // xorFECSender accumulates W source shards and produces 1 XOR repair per window.
 // NOT thread-safe — caller must hold txMu.
 type xorFECSender struct {
-	window   int    // W: source packets per repair packet
-	count    int    // sources accumulated in current window (0..W-1)
-	xorBuf   []byte // running XOR (grows to maxLen in current window)
-	firstSeq uint32 // seq of first source in current window
+	window int // W: source packets per repair packet
+	stride int // emit one repair every `stride` new sources once the window is full
+
+	history         []xorSourceShard // last up to W source shards (sliding window)
+	sinceLastRepair int              // number of new sources since the last emitted repair
 
 	// Stats (atomic — safe to read from metrics goroutine)
 	emitted uint64 // total XOR repair packets emitted
+}
+
+type xorSourceShard struct {
+	seq  uint32
+	data []byte
 }
 
 func newXorFECSender(window int) *xorFECSender {
 	if window <= 0 {
 		window = xorFECDefaultWindow
 	}
+	stride := (window + 1) / 2
+	if stride <= 0 {
+		stride = 1
+	}
 	return &xorFECSender{
-		window: window,
-		xorBuf: make([]byte, 0, stripeMaxPayload+2),
+		window:  window,
+		stride:  stride,
+		history: make([]xorSourceShard, 0, window),
 	}
 }
 
-// addSource XORs a source shard into the current window accumulator.
+// addSource adds a source shard to the sliding protection window.
+// Once the window is full, one repair is emitted every `stride` new shards,
+// covering the last up-to-W packets. This overlapping protection materially
+// improves recovery against short burst losses compared to disjoint windows.
 // shardData is [2-byte length prefix][payload] (same format used by RS FEC).
-// Returns the repair payload and firstSeq when a complete window is ready.
 // Caller must hold txMu.
 func (x *xorFECSender) addSource(seq uint32, shardData []byte) (repair []byte, firstSeq uint32, ok bool) {
-	if x.count == 0 {
-		x.firstSeq = seq
-		// Reset accumulator — clear and shrink to 0
-		x.xorBuf = x.xorBuf[:0]
+	dataCopy := make([]byte, len(shardData))
+	copy(dataCopy, shardData)
+	x.history = append(x.history, xorSourceShard{seq: seq, data: dataCopy})
+	if len(x.history) > x.window {
+		copy(x.history, x.history[1:])
+		x.history = x.history[:x.window]
+	}
+	x.sinceLastRepair++
+
+	if len(x.history) < x.window || x.sinceLastRepair < x.stride {
+		return nil, 0, false
 	}
 
-	// Grow xorBuf if this shard is longer than the current accumulator.
-	if len(shardData) > len(x.xorBuf) {
-		newBuf := make([]byte, len(shardData))
-		copy(newBuf, x.xorBuf) // preserve running XOR of shorter shards
-		x.xorBuf = newBuf
+	repair, firstSeq = x.buildRepairLocked(len(x.history))
+	x.sinceLastRepair = 0
+	atomic.AddUint64(&x.emitted, 1)
+	return repair, firstSeq, true
+
+}
+
+func (x *xorFECSender) buildRepairLocked(count int) (repair []byte, firstSeq uint32) {
+	if count <= 0 || count > len(x.history) {
+		return nil, 0
 	}
 
-	// XOR shard into accumulator (byte-by-byte).
-	// Bytes beyond len(shardData) are implicitly zero-padded (XOR identity).
-	for i := 0; i < len(shardData); i++ {
-		x.xorBuf[i] ^= shardData[i]
+	start := len(x.history) - count
+	firstSeq = x.history[start].seq
+	maxLen := 0
+	for i := start; i < len(x.history); i++ {
+		if l := len(x.history[i].data); l > maxLen {
+			maxLen = l
+		}
 	}
-	x.count++
-
-	if x.count >= x.window {
-		// Window complete — emit repair.
-		repair = make([]byte, len(x.xorBuf))
-		copy(repair, x.xorBuf)
-		firstSeq = x.firstSeq
-		ok = true
-
-		// Reset for next window.
-		x.count = 0
-		x.xorBuf = x.xorBuf[:0]
-		atomic.AddUint64(&x.emitted, 1)
+	repair = make([]byte, maxLen)
+	for i := start; i < len(x.history); i++ {
+		for j := 0; j < len(x.history[i].data); j++ {
+			repair[j] ^= x.history[i].data[j]
+		}
 	}
-
-	return
+	return repair, firstSeq
 }
 
 // flush emits a partial-window repair if count > 0.
-// This ensures the last few packets before idle are still protected.
-// Returns window=count (partial), or ok=false if nothing to flush.
+// This ensures the last few packets before idle are still protected. When a
+// full-window repair was emitted recently, flush only covers the new tail that
+// has not yet triggered the stride threshold.
+// Returns window=count (partial tail or full window), or ok=false if nothing to flush.
 // Caller must hold txMu.
 func (x *xorFECSender) flush() (repair []byte, firstSeq uint32, window int, ok bool) {
-	if x.count == 0 {
+	if len(x.history) == 0 {
 		return nil, 0, 0, false
 	}
+	count := len(x.history)
+	if len(x.history) >= x.window && x.sinceLastRepair > 0 && x.sinceLastRepair < x.window {
+		count = x.sinceLastRepair
+	}
 
-	repair = make([]byte, len(x.xorBuf))
-	copy(repair, x.xorBuf)
-	firstSeq = x.firstSeq
-	window = x.count
+	repair, firstSeq = x.buildRepairLocked(count)
+	window = count
 	ok = true
-
-	// Reset.
-	x.count = 0
-	x.xorBuf = x.xorBuf[:0]
+	x.sinceLastRepair = 0
 	atomic.AddUint64(&x.emitted, 1)
 
 	return
@@ -154,6 +179,9 @@ func newXorFECReceiver(window int) *xorFECReceiver {
 		window = xorFECDefaultWindow
 	}
 	cap := window * xorRxBufKeepWindows
+	if cap < xorRxMinCapacity {
+		cap = xorRxMinCapacity
+	}
 	ring := make([]xorRxSlot, cap)
 	// Pre-allocate backing slices so the first pass also avoids allocs.
 	for i := range ring {

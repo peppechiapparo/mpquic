@@ -134,6 +134,43 @@ func TestXorFECSender_Flush(t *testing.T) {
 	}
 }
 
+func TestXorFECSender_SlidingWindowOverlap(t *testing.T) {
+	tx := newXorFECSender(4) // stride = 2
+
+	make := func(v byte) []byte { return makeShard([]byte{v, v + 1}) }
+	for i := 0; i < 4; i++ {
+		repair, firstSeq, ok := tx.addSource(uint32(i), make(byte(i)))
+		if i < 3 && ok {
+			t.Fatalf("unexpected repair at i=%d", i)
+		}
+		if i == 3 {
+			if !ok {
+				t.Fatal("expected first full-window repair")
+			}
+			if firstSeq != 0 {
+				t.Fatalf("firstSeq = %d, want 0", firstSeq)
+			}
+			if len(repair) == 0 {
+				t.Fatal("expected non-empty repair")
+			}
+		}
+	}
+
+	if _, _, ok := tx.addSource(4, make(4)); ok {
+		t.Fatal("unexpected repair after 1 new packet with stride=2")
+	}
+	repair, firstSeq, ok := tx.addSource(5, make(5))
+	if !ok {
+		t.Fatal("expected overlapping repair after stride packets")
+	}
+	if firstSeq != 2 {
+		t.Fatalf("firstSeq = %d, want 2", firstSeq)
+	}
+	if len(repair) == 0 {
+		t.Fatal("expected non-empty repair")
+	}
+}
+
 func TestXorFECReceiver_RecoverOneLoss(t *testing.T) {
 	// Sender: 3 sources, 1 repair
 	tx := newXorFECSender(3)
@@ -262,8 +299,9 @@ func TestXorFECReceiver_VariableLength(t *testing.T) {
 func TestXorFECReceiver_GC(t *testing.T) {
 	rx := newXorFECReceiver(10)
 
-	// Store 100 shards (ring capacity = 10*4 = 40 slots)
-	for i := uint32(0); i < 100; i++ {
+	total := uint32(rx.capacity + 100)
+	// Store more shards than the ring can retain.
+	for i := uint32(0); i < total; i++ {
 		rx.storeShard(i, makeShard([]byte{byte(i)}))
 	}
 
@@ -271,17 +309,17 @@ func TestXorFECReceiver_GC(t *testing.T) {
 
 	// Ring buffer: old entries are implicitly overwritten.
 	// Only the last `capacity` unique seq values survive in the ring.
-	// Verify that recent shards (seq >= 60) are still accessible.
+	// Verify that recent shards are still accessible.
 	rx.mu.Lock()
-	for seq := uint32(60); seq < 100; seq++ {
+	keepFrom := total - uint32(rx.capacity)
+	for seq := keepFrom; seq < total; seq++ {
 		if _, ok := rx.lookupShard(seq); !ok {
 			t.Errorf("shard seq=%d should still be in ring", seq)
 		}
 	}
-	// Verify that very old shards (seq < 60) are stale (overwritten).
-	// With capacity=40, seq=0 maps to slot 0, which now holds seq=80.
+	// Verify that very old shards are stale (overwritten).
 	staleLookups := 0
-	for seq := uint32(0); seq < 60; seq++ {
+	for seq := uint32(0); seq < keepFrom; seq++ {
 		if _, ok := rx.lookupShard(seq); !ok {
 			staleLookups++
 		}

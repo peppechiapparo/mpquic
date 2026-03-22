@@ -1240,12 +1240,15 @@ func (ss *stripeServer) handleXorRepairServer(hdr stripeHdr, payload []byte, fro
 	atomic.AddUint64(&sess.rxBytes, uint64(len(pkt)))
 	// Count recovery in rxDirectCount so seq-gap loss estimator sees NET loss
 	// (after FEC), not GROSS loss — prevents adaptive gate feedback loop.
-	atomic.AddUint64(&sess.rxDirectCount, 1)
 	// ARQ: mark recovered seq as received so it won't be NACKed.
 	if sess.arqRx != nil {
-		sess.arqRx.markReceived(recoveredSeq)
+		if !sess.arqRx.markReceived(recoveredSeq) {
+			sess.arqRx.addDupFiltered(1)
+			return
+		}
 		sess.arqRx.addRetxReceived(1)
 	}
+	atomic.AddUint64(&sess.rxDirectCount, 1)
 	select {
 	case sess.rxCh <- pkt:
 	default:

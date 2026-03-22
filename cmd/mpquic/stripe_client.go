@@ -1140,12 +1140,15 @@ func (scc *stripeClientConn) handleXorRepair(hdr stripeHdr, payload []byte) {
 	// (after FEC), not GROSS loss. Without this, recovered packets are invisible
 	// to gap detection, inflating perceived loss and keeping the adaptive gate ON
 	// in a positive feedback loop.
-	atomic.AddUint64(&scc.rxDirectCount, 1)
 	// ARQ: mark recovered seq as received so it won't be NACKed.
 	if scc.arqRx != nil {
-		scc.arqRx.markReceived(recoveredSeq)
+		if !scc.arqRx.markReceived(recoveredSeq) {
+			scc.arqRx.addDupFiltered(1)
+			return
+		}
 		scc.arqRx.addRetxReceived(1)
 	}
+	atomic.AddUint64(&scc.rxDirectCount, 1)
 	select {
 	case scc.rxCh <- pkt:
 	case <-scc.closeCh:
