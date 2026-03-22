@@ -290,7 +290,15 @@ type connGroup struct {
 	// path index via round-robin. All packets in the same flow go through
 	// the same path (prevents TCP reordering) but different flows are spread
 	// evenly across paths (prevents load imbalance from hash collisions).
+	//
+	// Generational GC: flowPaths is periodically swept by flowGCTick().
+	// On each tick, flowPrev replaces flowPaths and a new empty map is
+	// allocated. Active flows re-register on first packet (promoted from
+	// flowPrev). After two ticks without traffic, a flow entry is evicted.
+	// This prevents unbounded growth of stale flow entries (bug: flow_count
+	// growing indefinitely even without traffic).
 	flowPaths  map[uint32]int
+	flowPrev   map[uint32]int // previous generation for promotion
 	flowRR     int  // round-robin for new flow assignment
 }
 
@@ -681,6 +689,14 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 				grp.flowPaths = make(map[uint32]int, 8)
 			}
 			assignedIdx, exists := grp.flowPaths[h]
+			// Promote from previous generation if not in current
+			if !exists && grp.flowPrev != nil {
+				if prev, ok2 := grp.flowPrev[h]; ok2 {
+					assignedIdx = prev
+					exists = true
+					grp.flowPaths[h] = prev // promote to current gen
+				}
+			}
 			// Check if assigned path is still in the active set
 			isActive := false
 			if exists {
@@ -697,10 +713,6 @@ func (ct *connectionTable) dispatch(dstIP netip.Addr, pkt []byte) bool {
 				assignedIdx = active[pos]
 				grp.flowRR = pos + 1
 				grp.flowPaths[h] = assignedIdx
-				// Evict stale entries if map grows too large
-				if len(grp.flowPaths) > 1024 {
-					grp.flowPaths = map[uint32]int{h: assignedIdx}
-				}
 			}
 			idx = assignedIdx
 		} else {
@@ -768,6 +780,29 @@ func (ct *connectionTable) routedCount() int {
 	ct.mu.RLock()
 	defer ct.mu.RUnlock()
 	return len(ct.routed)
+}
+
+// flowGCTick performs generational garbage collection on flowPaths for all
+// connGroups. Should be called periodically (e.g. every 30s) from a timer.
+// Each tick: current flowPaths → flowPrev, allocate fresh flowPaths.
+// Active flows get promoted from flowPrev on their next packet (zero-cost
+// in the hot path — just one extra map lookup). Flows idle for >2 ticks
+// are evicted when flowPrev is overwritten.
+//
+// This fixes the unbounded growth of flowPaths (flow_count metric growing
+// indefinitely even without traffic) that eventually caused memory pressure
+// and session instability on long-running deployments.
+func (ct *connectionTable) flowGCTick() {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	for _, grp := range ct.byIP {
+		if len(grp.flowPaths) > 0 {
+			grp.flowPrev = grp.flowPaths
+			grp.flowPaths = make(map[uint32]int, min(len(grp.flowPrev), 64))
+		} else {
+			grp.flowPrev = nil
+		}
+	}
 }
 
 func (ct *connectionTable) closeAll() {
@@ -1238,6 +1273,22 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 
 	ct := newConnectionTable()
 	defer ct.closeAll()
+
+	// Periodic GC for stale flow entries in dispatch flowPaths maps.
+	// Every 30s: current → prev, fresh map allocated. Active flows are
+	// promoted on next packet. Idle flows expire after 2 ticks (60s max).
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				ct.flowGCTick()
+			}
+		}
+	}()
 
 	// Single TUN reader dispatches packets to the right connection via dst IP.
 	go func() {
