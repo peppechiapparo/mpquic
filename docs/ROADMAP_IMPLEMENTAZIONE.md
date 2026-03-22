@@ -22,6 +22,10 @@
     - storico RX molto più ampio (`capacity >= 512`) per tollerare reorder Starlink prima dell'arrivo del repair;
     - dedup lato recovery per evitare doppia consegna dello stesso pacchetto quando più repair overlappati recuperano la stessa sequenza.
   - *Prossimo criterio di validazione*: verificare via metriche nuove (`xor_effectiveness_pct`, `arq_nack_thresh`, `arq_max_ooo`, `txtime_gap_ns`) se il PoC produce finalmente recovery XOR misurabile in test iperf3 reali.
+  - *Aggiornamento 4.32b*: aggiunta una seconda iterazione runtime-adaptive:
+    - crescita dinamica della history XOR RX in funzione del reorder osservato (`arq_max_ooo`), fino a `8192` slot;
+    - tuning dinamico dello `stride` di emissione repair (fino a 1 repair per ogni nuovo pacchetto nei casi peggiori) in funzione di `peer_loss_rate` e `arq_max_ooo`;
+    - nuove metriche di introspezione: `xor_window`, `xor_stride`, `xor_rx_capacity`.
 
 ### Roadmap Fase 4d — Stabilizzazione Avanzata e Controllo Adattivo (2026-03-22)
 

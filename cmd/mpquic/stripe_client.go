@@ -1185,6 +1185,7 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 
 			// ── Update our TX M based on peer's loss report ──
 			scc.updateAdaptiveM()
+			scc.tuneXorRuntime()
 
 			// ── Periodic re-register (every 30s) for self-healing ──
 			// If the server lost pipe addresses (re-key race, GC, etc.),
@@ -1349,6 +1350,45 @@ func (scc *stripeClientConn) updateAdaptiveM() {
 				scc.logger.Infof("adaptive XOR FEC: OFF (no peer loss for %v)", time.Since(lastLoss).Round(time.Second))
 			}
 		}
+	}
+}
+
+func (scc *stripeClientConn) tuneXorRuntime() {
+	if scc.xorTx == nil && scc.xorRx == nil {
+		return
+	}
+
+	var maxOOO uint32
+	if scc.arqRx != nil {
+		_, maxOOO, _ = scc.arqRx.dynamicStats()
+	}
+	peerLoss := atomic.LoadUint32(&scc.peerLossRate)
+
+	if scc.xorRx != nil {
+		window, _ := scc.xorRx.stats()
+		desiredCap := xorRxMinCapacity
+		if maxOOO > 0 {
+			desiredCap = int(maxOOO*2) + window*8
+		}
+		_ = scc.xorRx.ensureCapacity(desiredCap)
+	}
+
+	if scc.xorTx != nil {
+		window, _, _ := scc.xorTx.stats()
+		stride := window / 2
+		if stride < 1 {
+			stride = 1
+		}
+		switch {
+		case peerLoss >= 10 || maxOOO >= uint32(window*32):
+			stride = 1
+		case peerLoss >= 5 || maxOOO >= uint32(window*16):
+			stride = window / 4
+			if stride < 1 {
+				stride = 1
+			}
+		}
+		scc.xorTx.setStride(stride)
 	}
 }
 

@@ -171,6 +171,24 @@ func TestXorFECSender_SlidingWindowOverlap(t *testing.T) {
 	}
 }
 
+func TestXorFECSender_SetStride(t *testing.T) {
+	tx := newXorFECSender(8)
+	_, stride, _ := tx.stats()
+	if stride != 4 {
+		t.Fatalf("default stride = %d, want 4", stride)
+	}
+	tx.setStride(1)
+	_, stride, _ = tx.stats()
+	if stride != 1 {
+		t.Fatalf("stride = %d, want 1", stride)
+	}
+	tx.setStride(99)
+	_, stride, _ = tx.stats()
+	if stride != 8 {
+		t.Fatalf("clamped stride = %d, want 8", stride)
+	}
+}
+
 func TestXorFECReceiver_RecoverOneLoss(t *testing.T) {
 	// Sender: 3 sources, 1 repair
 	tx := newXorFECSender(3)
@@ -328,6 +346,31 @@ func TestXorFECReceiver_GC(t *testing.T) {
 		t.Error("expected some old shards to be overwritten in ring buffer")
 	}
 	rx.mu.Unlock()
+}
+
+func TestXorFECReceiver_EnsureCapacity(t *testing.T) {
+	rx := newXorFECReceiver(10)
+	_, initialCap := rx.stats()
+	if initialCap < xorRxMinCapacity {
+		t.Fatalf("initial capacity = %d, want >= %d", initialCap, xorRxMinCapacity)
+	}
+	for i := uint32(0); i < 32; i++ {
+		rx.storeShard(i, makeShard([]byte{byte(i)}))
+	}
+	if !rx.ensureCapacity(4096) {
+		t.Fatal("expected capacity growth")
+	}
+	_, grownCap := rx.stats()
+	if grownCap < 4096 {
+		t.Fatalf("grown capacity = %d, want >= 4096", grownCap)
+	}
+	rx.mu.Lock()
+	defer rx.mu.Unlock()
+	for seq := uint32(0); seq < 32; seq++ {
+		if _, ok := rx.lookupShard(seq); !ok {
+			t.Fatalf("missing seq=%d after resize", seq)
+		}
+	}
 }
 
 func TestXorFEC_EndToEnd_RandomLoss(t *testing.T) {

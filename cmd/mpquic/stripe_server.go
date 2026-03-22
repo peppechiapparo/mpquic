@@ -1509,6 +1509,7 @@ func (ss *stripeServer) handleKeepalive(hdr stripeHdr, payload []byte, from *net
 	// Compute server-side RX loss (loss on data FROM client) and update adaptive M
 	rxLoss := ss.computeSessionRxLoss(sess)
 	ss.updateSessionAdaptiveM(sess)
+	ss.tuneSessionXorRuntime(sess)
 
 	// Reply with server-measured RX loss (tells client about loss on data CLIENT sent)
 	reply := make([]byte, stripeHdrLen+1)
@@ -1521,6 +1522,45 @@ func (ss *stripeServer) handleKeepalive(hdr stripeHdr, payload []byte, from *net
 	reply[stripeHdrLen] = rxLoss
 	reply = stripeEncrypt(sess.txCipher, reply)
 	_, _ = ss.conn.WriteToUDP(reply, from)
+}
+
+func (ss *stripeServer) tuneSessionXorRuntime(sess *stripeSession) {
+	if sess.xorTx == nil && sess.xorRx == nil {
+		return
+	}
+
+	var maxOOO uint32
+	if sess.arqRx != nil {
+		_, maxOOO, _ = sess.arqRx.dynamicStats()
+	}
+	peerLoss := atomic.LoadUint32(&sess.peerLossRate)
+
+	if sess.xorRx != nil {
+		window, _ := sess.xorRx.stats()
+		desiredCap := xorRxMinCapacity
+		if maxOOO > 0 {
+			desiredCap = int(maxOOO*2) + window*8
+		}
+		_ = sess.xorRx.ensureCapacity(desiredCap)
+	}
+
+	if sess.xorTx != nil {
+		window, _, _ := sess.xorTx.stats()
+		stride := window / 2
+		if stride < 1 {
+			stride = 1
+		}
+		switch {
+		case peerLoss >= 10 || maxOOO >= uint32(window*32):
+			stride = 1
+		case peerLoss >= 5 || maxOOO >= uint32(window*16):
+			stride = window / 4
+			if stride < 1 {
+				stride = 1
+			}
+		}
+		sess.xorTx.setStride(stride)
+	}
 }
 
 // ─── Server ARQ: NACK handler + generation ─────────────────────────────

@@ -124,6 +124,9 @@ type SessionStats struct {
 	XorRecovered    uint64 `json:"xor_recovered,omitempty"`     // packets recovered via XOR
 	XorUnrecoverable uint64 `json:"xor_unrecoverable,omitempty"` // multi-loss windows (fell back to ARQ)
 	XorEffectivenessPct float64 `json:"xor_effectiveness_pct,omitempty"`
+	XorWindow       int    `json:"xor_window,omitempty"`
+	XorStride       int    `json:"xor_stride,omitempty"`
+	XorRxCapacity   int    `json:"xor_rx_capacity,omitempty"`
 
 	ARQNackSent    uint64 `json:"arq_nack_sent"`
 	ARQRetxRecv    uint64 `json:"arq_retx_recv"`
@@ -162,6 +165,9 @@ type PathStats struct {
 	StripeXorRecovered   uint64 `json:"stripe_xor_recovered,omitempty"`
 	StripeXorUnrecoverable uint64 `json:"stripe_xor_unrecoverable,omitempty"`
 	StripeXorEffectivenessPct float64 `json:"stripe_xor_effectiveness_pct,omitempty"`
+	StripeXorWindow      int    `json:"stripe_xor_window,omitempty"`
+	StripeXorStride      int    `json:"stripe_xor_stride,omitempty"`
+	StripeXorRxCapacity  int    `json:"stripe_xor_rx_capacity,omitempty"`
 	StripeARQNackSent    uint64 `json:"stripe_arq_nack_sent,omitempty"`
 	StripeARQRetxRecv    uint64 `json:"stripe_arq_retx_recv,omitempty"`
 	StripeARQDupFiltered uint64 `json:"stripe_arq_dup_filtered,omitempty"`
@@ -231,10 +237,12 @@ func snapshotServerSessions(ss *stripeServer) []SessionStats {
 		}
 		if sess.xorTx != nil {
 			s.XorEmitted = atomic.LoadUint64(&sess.xorTx.emitted)
+			s.XorWindow, s.XorStride, _ = sess.xorTx.stats()
 		}
 		if sess.xorRx != nil {
 			s.XorRecovered = atomic.LoadUint64(&sess.xorRx.recovered)
 			s.XorUnrecoverable = atomic.LoadUint64(&sess.xorRx.unrecoverable)
+			_, s.XorRxCapacity = sess.xorRx.stats()
 		}
 		if s.XorEmitted > 0 {
 			s.XorEffectivenessPct = (float64(s.XorRecovered) * 100.0) / float64(s.XorEmitted)
@@ -273,10 +281,12 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 			ps.StripeXorActive = int(atomic.LoadInt32(&p.stripeConn.xorActive))
 			if p.stripeConn.xorTx != nil {
 				ps.StripeXorEmitted = atomic.LoadUint64(&p.stripeConn.xorTx.emitted)
+				ps.StripeXorWindow, ps.StripeXorStride, _ = p.stripeConn.xorTx.stats()
 			}
 			if p.stripeConn.xorRx != nil {
 				ps.StripeXorRecovered = atomic.LoadUint64(&p.stripeConn.xorRx.recovered)
 				ps.StripeXorUnrecoverable = atomic.LoadUint64(&p.stripeConn.xorRx.unrecoverable)
+				_, ps.StripeXorRxCapacity = p.stripeConn.xorRx.stats()
 			}
 			if ps.StripeXorEmitted > 0 {
 				ps.StripeXorEffectivenessPct = (float64(ps.StripeXorRecovered) * 100.0) / float64(ps.StripeXorEmitted)
@@ -492,6 +502,24 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "mpquic_session_xor_effectiveness_pct{session=\"%s\",peer=\"%s\"} %.6f\n", s.SessionID, s.PeerIP, s.XorEffectivenessPct)
 		}
 
+		fmt.Fprintf(w, "\n# HELP mpquic_session_xor_window Current XOR protection window per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_xor_window gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_xor_window{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.XorWindow)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_xor_stride Current XOR repair stride per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_xor_stride gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_xor_stride{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.XorStride)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_xor_rx_capacity Current XOR receiver history capacity per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_xor_rx_capacity gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_xor_rx_capacity{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.XorRxCapacity)
+		}
+
 		fmt.Fprintf(w, "\n# HELP mpquic_session_arq_nack_sent ARQ NACKs sent per session.\n")
 		fmt.Fprintf(w, "# TYPE mpquic_session_arq_nack_sent counter\n")
 		for _, s := range gs.Sessions {
@@ -664,6 +692,24 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_effectiveness_pct gauge\n")
 		for _, p := range gs.Paths {
 			fmt.Fprintf(w, "mpquic_path_stripe_xor_effectiveness_pct{path=\"%s\",bind=\"%s\"} %.6f\n", p.Name, p.BindIP, p.StripeXorEffectivenessPct)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_xor_window Current XOR protection window per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_window gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_xor_window{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeXorWindow)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_xor_stride Current XOR repair stride per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_stride gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_xor_stride{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeXorStride)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_xor_rx_capacity Current XOR receiver history capacity per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_rx_capacity gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_xor_rx_capacity{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeXorRxCapacity)
 		}
 
 		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_arq_nack_sent ARQ NACKs sent per client stripe path.\n")

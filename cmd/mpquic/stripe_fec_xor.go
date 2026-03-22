@@ -35,6 +35,9 @@ const (
 	xorRxBufKeepWindows = 32
 	// Minimum number of source shards to retain regardless of W.
 	xorRxMinCapacity = 512
+	// Upper bound for adaptive growth. Large enough for Starlink reorder without
+	// turning the XOR ring into an unbounded cache.
+	xorRxMaxCapacity = 8192
 )
 
 // ─── XOR FEC Sender ───────────────────────────────────────────────────────
@@ -70,6 +73,20 @@ func newXorFECSender(window int) *xorFECSender {
 		stride:  stride,
 		history: make([]xorSourceShard, 0, window),
 	}
+}
+
+func (x *xorFECSender) setStride(stride int) {
+	if stride <= 0 {
+		stride = 1
+	}
+	if stride > x.window {
+		stride = x.window
+	}
+	x.stride = stride
+}
+
+func (x *xorFECSender) stats() (window, stride, historyLen int) {
+	return x.window, x.stride, len(x.history)
 }
 
 // addSource adds a source shard to the sliding protection window.
@@ -192,6 +209,66 @@ func newXorFECReceiver(window int) *xorFECReceiver {
 		capacity: cap,
 		ring:     ring,
 	}
+}
+
+func (r *xorFECReceiver) ensureCapacity(minCapacity int) bool {
+	if minCapacity <= 0 {
+		return false
+	}
+	if minCapacity < xorRxMinCapacity {
+		minCapacity = xorRxMinCapacity
+	}
+	if minCapacity > xorRxMaxCapacity {
+		minCapacity = xorRxMaxCapacity
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if minCapacity <= r.capacity {
+		return false
+	}
+
+	newCap := r.capacity * 2
+	if newCap < minCapacity {
+		newCap = minCapacity
+	}
+	if newCap > xorRxMaxCapacity {
+		newCap = xorRxMaxCapacity
+	}
+	if newCap <= r.capacity {
+		return false
+	}
+
+	newRing := make([]xorRxSlot, newCap)
+	for i := range newRing {
+		newRing[i].data = make([]byte, 0, stripeMaxPayload+2)
+	}
+	for i := range r.ring {
+		slot := &r.ring[i]
+		if !slot.valid {
+			continue
+		}
+		idx := int(slot.seq % uint32(newCap))
+		dst := &newRing[idx]
+		if cap(dst.data) >= len(slot.data) {
+			dst.data = dst.data[:len(slot.data)]
+		} else {
+			dst.data = make([]byte, len(slot.data))
+		}
+		copy(dst.data, slot.data)
+		dst.seq = slot.seq
+		dst.valid = true
+	}
+	r.ring = newRing
+	r.capacity = newCap
+	return true
+}
+
+func (r *xorFECReceiver) stats() (window, capacity int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.window, r.capacity
 }
 
 // storeShard saves a source shard for potential XOR recovery.
