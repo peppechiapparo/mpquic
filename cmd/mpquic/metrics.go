@@ -118,14 +118,19 @@ type SessionStats struct {
 	XorActive   int    `json:"xor_active"`                   // 1=XOR TX on, 0=off (adaptive gate)
 	FECEncoded  uint64 `json:"fec_encoded"`  // FEC groups encoded (TX)
 	FECRecov    uint64 `json:"fec_recovered"`
+	TxtimeGapNs int64  `json:"txtime_gap_ns,omitempty"`
 
 	XorEmitted      uint64 `json:"xor_emitted,omitempty"`       // XOR repair packets sent
 	XorRecovered    uint64 `json:"xor_recovered,omitempty"`     // packets recovered via XOR
 	XorUnrecoverable uint64 `json:"xor_unrecoverable,omitempty"` // multi-loss windows (fell back to ARQ)
+	XorEffectivenessPct float64 `json:"xor_effectiveness_pct,omitempty"`
 
 	ARQNackSent    uint64 `json:"arq_nack_sent"`
 	ARQRetxRecv    uint64 `json:"arq_retx_recv"`
 	ARQDupFiltered uint64 `json:"arq_dup_filtered"`
+	ARQNackThresh  uint32 `json:"arq_nack_thresh,omitempty"`
+	ARQMaxOOO      uint32 `json:"arq_max_ooo,omitempty"`
+	ARQPendingSpan uint32 `json:"arq_pending_span,omitempty"`
 
 	LossRate  uint32 `json:"loss_rate_pct"` // peer-reported 0-100
 	UptimeSec float64 `json:"uptime_sec"`
@@ -149,10 +154,20 @@ type PathStats struct {
 	StripeRxBytes uint64 `json:"stripe_rx_bytes,omitempty"`
 	StripeRxPkts  uint64 `json:"stripe_rx_pkts,omitempty"`
 	StripeFECRecov uint64 `json:"stripe_fec_recovered,omitempty"`
+	StripeAdaptiveM      int    `json:"stripe_adaptive_m,omitempty"`
+	StripePeerLossRate   uint32 `json:"stripe_peer_loss_rate_pct,omitempty"`
+	StripeTxtimeGapNs    int64  `json:"stripe_txtime_gap_ns,omitempty"`
 	StripeXorActive      int    `json:"stripe_xor_active,omitempty"`
 	StripeXorEmitted     uint64 `json:"stripe_xor_emitted,omitempty"`
 	StripeXorRecovered   uint64 `json:"stripe_xor_recovered,omitempty"`
 	StripeXorUnrecoverable uint64 `json:"stripe_xor_unrecoverable,omitempty"`
+	StripeXorEffectivenessPct float64 `json:"stripe_xor_effectiveness_pct,omitempty"`
+	StripeARQNackSent    uint64 `json:"stripe_arq_nack_sent,omitempty"`
+	StripeARQRetxRecv    uint64 `json:"stripe_arq_retx_recv,omitempty"`
+	StripeARQDupFiltered uint64 `json:"stripe_arq_dup_filtered,omitempty"`
+	StripeARQNackThresh  uint32 `json:"stripe_arq_nack_thresh,omitempty"`
+	StripeARQMaxOOO      uint32 `json:"stripe_arq_max_ooo,omitempty"`
+	StripeARQPendingSpan uint32 `json:"stripe_arq_pending_span,omitempty"`
 }
 
 // GlobalStats is the top-level JSON response.
@@ -209,6 +224,7 @@ func snapshotServerSessions(ss *stripeServer) []SessionStats {
 			XorActive: int(atomic.LoadInt32(&sess.xorActive)),
 			FECEncoded: atomic.LoadUint64(&sess.fecEncoded),
 			FECRecov:   atomic.LoadUint64(&sess.rxFECRecov),
+			TxtimeGapNs: atomic.LoadInt64(&sess.txtimeGapNs),
 			LossRate:   atomic.LoadUint32(&sess.peerLossRate),
 			UptimeSec:  now.Sub(sess.createdAt).Seconds(),
 			DecryptFail: atomic.LoadUint64(&sess.securityDecryptFail),
@@ -220,8 +236,12 @@ func snapshotServerSessions(ss *stripeServer) []SessionStats {
 			s.XorRecovered = atomic.LoadUint64(&sess.xorRx.recovered)
 			s.XorUnrecoverable = atomic.LoadUint64(&sess.xorRx.unrecoverable)
 		}
+		if s.XorEmitted > 0 {
+			s.XorEffectivenessPct = (float64(s.XorRecovered) * 100.0) / float64(s.XorEmitted)
+		}
 		if sess.arqRx != nil {
 			s.ARQNackSent, s.ARQRetxRecv, s.ARQDupFiltered = sess.arqRx.stats()
+			s.ARQNackThresh, s.ARQMaxOOO, s.ARQPendingSpan = sess.arqRx.dynamicStats()
 		}
 		stats = append(stats, s)
 	}
@@ -247,6 +267,9 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 			ps.StripeRxBytes = atomic.LoadUint64(&p.stripeConn.rxBytes)
 			ps.StripeRxPkts = atomic.LoadUint64(&p.stripeConn.rxPkts)
 			ps.StripeFECRecov = atomic.LoadUint64(&p.stripeConn.fecRecov)
+			ps.StripeAdaptiveM = int(atomic.LoadInt32(&p.stripeConn.adaptiveM))
+			ps.StripePeerLossRate = atomic.LoadUint32(&p.stripeConn.peerLossRate)
+			ps.StripeTxtimeGapNs = atomic.LoadInt64(&p.stripeConn.txtimeGapNs)
 			ps.StripeXorActive = int(atomic.LoadInt32(&p.stripeConn.xorActive))
 			if p.stripeConn.xorTx != nil {
 				ps.StripeXorEmitted = atomic.LoadUint64(&p.stripeConn.xorTx.emitted)
@@ -254,6 +277,13 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 			if p.stripeConn.xorRx != nil {
 				ps.StripeXorRecovered = atomic.LoadUint64(&p.stripeConn.xorRx.recovered)
 				ps.StripeXorUnrecoverable = atomic.LoadUint64(&p.stripeConn.xorRx.unrecoverable)
+			}
+			if ps.StripeXorEmitted > 0 {
+				ps.StripeXorEffectivenessPct = (float64(ps.StripeXorRecovered) * 100.0) / float64(ps.StripeXorEmitted)
+			}
+			if p.stripeConn.arqRx != nil {
+				ps.StripeARQNackSent, ps.StripeARQRetxRecv, ps.StripeARQDupFiltered = p.stripeConn.arqRx.stats()
+				ps.StripeARQNackThresh, ps.StripeARQMaxOOO, ps.StripeARQPendingSpan = p.stripeConn.arqRx.dynamicStats()
 			}
 		}
 		stats = append(stats, ps)
@@ -438,6 +468,12 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "mpquic_session_xor_active{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.XorActive)
 		}
 
+		fmt.Fprintf(w, "\n# HELP mpquic_session_txtime_gap_ns Current kernel pacing gap in nanoseconds per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_txtime_gap_ns gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_txtime_gap_ns{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.TxtimeGapNs)
+		}
+
 		fmt.Fprintf(w, "\n# HELP mpquic_session_fec_encoded FEC groups encoded (TX) per session.\n")
 		fmt.Fprintf(w, "# TYPE mpquic_session_fec_encoded counter\n")
 		for _, s := range gs.Sessions {
@@ -448,6 +484,12 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_session_fec_recovered counter\n")
 		for _, s := range gs.Sessions {
 			fmt.Fprintf(w, "mpquic_session_fec_recovered{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.FECRecov)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_xor_effectiveness_pct XOR recovery effectiveness (recovered/emitted*100).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_xor_effectiveness_pct gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_xor_effectiveness_pct{session=\"%s\",peer=\"%s\"} %.6f\n", s.SessionID, s.PeerIP, s.XorEffectivenessPct)
 		}
 
 		fmt.Fprintf(w, "\n# HELP mpquic_session_arq_nack_sent ARQ NACKs sent per session.\n")
@@ -466,6 +508,24 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_session_arq_dup_filtered counter\n")
 		for _, s := range gs.Sessions {
 			fmt.Fprintf(w, "mpquic_session_arq_dup_filtered{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.ARQDupFiltered)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_arq_nack_thresh Current adaptive ARQ NACK threshold per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_arq_nack_thresh gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_arq_nack_thresh{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.ARQNackThresh)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_arq_max_ooo Current max observed out-of-order distance per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_arq_max_ooo gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_arq_max_ooo{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.ARQMaxOOO)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_arq_pending_span Current receive gap span tracked by ARQ (highest-base).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_arq_pending_span gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_arq_pending_span{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.ARQPendingSpan)
 		}
 
 		fmt.Fprintf(w, "\n# HELP mpquic_session_loss_rate_pct Peer-reported loss rate percentage.\n")
@@ -558,6 +618,24 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "mpquic_path_stripe_fec_recovered{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeFECRecov)
 		}
 
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_adaptive_m Current adaptive parity M per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_adaptive_m gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_adaptive_m{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeAdaptiveM)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_peer_loss_rate_pct Peer-reported loss rate for the client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_peer_loss_rate_pct gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_peer_loss_rate_pct{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripePeerLossRate)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_txtime_gap_ns Current kernel pacing gap in nanoseconds per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_txtime_gap_ns gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_txtime_gap_ns{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeTxtimeGapNs)
+		}
+
 		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_xor_active XOR FEC adaptive gate per path (1=ON, 0=OFF).\n")
 		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_active gauge\n")
 		for _, p := range gs.Paths {
@@ -580,6 +658,48 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_unrecoverable counter\n")
 		for _, p := range gs.Paths {
 			fmt.Fprintf(w, "mpquic_path_stripe_xor_unrecoverable{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeXorUnrecoverable)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_xor_effectiveness_pct XOR recovery effectiveness per client stripe path (recovered/emitted*100).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_xor_effectiveness_pct gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_xor_effectiveness_pct{path=\"%s\",bind=\"%s\"} %.6f\n", p.Name, p.BindIP, p.StripeXorEffectivenessPct)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_arq_nack_sent ARQ NACKs sent per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_arq_nack_sent counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_arq_nack_sent{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeARQNackSent)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_arq_retx_recv ARQ retransmissions received per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_arq_retx_recv counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_arq_retx_recv{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeARQRetxRecv)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_arq_dup_filtered Duplicate packets filtered per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_arq_dup_filtered counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_arq_dup_filtered{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeARQDupFiltered)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_arq_nack_thresh Current adaptive ARQ NACK threshold per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_arq_nack_thresh gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_arq_nack_thresh{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeARQNackThresh)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_arq_max_ooo Current max observed out-of-order distance per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_arq_max_ooo gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_arq_max_ooo{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeARQMaxOOO)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_arq_pending_span Current receive gap span tracked by ARQ per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_arq_pending_span gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_arq_pending_span{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeARQPendingSpan)
 		}
 		fmt.Fprintln(w)
 	}

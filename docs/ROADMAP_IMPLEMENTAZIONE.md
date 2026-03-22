@@ -2,6 +2,22 @@
 
 *Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-17*
 
+### Roadmap Fase 4e — Osservabilità Runtime e Rifondazione XOR FEC (2026-03-22)
+
+**Obiettivo**: Rendere misurabili i meccanismi adattivi introdotti in Fase 4d e preparare una revisione strutturale dello XOR FEC, che nei test reali continua a emettere repair senza produrre recovery osservabile.
+
+1. **Step 4.31 — Metriche Runtime Adaptive** (Completato)
+  - *Problema*: `txtimeGapNs`, `nackThresh`, `maxOOO` e la resa reale dello XOR non erano esportati. I test mostravano solo throughput finale, non il comportamento interno degli algoritmi adattivi.
+  - *Soluzione*: Esposizione Prometheus/JSON di pacing runtime, threshold ARQ dinamica, span dei gap in ricezione, peer loss e metrica di efficacia XOR (`recovered / emitted * 100`) sia lato client che lato server.
+
+2. **Step 4.32 — XOR FEC Effective / Rework guidato da reference esterne**
+  - *Problema*: L'implementazione XOR attuale è economica ma, nei test reali, resta spesso in stato `emitted > 0` e `recovered = 0`, segno che il modello di finestra fissa non sta intercettando correttamente il burst loss / reorder del canale.
+  - *Soluzione*: Avviare un redesign guidato da implementazioni robuste reperite online, usando come riferimenti:
+    - `irtf-nwcrg/swif-codec`: sliding-window FEC/RLC con approccio orientato a stream realtime e burst loss;
+    - `wangyu-/UDPspeeder`: FEC production-grade per link lossy con tuning di queue/interval/scatter;
+    - `xtaci/kcp-go`: integrazione FEC battle-tested e pipeline zero-allocation.
+  - *Deliverable*: benchmark comparativo, PoC integrabile in Go, decisione tra (a) sostituzione dello XOR a finestra fissa con sliding-window più robusto oppure (b) fallback definitivo a schema FEC diverso.
+
 ### Roadmap Fase 4d — Stabilizzazione Avanzata e Controllo Adattivo (2026-03-22)
 
 **Obiettivo**: Migliorare l'efficienza su link Starlink instabili basandosi sull'analisi delle metriche in tempo reale (eliminare l'overhead inutile dello XOR FEC sotto burst loss e mitigare la congestione indotta da pacing non adattivo).

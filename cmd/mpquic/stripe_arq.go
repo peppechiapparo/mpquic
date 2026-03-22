@@ -310,6 +310,19 @@ func (t *arqRxTracker) stats() (nacksSent, retxReceived, dupFiltered uint64) {
 	return atomic.LoadUint64(&t.nacksSent), atomic.LoadUint64(&t.retxReceived), atomic.LoadUint64(&t.dupFiltered)
 }
 
+func (t *arqRxTracker) dynamicStats() (nackThresh, maxOOO, pendingSpan uint32) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	nackThresh = t.nackThresh
+	maxOOO = t.maxOOO
+	if t.started && int32(t.highest-t.base) >= 0 {
+		pendingSpan = t.highest - t.base
+	}
+	return
+
+}
+
 // canSendNack returns true if enough time has elapsed since the last NACK.
 // This limits NACK rate to ~1 per RTT (arqNackCooldown) to avoid flooding.
 func (t *arqRxTracker) canSendNack() bool {
