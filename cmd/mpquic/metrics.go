@@ -136,6 +136,16 @@ type SessionStats struct {
 	RLCStride       int    `json:"rlc_stride,omitempty"`
 	RLCRxCapacity   int    `json:"rlc_rx_capacity,omitempty"`
 
+	RSILEmitted          uint64  `json:"rsil_emitted,omitempty"`
+	RSILRecovered        uint64  `json:"rsil_recovered,omitempty"`
+	RSILAttempts         uint64  `json:"rsil_attempts,omitempty"`
+	RSILSuccesses        uint64  `json:"rsil_successes,omitempty"`
+	RSILInsufficient     uint64  `json:"rsil_insufficient,omitempty"`
+	RSILEffectivenessPct float64 `json:"rsil_effectiveness_pct,omitempty"`
+	RSILK                int     `json:"rsil_k,omitempty"`
+	RSILM                int     `json:"rsil_m,omitempty"`
+	RSILDepth            int     `json:"rsil_depth,omitempty"`
+
 	ARQNackSent    uint64 `json:"arq_nack_sent"`
 	ARQRetxRecv    uint64 `json:"arq_retx_recv"`
 	ARQDupFiltered uint64 `json:"arq_dup_filtered"`
@@ -184,6 +194,15 @@ type PathStats struct {
 	StripeRLCWindow      int    `json:"stripe_rlc_window,omitempty"`
 	StripeRLCStride      int    `json:"stripe_rlc_stride,omitempty"`
 	StripeRLCRxCapacity  int    `json:"stripe_rlc_rx_capacity,omitempty"`
+	StripeRSILEmitted          uint64  `json:"stripe_rsil_emitted,omitempty"`
+	StripeRSILRecovered        uint64  `json:"stripe_rsil_recovered,omitempty"`
+	StripeRSILAttempts         uint64  `json:"stripe_rsil_attempts,omitempty"`
+	StripeRSILSuccesses        uint64  `json:"stripe_rsil_successes,omitempty"`
+	StripeRSILInsufficient     uint64  `json:"stripe_rsil_insufficient,omitempty"`
+	StripeRSILEffectivenessPct float64 `json:"stripe_rsil_effectiveness_pct,omitempty"`
+	StripeRSILK                int     `json:"stripe_rsil_k,omitempty"`
+	StripeRSILM                int     `json:"stripe_rsil_m,omitempty"`
+	StripeRSILDepth            int     `json:"stripe_rsil_depth,omitempty"`
 	StripeARQNackSent    uint64 `json:"stripe_arq_nack_sent,omitempty"`
 	StripeARQRetxRecv    uint64 `json:"stripe_arq_retx_recv,omitempty"`
 	StripeARQDupFiltered uint64 `json:"stripe_arq_dup_filtered,omitempty"`
@@ -276,6 +295,18 @@ func snapshotServerSessions(ss *stripeServer) []SessionStats {
 		if s.RLCEmitted > 0 {
 			s.RLCEffectivenessPct = (float64(s.RLCRecovered) * 100.0) / float64(s.RLCEmitted)
 		}
+		if sess.rsilTx != nil {
+			s.RSILEmitted = sess.rsilTx.stats()
+			s.RSILK = sess.rsilTx.K
+			s.RSILM = sess.rsilTx.M
+			s.RSILDepth = sess.rsilTx.depth
+		}
+		if sess.rsilRx != nil {
+			s.RSILRecovered, s.RSILAttempts, s.RSILSuccesses, s.RSILInsufficient = sess.rsilRx.stats()
+		}
+		if s.RSILEmitted > 0 {
+			s.RSILEffectivenessPct = (float64(s.RSILRecovered) * 100.0) / float64(s.RSILEmitted)
+		}
 		if sess.arqRx != nil {
 			s.ARQNackSent, s.ARQRetxRecv, s.ARQDupFiltered = sess.arqRx.stats()
 			s.ARQNackThresh, s.ARQMaxOOO, s.ARQPendingSpan = sess.arqRx.dynamicStats()
@@ -332,6 +363,18 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 			}
 			if ps.StripeRLCEmitted > 0 {
 				ps.StripeRLCEffectivenessPct = (float64(ps.StripeRLCRecovered) * 100.0) / float64(ps.StripeRLCEmitted)
+			}
+			if p.stripeConn.rsilTx != nil {
+				ps.StripeRSILEmitted = p.stripeConn.rsilTx.stats()
+				ps.StripeRSILK = p.stripeConn.rsilTx.K
+				ps.StripeRSILM = p.stripeConn.rsilTx.M
+				ps.StripeRSILDepth = p.stripeConn.rsilTx.depth
+			}
+			if p.stripeConn.rsilRx != nil {
+				ps.StripeRSILRecovered, ps.StripeRSILAttempts, ps.StripeRSILSuccesses, ps.StripeRSILInsufficient = p.stripeConn.rsilRx.stats()
+			}
+			if ps.StripeRSILEmitted > 0 {
+				ps.StripeRSILEffectivenessPct = (float64(ps.StripeRSILRecovered) * 100.0) / float64(ps.StripeRSILEmitted)
 			}
 			if p.stripeConn.arqRx != nil {
 				ps.StripeARQNackSent, ps.StripeARQRetxRecv, ps.StripeARQDupFiltered = p.stripeConn.arqRx.stats()
@@ -610,6 +653,42 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "mpquic_session_rlc_rx_capacity{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RLCRxCapacity)
 		}
 
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rsil_emitted RS-IL parity packets emitted per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rsil_emitted counter\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rsil_emitted{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RSILEmitted)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rsil_recovered Packets recovered via RS-IL per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rsil_recovered counter\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rsil_recovered{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RSILRecovered)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rsil_attempts RS-IL decode attempts per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rsil_attempts counter\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rsil_attempts{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RSILAttempts)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rsil_successes RS-IL successful decodes per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rsil_successes counter\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rsil_successes{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RSILSuccesses)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rsil_insufficient RS-IL insufficient shards (no recovery possible) per session.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rsil_insufficient counter\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rsil_insufficient{session=\"%s\",peer=\"%s\"} %d\n", s.SessionID, s.PeerIP, s.RSILInsufficient)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_session_rsil_effectiveness_pct RS-IL recovery effectiveness (recovered/emitted*100).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_session_rsil_effectiveness_pct gauge\n")
+		for _, s := range gs.Sessions {
+			fmt.Fprintf(w, "mpquic_session_rsil_effectiveness_pct{session=\"%s\",peer=\"%s\"} %.6f\n", s.SessionID, s.PeerIP, s.RSILEffectivenessPct)
+		}
+
 		fmt.Fprintf(w, "\n# HELP mpquic_session_arq_nack_sent ARQ NACKs sent per session.\n")
 		fmt.Fprintf(w, "# TYPE mpquic_session_arq_nack_sent counter\n")
 		for _, s := range gs.Sessions {
@@ -848,6 +927,42 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rlc_rx_capacity gauge\n")
 		for _, p := range gs.Paths {
 			fmt.Fprintf(w, "mpquic_path_stripe_rlc_rx_capacity{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRLCRxCapacity)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rsil_emitted RS-IL parity packets emitted per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rsil_emitted counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rsil_emitted{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRSILEmitted)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rsil_recovered Packets recovered via RS-IL per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rsil_recovered counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rsil_recovered{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRSILRecovered)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rsil_attempts RS-IL decode attempts per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rsil_attempts counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rsil_attempts{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRSILAttempts)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rsil_successes RS-IL successful decodes per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rsil_successes counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rsil_successes{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRSILSuccesses)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rsil_insufficient RS-IL insufficient shards per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rsil_insufficient counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rsil_insufficient{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripeRSILInsufficient)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_rsil_effectiveness_pct RS-IL recovery effectiveness per client stripe path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_rsil_effectiveness_pct gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_rsil_effectiveness_pct{path=\"%s\",bind=\"%s\"} %.6f\n", p.Name, p.BindIP, p.StripeRSILEffectivenessPct)
 		}
 
 		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_arq_nack_sent ARQ NACKs sent per client stripe path.\n")

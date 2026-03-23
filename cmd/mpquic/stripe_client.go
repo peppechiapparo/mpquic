@@ -41,6 +41,10 @@ type stripeClientConn struct {
 	rlcRx     *rlcFECReceiver // RLC RX decoder (nil if fecType != "rlc")
 	rlcActive int32           // atomic: 1=emit RLC repairs, 0=skip (adaptive gate)
 
+	// RS Interleaved FEC (always-on, small generations + interleaving)
+	rsilTx *rsilTx // RS interleaved TX (nil unless fec_type=rs && interleave>0)
+	rsilRx *rsilRx // RS interleaved RX decoder
+
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
 
@@ -234,12 +238,18 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	// In "adaptive" mode, create encoder but start with adaptiveM=0.
 	// When fecType is a sliding-window codec (xor / rlc), RS encoder is not used
 	// and the M=0 fast path carries source data while repair packets are emitted separately.
+	// When fecType is "rs" with interleave > 0, also use M=0 fast path + RS interleaved parity.
+	interleaveDepth := cfg.StripeFECInterleave
 	var enc reedsolomon.Encoder
 	if fecMode == "off" {
 		parityM = 0
 	} else if fecType == "xor" || fecType == "rlc" {
 		// Sliding-window FEC mode: RS encoder not needed, force M=0 so data goes through fast path.
 		// Repair packets are generated separately.
+		parityM = 0
+	} else if fecType == "rs" && interleaveDepth > 0 {
+		// RS interleaved mode: data goes through M=0 fast path, parity emitted by rsilTx.
+		// RS encoder is created inside rsilTx, not here.
 		parityM = 0
 	} else if parityM > 0 {
 		enc, err = reedsolomon.New(dataK, parityM)
@@ -305,6 +315,30 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		} else {
 			atomic.StoreInt32(&scc.rlcActive, 1)
 		}
+	}
+
+	// RS Interleaved FEC: always-on, small generations + interleaving
+	if fecType == "rs" && interleaveDepth > 0 && fecMode != "off" {
+		rsilK := dataK
+		if rsilK <= 0 || rsilK > 255 {
+			rsilK = rsilDefaultK
+		}
+		rsilM := cfg.StripeParityShards
+		if rsilM <= 0 {
+			rsilM = rsilDefaultM
+		}
+		rsilTxInst, err := newRSILTx(rsilK, rsilM, interleaveDepth)
+		if err != nil {
+			scc.Close()
+			return nil, fmt.Errorf("stripe: RS interleaved TX encoder: %w", err)
+		}
+		rsilRxInst, err := newRSILRx(rsilK, rsilM, interleaveDepth)
+		if err != nil {
+			scc.Close()
+			return nil, fmt.Errorf("stripe: RS interleaved RX decoder: %w", err)
+		}
+		scc.rsilTx = rsilTxInst
+		scc.rsilRx = rsilRxInst
 	}
 
 	if cfg.StripeARQ {
@@ -455,6 +489,8 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		fecStr = fmt.Sprintf("FEC=xor W=%d mode=%s", scc.xorTx.window, fecMode)
 	} else if fecType == "rlc" && scc.rlcTx != nil {
 		fecStr = fmt.Sprintf("FEC=rlc W=%d mode=%s", scc.rlcTx.window, fecMode)
+	} else if scc.rsilTx != nil {
+		fecStr = fmt.Sprintf("FEC=rs-il K=%d M=%d D=%d mode=%s", scc.rsilTx.K, scc.rsilTx.M, scc.rsilTx.depth, fecMode)
 	}
 	logger.Infof("stripe client ready: session=%08x pipes=%d %s pacing=%s arq=%s gso=%s txtime=%s server=%s encrypted=AES-256-GCM",
 		sessionID, len(scc.pipes), fecStr, pacingStr, arqStr, gsoStr, txtimeStr, serverAddr)
@@ -525,6 +561,14 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 		if scc.rlcTx != nil && atomic.LoadInt32(&scc.rlcActive) == 1 {
 			if repair, firstSeq, count, ok := scc.rlcTx.addSource(seq, shardData); ok {
 				scc.sendRLCRepairLocked(firstSeq, uint8(count), repair)
+			}
+		}
+
+		// RS Interleaved FEC: feed source to interleave accumulator, emit parity when group fills.
+		if scc.rsilTx != nil {
+			parities := scc.rsilTx.addSource(seq, shardData)
+			for _, p := range parities {
+				scc.sendRSILParityLocked(p)
 			}
 		}
 
@@ -748,6 +792,30 @@ func (scc *stripeClientConn) sendRLCRepairLocked(firstSeq uint32, window uint8, 
 	}
 }
 
+// sendRSILParityLocked sends a single RS interleaved parity shard. Caller must hold txMu.
+func (scc *stripeClientConn) sendRSILParityLocked(p rsilParity) {
+	wirePkt := stripeEncryptShard(scc.txCipher, &stripeHdr{
+		Magic:      stripeMagic,
+		Version:    stripeVersion,
+		Type:       stripeRS_IL_PARITY,
+		Session:    scc.sessionID,
+		GroupSeq:   p.BaseSeq,
+		ShardIdx:   p.ShardIdx,
+		GroupDataN: p.K,
+		DataLen:    uint16(len(p.Data)),
+	}, p.Data)
+	if scc.pacer != nil {
+		scc.pacer.pace(len(wirePkt))
+	}
+	idx := atomic.AddUint32(&scc.txPipe, 1) - 1
+	pipeIdx := int(idx) % len(scc.pipes)
+	if scc.gsoEnabled && atomic.LoadUint32(&scc.gsoDisabled) == 0 {
+		scc.gsoAccumLocked(pipeIdx, wirePkt)
+	} else {
+		scc.writePacedUDP(pipeIdx, wirePkt)
+	}
+}
+
 func (scc *stripeClientConn) flushTxGroup() {
 	// Don't flush if connection is closing/closed
 	select {
@@ -769,6 +837,13 @@ func (scc *stripeClientConn) flushTxGroup() {
 	if scc.rlcTx != nil && atomic.LoadInt32(&scc.rlcActive) == 1 {
 		if repair, firstSeq, window, ok := scc.rlcTx.flush(); ok {
 			scc.sendRLCRepairLocked(firstSeq, uint8(window), repair)
+		}
+	}
+	// Flush partial RS interleaved groups.
+	if scc.rsilTx != nil {
+		parities := scc.rsilTx.flush()
+		for _, p := range parities {
+			scc.sendRSILParityLocked(p)
 		}
 	}
 	// Flush any GSO-accumulated packets from the FEC group above.
@@ -1007,6 +1082,8 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 				scc.handleXorRepair(hdr, payload)
 			case stripeRLC_REPAIR:
 				scc.handleRLCRepair(hdr, payload)
+			case stripeRS_IL_PARITY:
+				scc.handleRSILParity(hdr, payload)
 			}
 		}
 	}
@@ -1051,6 +1128,10 @@ func (scc *stripeClientConn) handleRxShard(hdr stripeHdr, payload []byte, isPari
 		if scc.rlcRx != nil {
 			scc.rlcRx.storeShard(hdr.GroupSeq, payload)
 		}
+		// RS Interleaved: store for parity-based recovery.
+		if scc.rsilRx != nil {
+			scc.rsilRx.storeShard(hdr.GroupSeq, payload)
+		}
 		return
 	}
 
@@ -1064,6 +1145,10 @@ func (scc *stripeClientConn) handleRxShard(hdr stripeHdr, payload []byte, isPari
 			}
 			if scc.rlcRx != nil {
 				scc.rlcRx.storeShard(hdr.GroupSeq, payload)
+			}
+			// RS Interleaved: store for parity-based recovery.
+			if scc.rsilRx != nil {
+				scc.rsilRx.storeShard(hdr.GroupSeq, payload)
 			}
 		}
 		return
@@ -1233,6 +1318,36 @@ func (scc *stripeClientConn) handleRLCRepair(hdr stripeHdr, payload []byte) {
 		atomic.AddUint64(&scc.rxDirectCount, 1)
 		select {
 		case scc.rxCh <- rp.pkt:
+		case <-scc.closeCh:
+			return
+		default:
+		}
+	}
+}
+
+// handleRSILParity processes a received RS interleaved parity packet.
+// Looks up stored data shards, attempts RS reconstruction, delivers recovered packets.
+func (scc *stripeClientConn) handleRSILParity(hdr stripeHdr, payload []byte) {
+	if scc.rsilRx == nil || len(payload) == 0 {
+		return
+	}
+	K := int(hdr.GroupDataN)
+	if K <= 0 {
+		return
+	}
+	recovered := scc.rsilRx.addParity(hdr.GroupSeq, int(hdr.ShardIdx), K, payload)
+	for _, rp := range recovered {
+		atomic.AddUint64(&scc.fecRecov, 1)
+		if scc.arqRx != nil {
+			if !scc.arqRx.markReceived(rp.Seq) {
+				scc.arqRx.addDupFiltered(1)
+				continue
+			}
+			scc.arqRx.addRetxReceived(1)
+		}
+		atomic.AddUint64(&scc.rxDirectCount, 1)
+		select {
+		case scc.rxCh <- rp.Pkt:
 		case <-scc.closeCh:
 			return
 		default:

@@ -1,8 +1,77 @@
 # Roadmap implementazione MPQUIC
 
-*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-17*
+*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-23*
 
-### Roadmap Fase 4f — Sostituzione XOR con Sliding-Window RLC (2026-03-22)
+### Roadmap Fase 4g — Systematic RS Interleaved Always-On (2026-03-23)
+
+**Obiettivo**: sostituire tutti i tentativi FEC precedenti (XOR sliding-window, RLC sliding-window,
+RS adattivo selettivo) con un design industriale ispirato a UDPspeeder/kcp-go: **Reed-Solomon
+sistematico con generazioni piccole, interleaving tra generazioni, always-on**.
+
+**Razionale**: i test reali su link Starlink bonded hanno dimostrato che:
+- XOR singola parità non recupera burst >1 (recovered = 0 su tutti i run);
+- RLC sliding-window: decoder inefficace (60-67% underdetermined, 7-13% successo);
+- RS adattivo con gating on/off selettivo: test catastrofico, instabilità peggiorativa.
+
+Il pattern reale Starlink presenta reorder profondo (max_ooo 2600-3900) e burst loss
+concentrati. La strategia corretta è:
+1. **Always-on** con overhead fisso basso (20-25%), no gating adattivo on/off
+2. **Generazioni piccole** (K=4) che si chiudono rapidamente
+3. **Interleaving** tra D=4 generazioni: pacchetti consecutivi vanno a generazioni diverse,
+   così un burst di 4 pacchetti persi colpisce 4 generazioni diverse, ognuna perde 1 solo
+   pacchetto → RS(4,1) recupera tutto
+4. **ARQ come fallback** per burst > D×M
+
+**Design**:
+```
+Pacchetti TX:   P0  P1  P2  P3  P4  P5  P6  P7  P8  P9  P10  P11 ...
+                 │   │   │   │   │   │   │   │   │   │    │    │
+Generazione:    G0  G1  G2  G3  G0  G1  G2  G3  G0  G1   G2   G3
+                
+G0 = {P0, P4, P8, P12}  → RS(4,1) → parity R0
+G1 = {P1, P5, P9, P13}  → RS(4,1) → parity R1
+...
+
+Burst loss [P3,P4,P5,P6]:
+  G3 perde P3 → recupera ✓ (solo 1 loss/gen)
+  G0 perde P4 → recupera ✓
+  G1 perde P5 → recupera ✓
+  G2 perde P6 → recupera ✓
+  → burst di 4 completamente coperto, zero ARQ
+```
+
+**Step implementativi**:
+
+1. **Step 4.34 — RS Interleaved Core** (In corso)
+   - Nuovo file `stripe_fec_rs_interleaved.go` con accumulatore TX interleaved e decoder RX
+   - Nuovo packet type `stripeRS_IL_PARITY` (0x08)
+   - Parametri: K=4 data shards, M=1 parity, depth=4 interleave
+   - TX: ogni pacchetto inviato immediatamente (M=0 fast path), poi accumulato in
+     generazione round-robin; parity emessa quando la generazione ha K shards
+   - RX: dati consegnati subito, parity usata per ricostruire shards mancanti
+   - Unit test di recovery: single loss, burst, interleaving coverage
+
+2. **Step 4.35 — Integrazione e Deploy** (Prossimo)
+   - Config: `stripe_fec_interleave: 4` abilita RS interleaved, default K=4 M=1
+   - Metriche: `rsil_emitted`, `rsil_recovered`, `rsil_attempts`, `rsil_insufficient`
+   - Deploy always-on: `stripe_fec_mode: always`, `stripe_fec_type: rs`
+   - Campagna test reale vs baseline ARQ-only
+
+**Parametri iniziali**:
+
+| Parametro | Valore | Razionale |
+|-----------|--------|-----------|
+| K (data) | 4 | Generazione piccola, bassa latenza |
+| M (parity) | 1 | 20% overhead, recupera 1 loss per generazione |
+| Interleave depth | 4 | Copre burst fino a 4 pacchetti consecutivi |
+| Mode | always | Stabilità > efficienza, no gating instabile |
+| ARQ | attivo come fallback | Copre burst > depth×M |
+
+**Reference**: wangyu-/UDPspeeder (RS in produzione su link lossy), xtaci/kcp-go
+
+---
+
+### Roadmap Fase 4f — Sostituzione XOR con Sliding-Window RLC (2026-03-22) — ARCHIVIATA
 
 **Obiettivo**: archiviare l'esperimento XOR come non adatto al pattern reale di reorder/loss del progetto e sostituirlo con un codec sliding-window più robusto, mantenendo l'ARQ come rete di sicurezza.
 

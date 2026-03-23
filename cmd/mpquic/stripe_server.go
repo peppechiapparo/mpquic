@@ -47,6 +47,10 @@ type stripeSession struct {
 	rlcRx     *rlcFECReceiver // RLC RX decoder (nil if fecType != "rlc")
 	rlcActive int32           // atomic: 1=emit RLC repairs, 0=skip (adaptive gate)
 
+	// RS Interleaved FEC (always-on, small generations + interleaving)
+	rsilTx *rsilTx // RS interleaved TX (nil unless fec_type=rs && interleave>0)
+	rsilRx *rsilRx // RS interleaved RX decoder
+
 	// Pacing
 	pacer *stripePacer // TX rate limiter (nil = disabled)
 
@@ -280,6 +284,14 @@ func (sdc *stripeServerDC) SendDatagram(pkt []byte) error {
 			}
 		}
 
+		// RS Interleaved FEC: feed source to interleave accumulator, emit parity when group fills.
+		if sess.rsilTx != nil {
+			parities := sess.rsilTx.addSource(seq, shardData)
+			for _, p := range parities {
+				sdc.sendRSILParityLocked(p, activePipes)
+			}
+		}
+
 		return nil
 	}
 
@@ -478,6 +490,26 @@ func (sdc *stripeServerDC) sendRLCRepairLocked(firstSeq uint32, window uint8, re
 	sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
 }
 
+// sendRSILParityLocked sends a single RS interleaved parity shard. Caller must hold sess.txMu.
+func (sdc *stripeServerDC) sendRSILParityLocked(p rsilParity, activePipes []*net.UDPAddr) {
+	sess := sdc.session
+	wirePkt := stripeEncryptShard(sess.txCipher, &stripeHdr{
+		Magic:      stripeMagic,
+		Version:    stripeVersion,
+		Type:       stripeRS_IL_PARITY,
+		Session:    sess.sessionID,
+		GroupSeq:   p.BaseSeq,
+		ShardIdx:   p.ShardIdx,
+		GroupDataN: p.K,
+		DataLen:    uint16(len(p.Data)),
+	}, p.Data)
+	if sess.pacer != nil {
+		sess.pacer.pace(len(wirePkt))
+	}
+	pipeIdx := int(atomic.AddUint32(&sess.txPipe, 1)-1) % len(activePipes)
+	sdc.txBatchAddLocked(wirePkt, activePipes[pipeIdx])
+}
+
 func (sdc *stripeServerDC) resetFlushTimer() {
 	sess := sdc.session
 	if sess.txTimer != nil {
@@ -504,6 +536,9 @@ type stripeServer struct {
 	fecMode    string // "always", "adaptive", "off"
 	fecType    string // "rs" (default), "xor", "rlc"
 	fecWindow  int    // sliding-window size W (used when fecType=xor|rlc)
+	interleaveDepth int // RS interleave depth (0=block RS, >0=interleaved)
+	rsilK           int // RS-IL data shards per generation (== dataK or default)
+	rsilM           int // RS-IL parity shards per generation (original parityM or default)
 	pacingRate int    // Mbps per session (0 = disabled)
 	arqEnabled bool   // Hybrid ARQ enabled
 	txtimeEnabled bool // SO_TXTIME probed OK on listener socket
@@ -556,10 +591,23 @@ func newStripeServer(cfg *Config, tun *water.Interface, tunMultiQueue bool, ct *
 	if fecWindow <= 0 {
 		fecWindow = xorFECDefaultWindow
 	}
+	interleaveDepth := cfg.StripeFECInterleave
+	// Compute RS-IL K/M from config before parityM is zeroed
+	rsilK := dataK
+	if rsilK <= 0 || rsilK > 255 {
+		rsilK = rsilDefaultK
+	}
+	rsilM := cfg.StripeParityShards
+	if rsilM <= 0 {
+		rsilM = rsilDefaultM
+	}
 	if fecMode == "off" {
 		parityM = 0
 	} else if fecType == "xor" || fecType == "rlc" {
 		// Sliding-window mode: RS not needed, force M=0 so data goes through fast path.
+		parityM = 0
+	} else if fecType == "rs" && interleaveDepth > 0 {
+		// RS interleaved mode: data goes through M=0 fast path, parity emitted by rsilTx.
 		parityM = 0
 	}
 
@@ -576,6 +624,9 @@ func newStripeServer(cfg *Config, tun *water.Interface, tunMultiQueue bool, ct *
 		fecMode:    fecMode,
 		fecType:    fecType,
 		fecWindow:  fecWindow,
+		interleaveDepth: interleaveDepth,
+		rsilK:      rsilK,
+		rsilM:      rsilM,
 		pacingRate: cfg.StripePacingRate,
 		arqEnabled: cfg.StripeARQ,
 		logger:     logger,
@@ -814,6 +865,8 @@ dispatch:
 		ss.handleXorRepairServer(hdr, payload, from)
 	case stripeRLC_REPAIR:
 		ss.handleRLCRepairServer(hdr, payload, from)
+	case stripeRS_IL_PARITY:
+		ss.handleRSILParityServer(hdr, payload, from)
 	}
 }
 
@@ -901,6 +954,21 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 				atomic.StoreInt32(&sess.rlcActive, 1)
 			}
 		}
+		// RS Interleaved FEC: create per-session TX/RX when fec_type=rs && interleave>0 and not off.
+		if ss.fecType == "rs" && ss.interleaveDepth > 0 && ss.fecMode != "off" {
+			rsilTxInst, err := newRSILTx(ss.rsilK, ss.rsilM, ss.interleaveDepth)
+			if err != nil {
+				ss.logger.Errorf("stripe: session %08x RS-IL TX encoder: %v", sessionID, err)
+			} else {
+				sess.rsilTx = rsilTxInst
+			}
+			rsilRxInst, err := newRSILRx(ss.rsilK, ss.rsilM, ss.interleaveDepth)
+			if err != nil {
+				ss.logger.Errorf("stripe: session %08x RS-IL RX decoder: %v", sessionID, err)
+			} else {
+				sess.rsilRx = rsilRxInst
+			}
+		}
 		// Set initial adaptive M
 		if ss.fecMode == "adaptive" {
 			atomic.StoreInt32(&sess.adaptiveM, 0) // start with no parity
@@ -951,6 +1019,13 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 					sdc.sendRLCRepairLocked(firstSeq, uint8(window), repair, sess.txActivePipes)
 				}
 			}
+			// Flush partial RS interleaved groups.
+			if sess.rsilTx != nil && len(sess.txActivePipes) > 0 {
+				parities := sess.rsilTx.flush()
+				for _, p := range parities {
+					sdc.sendRSILParityLocked(p, sess.txActivePipes)
+				}
+			}
 			sdc.txBatchFlushLocked() // flush any partial batch from FEC timer
 			sdc.resetFlushTimer()
 			sess.txMu.Unlock()
@@ -958,7 +1033,11 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 
 		_, cancel := context.WithCancel(context.Background())
 		ss.ct.registerStripe(peerIP, fmt.Sprintf("stripe:%08x", sessionID), sdc, cancel)
-		ss.logger.Infof("stripe session created: peer=%s session=%08x pipes=%d", peerIP, sessionID, totalPipes)
+		fecStr := fmt.Sprintf("FEC=%d+%d mode=%s type=%s", ss.dataK, ss.parityM, ss.fecMode, ss.fecType)
+		if sess.rsilTx != nil {
+			fecStr = fmt.Sprintf("FEC=rs-il K=%d M=%d D=%d mode=%s", sess.rsilTx.K, sess.rsilTx.M, sess.rsilTx.depth, ss.fecMode)
+		}
+		ss.logger.Infof("stripe session created: peer=%s session=%08x pipes=%d %s", peerIP, sessionID, totalPipes, fecStr)
 
 		// Open per-session TUN fd via IFF_MULTI_QUEUE for parallel writes.
 		// Each tunWriter goroutine gets its own kernel queue, avoiding
@@ -1221,6 +1300,10 @@ func (ss *stripeServer) handleDataShard(hdr stripeHdr, payload []byte, from *net
 			if sess.rlcRx != nil {
 				sess.rlcRx.storeShard(hdr.GroupSeq, payload)
 			}
+			// RS Interleaved: store for parity-based recovery.
+			if sess.rsilRx != nil {
+				sess.rsilRx.storeShard(hdr.GroupSeq, payload)
+			}
 			select {
 			case sess.rxCh <- pkt:
 			default:
@@ -1330,6 +1413,41 @@ func (ss *stripeServer) handleRLCRepairServer(hdr stripeHdr, payload []byte, fro
 		atomic.AddUint64(&sess.rxDirectCount, 1)
 		pkt := getPktBuf(len(rp.pkt))
 		copy(pkt, rp.pkt)
+		select {
+		case sess.rxCh <- pkt:
+		default:
+			putPktBuf(pkt)
+		}
+	}
+}
+
+// handleRSILParityServer processes a received RS interleaved parity packet from a client.
+func (ss *stripeServer) handleRSILParityServer(hdr stripeHdr, payload []byte, from *net.UDPAddr) {
+	sess := ss.lookupSession(hdr.Session, from)
+	if sess == nil || sess.rsilRx == nil || len(payload) == 0 {
+		return
+	}
+	sess.lastActivity = time.Now()
+
+	K := int(hdr.GroupDataN)
+	if K <= 0 {
+		return
+	}
+	recovered := sess.rsilRx.addParity(hdr.GroupSeq, int(hdr.ShardIdx), K, payload)
+	for _, rp := range recovered {
+		atomic.AddUint64(&sess.rxFECRecov, 1)
+		atomic.AddUint64(&sess.rxPkts, 1)
+		atomic.AddUint64(&sess.rxBytes, uint64(len(rp.Pkt)))
+		if sess.arqRx != nil {
+			if !sess.arqRx.markReceived(rp.Seq) {
+				sess.arqRx.addDupFiltered(1)
+				continue
+			}
+			sess.arqRx.addRetxReceived(1)
+		}
+		atomic.AddUint64(&sess.rxDirectCount, 1)
+		pkt := getPktBuf(len(rp.Pkt))
+		copy(pkt, rp.Pkt)
 		select {
 		case sess.rxCh <- pkt:
 		default:

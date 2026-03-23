@@ -61,8 +61,9 @@ const (
 	stripeREGISTER  uint8 = 0x03
 	stripeKEEPALIVE uint8 = 0x04
 	stripeNACK        uint8 = 0x05
-	stripeXOR_REPAIR  uint8 = 0x06
-	stripeRLC_REPAIR  uint8 = 0x07
+	stripeXOR_REPAIR    uint8 = 0x06
+	stripeRLC_REPAIR    uint8 = 0x07
+	stripeRS_IL_PARITY  uint8 = 0x08 // RS interleaved parity shard
 
 	// Header: magic(2) + ver(1) + type(1) + session(4) + groupSeq(4) + shardIdx(1) + groupDataN(1) + dataLen(2) = 16
 	stripeHdrLen = 16

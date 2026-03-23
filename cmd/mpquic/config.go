@@ -48,6 +48,7 @@ type Config struct {
 	StripeDisableGSO      bool                  `yaml:"stripe_disable_gso"` // Disable UDP GSO (for A/B testing)
 	StripeFECType         string                `yaml:"stripe_fec_type"`    // "rs" (default), "xor" (legacy), "rlc"
 	StripeFECWindow       int                   `yaml:"stripe_fec_window"`  // Sliding-window size W (default 10, used by xor/rlc)
+	StripeFECInterleave   int                   `yaml:"stripe_fec_interleave"` // RS interleave depth (0=block RS, >0=interleaved, default 4)
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
 	MetricsListen         string                `yaml:"metrics_listen"` // e.g. "10.200.17.254:9090" — bind to tunnel IP only
 }
