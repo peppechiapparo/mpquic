@@ -13,11 +13,10 @@ tls_insecure_skip_verify: false
 congestion_algorithm: bbr
 transport_mode: reliable
 stripe_port: 46017
-stripe_data_shards: 4
-stripe_parity_shards: 1
-stripe_fec_mode: always
+stripe_data_shards: 10
+stripe_parity_shards: 2
+stripe_fec_mode: adaptive
 stripe_fec_type: rs
-stripe_fec_interleave: 4
 stripe_fec_window: 10
 stripe_arq: true
 multipath_paths:
