@@ -16,6 +16,9 @@ func runTunnel(ctx context.Context, cfg *Config, conn datagramConn, logger *Logg
 	if err != nil {
 		return err
 	}
+	if err := configureTUN(cfg.TunName, cfg.TunCIDR, cfg.TunMTU, logger); err != nil {
+		return fmt.Errorf("configure TUN: %w", err)
+	}
 	var tunCloseOnce sync.Once
 	closeTun := func() { tunCloseOnce.Do(func() { tun.Close() }) }
 	defer closeTun()

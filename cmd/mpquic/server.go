@@ -6,12 +6,39 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/songgao/water"
 )
+
+// configureTUN applies IP address, MTU and UP state to a TUN device.
+// This is called AFTER water.New() to ensure the config is applied even
+// if the library recreated the device (which wipes ensure_tun.sh settings).
+func configureTUN(name, cidr string, mtu int, logger *Logger) error {
+	if cidr == "" {
+		return nil // nothing to configure (server-side may not have cidr)
+	}
+	if mtu <= 0 {
+		mtu = 1300
+	}
+	cmds := [][]string{
+		{"ip", "addr", "replace", cidr, "dev", name},
+		{"ip", "link", "set", name, "mtu", fmt.Sprintf("%d", mtu)},
+		{"ip", "link", "set", name, "up"},
+	}
+	for _, args := range cmds {
+		out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%s: %w (%s)", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		}
+	}
+	logger.Infof("TUN %s configured: cidr=%s mtu=%d up=true", name, cidr, mtu)
+	return nil
+}
 
 func runServer(ctx context.Context, cfg *Config, logger *Logger) error {
 	if cfg.MultiConnEnabled {
@@ -62,6 +89,9 @@ func runServerMultiConn(ctx context.Context, cfg *Config, logger *Logger) error 
 		return err
 	}
 	defer tun.Close()
+	if err := configureTUN(cfg.TunName, cfg.TunCIDR, cfg.TunMTU, logger); err != nil {
+		return fmt.Errorf("configure TUN: %w", err)
+	}
 
 	ct := newConnectionTable()
 	defer ct.closeAll()
@@ -297,6 +327,9 @@ func runServerSingleConn(ctx context.Context, cfg *Config, logger *Logger) error
 		return err
 	}
 	defer tun.Close()
+	if err := configureTUN(cfg.TunName, cfg.TunCIDR, cfg.TunMTU, logger); err != nil {
+		return fmt.Errorf("configure TUN: %w", err)
+	}
 
 	// Single TUN reader goroutine prevents goroutine leak on client reconnect.
 	// Previously each runTunnelWithTUN call spawned its own tun.Read goroutine

@@ -120,18 +120,20 @@ if [[ -f deploy/systemd/mpquic@.service ]]; then
 fi
 log "binary installed to /usr/local/bin/mpquic"
 
-# ── Step 6: Restart all instances ─────────────────────────────────────────
+# ── Step 6: Restart all instances (sequential to avoid TUN race) ──────────
 if [[ ${#INSTANCES[@]} -gt 0 ]]; then
   log "--- starting ${#INSTANCES[@]} instance(s) ---"
   systemctl daemon-reload
-  for inst in "${INSTANCES[@]}"; do
-    systemctl start "mpquic@${inst}"
-  done
-  sleep 2
 
-  # Quick status check
+  # Start instances sequentially with a brief delay between each.
+  # Parallel starts cause race conditions in TUN device creation:
+  # ensure_tun.sh configures IP/MTU/UP, then the binary's water.New()
+  # can recreate the device, wiping the config. Sequential start
+  # with 0.5s delay eliminates this race.
   local_fail=0
   for inst in "${INSTANCES[@]}"; do
+    systemctl start "mpquic@${inst}"
+    sleep 0.5
     state="$(systemctl is-active "mpquic@${inst}" 2>/dev/null || echo 'unknown')"
     if [[ "$state" != "active" ]]; then
       log "  ⚠ mpquic@${inst}: $state"

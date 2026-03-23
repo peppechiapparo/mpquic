@@ -26,6 +26,7 @@ type Config struct {
 	MultipathPaths        []MultipathPathConfig `yaml:"multipath_paths"`
 	TunName               string                `yaml:"tun_name"`
 	TunCIDR               string                `yaml:"tun_cidr"`
+	TunMTU                int                   `yaml:"tun_mtu"`
 	LogLevel              string                `yaml:"log_level"`
 	TLSCertFile           string                `yaml:"tls_cert_file"`
 	TLSKeyFile            string                `yaml:"tls_key_file"`
@@ -152,6 +153,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if cfg.TunCIDR == "" {
 		return nil, fmt.Errorf("tun_cidr required")
+	}
+	if cfg.TunMTU <= 0 {
+		cfg.TunMTU = 1300
 	}
 
 	// Resolve metrics_listen: "auto" → derive from tun_cidr IP + port 9090
