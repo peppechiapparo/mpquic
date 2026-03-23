@@ -2,6 +2,47 @@
 
 ## 2026-03-23
 
+### Step 4.36 — Fix TUN race condition + validazione stabilità (v4.8)
+
+#### Bug Fix: configureTUN race condition (commit `64c52fc`)
+- **Problema**: `openTUN()` con `IFF_MULTI_QUEUE` ricrea il device TUN, cancellando IP/MTU/stato
+  configurati da `ensure_tun.sh`. Il primo `tun.Write()` fallisce con `invalid argument` →
+  cascata reconnect infinita (osservati 6049 cicli di restart su PID 345198).
+- **Fix**: nuova funzione `configureTUN(name, cidr, mtu, logger)` chiamata dopo ogni `openTUN()`.
+  Esegue `ip addr replace`, `ip link set mtu`, `ip link set up` per garantire configurazione
+  corretta indipendentemente da script esterni.
+- **Wired in**: server.go (multiconn + singleconn), tunnel.go (client).
+- **Aggiunto**: campo config `tun_mtu` (default 1300).
+- **mpquic-update.sh**: restart sequenziale con 0.5s delay (era parallelo, causava conflitti TUN).
+
+#### Test di saturazione (5 iterazioni, v4.8 tag)
+Comando: `iperf3 -c 10.200.17.254 -p 5201 -t 20 -P 30 -R --bind-dev mp1`
+
+| Test | Throughput (receiver) | Retransmit | Picco |
+|------|----------------------|------------|-------|
+| 1 | 265 Mbps | 3866 | 294 Mbps |
+| 2 | 355 Mbps | 3268 | 450 Mbps |
+| 3 | 366 Mbps | 4483 | 440 Mbps |
+| 4 | 307 Mbps | 4191 | 429 Mbps |
+| 5 | 349 Mbps | 4262 | 431 Mbps |
+| **Media** | **~328 Mbps** | **~4014** | **450 Mbps** |
+
+#### Metriche post-test (uptime 7.3h, zero crash)
+| Metrica | wan5 | wan6 |
+|---------|------|------|
+| path_alive | 1 | 1 |
+| adaptive_m | 0 | 0 |
+| arq_retx_recv | 2.04M | 1.76M |
+| fec_recovered | 0 | 0 |
+| stripe_rx_bytes | 3.0 GB | 2.6 GB |
+| stripe_tx_bytes | 411 MB | 408 MB |
+| **errors/timeout** | **0** | **0** |
+
+- FEC adaptive corretto: M=2 sotto carico → M=0 a riposo.
+- ARQ ha gestito ~3.8M retransmissions senza problemi.
+- Zero errori, zero timeout, zero crash durante 5 test consecutivi di saturazione.
+- **Tag**: **v4.8** — versione stabile validata.
+
 ### Step 4.34–4.35 — RS Interleaved Always-On: implementato, deployato, FALLITO, revertito
 - **Implementazione RS-IL** (`stripe_fec_rs_interleaved.go`):
   - Engine TX/RX interleaved: K=4 data, M=1 parity, D=4 depth.

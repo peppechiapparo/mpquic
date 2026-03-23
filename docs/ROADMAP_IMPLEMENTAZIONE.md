@@ -2,6 +2,20 @@
 
 *Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-23*
 
+### Roadmap Fase 4h — Fix TUN race + validazione stabilità v4.8 (2026-03-23)
+
+**Fix**: TUN race condition in `openTUN()` con `IFF_MULTI_QUEUE` — il device veniva ricreato
+cancellando la configurazione IP/MTU. Nuova funzione `configureTUN()` applicata dopo ogni
+`openTUN()` in tutti i call site (server multiconn, server singleconn, client tunnel).
+
+**Test di validazione**: 5 cicli iperf3 saturazione (30 stream, reverse, 20s, bind mp1).
+- Media: **328 Mbps**, picco **450 Mbps**.
+- Zero errori, timeout, crash durante e dopo i test.
+- FEC adaptive e ARQ funzionanti correttamente sotto carico.
+- Uptime continuo 7.3 ore senza interventi.
+
+**Stato**: ✅ **v4.8 — versione stabile validata, taggata e pushata.**
+
 ### Roadmap Fase 4g — Revert a RS Adattivo dopo fallimento RS-IL Always-On (2026-03-23)
 
 **Obiettivo originale**: sostituire tutti i tentativi FEC precedenti con RS Interleaved
