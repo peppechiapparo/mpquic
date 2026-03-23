@@ -2,72 +2,36 @@
 
 *Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-23*
 
-### Roadmap Fase 4g — Systematic RS Interleaved Always-On (2026-03-23)
+### Roadmap Fase 4g — Revert a RS Adattivo dopo fallimento RS-IL Always-On (2026-03-23)
 
-**Obiettivo**: sostituire tutti i tentativi FEC precedenti (XOR sliding-window, RLC sliding-window,
-RS adattivo selettivo) con un design industriale ispirato a UDPspeeder/kcp-go: **Reed-Solomon
-sistematico con generazioni piccole, interleaving tra generazioni, always-on**.
+**Obiettivo originale**: sostituire tutti i tentativi FEC precedenti con RS Interleaved
+always-on (K=4, M=1, D=4). Implementato, testato (13 unit test), deployato.
 
-**Razionale**: i test reali su link Starlink bonded hanno dimostrato che:
-- XOR singola parità non recupera burst >1 (recovered = 0 su tutti i run);
-- RLC sliding-window: decoder inefficace (60-67% underdetermined, 7-13% successo);
-- RS adattivo con gating on/off selettivo: test catastrofico, instabilità peggiorativa.
+**Esito in produzione**: **CATASTROFICO**.
+- RS-IL always-on aggiunge 25% di overhead costante.
+- A ~300 Mbps su Starlink, il traffico totale diventava ~375 Mbps → saturazione link.
+- iperf3 30 stream: 270 Mbps per 3 secondi, poi **crollo a 0 Mbps** permanente.
+- Root cause: overhead costante FEC → congestione → packet drops → ARQ retransmit → feedback loop positivo → congestion collapse.
+- Bug aggiuntivo: divide-by-zero in `dynamicPacingLoop` quando `pacingRate=0`.
 
-Il pattern reale Starlink presenta reorder profondo (max_ooo 2600-3900) e burst loss
-concentrati. La strategia corretta è:
-1. **Always-on** con overhead fisso basso (20-25%), no gating adattivo on/off
-2. **Generazioni piccole** (K=4) che si chiudono rapidamente
-3. **Interleaving** tra D=4 generazioni: pacchetti consecutivi vanno a generazioni diverse,
-   così un burst di 4 pacchetti persi colpisce 4 generazioni diverse, ognuna perde 1 solo
-   pacchetto → RS(4,1) recupera tutto
-4. **ARQ come fallback** per burst > D×M
+**Decisione**: **revert completo** a RS adattivo (K=10, M=2, mode=adaptive).
 
-**Design**:
-```
-Pacchetti TX:   P0  P1  P2  P3  P4  P5  P6  P7  P8  P9  P10  P11 ...
-                 │   │   │   │   │   │   │   │   │   │    │    │
-Generazione:    G0  G1  G2  G3  G0  G1  G2  G3  G0  G1   G2   G3
-                
-G0 = {P0, P4, P8, P12}  → RS(4,1) → parity R0
-G1 = {P1, P5, P9, P13}  → RS(4,1) → parity R1
-...
+**Esito post-revert**:
+- iperf3 `-R -P 30 -t 20`: **323 Mbps** stabili per 20 secondi, zero crolli.
+- Server FEC: **18.310 recovery** riusciti, `adaptive_m=0` (zero overhead in condizioni normali).
+- ARQ operativo con NACK bassi.
 
-Burst loss [P3,P4,P5,P6]:
-  G3 perde P3 → recupera ✓ (solo 1 loss/gen)
-  G0 perde P4 → recupera ✓
-  G1 perde P5 → recupera ✓
-  G2 perde P6 → recupera ✓
-  → burst di 4 completamente coperto, zero ARQ
-```
+**Lezione appresa**: su link satellite con capacità variabile, il FEC **always-on** è
+controproducente. L'overhead costante compete con il traffico utile e accelera la
+congestione. L'approccio adattivo (0% overhead quando non serve, 20% solo sotto loss)
+è l'unico sostenibile.
 
-**Step implementativi**:
+**Stato corrente (v4.7)**: RS adattivo K=10, M=2, `stripe_fec_mode: adaptive`.
+Il codice RS-IL resta nel repo (`stripe_fec_rs_interleaved.go`) ma non è attivato dalla config.
 
-1. **Step 4.34 — RS Interleaved Core** (In corso)
-   - Nuovo file `stripe_fec_rs_interleaved.go` con accumulatore TX interleaved e decoder RX
-   - Nuovo packet type `stripeRS_IL_PARITY` (0x08)
-   - Parametri: K=4 data shards, M=1 parity, depth=4 interleave
-   - TX: ogni pacchetto inviato immediatamente (M=0 fast path), poi accumulato in
-     generazione round-robin; parity emessa quando la generazione ha K shards
-   - RX: dati consegnati subito, parity usata per ricostruire shards mancanti
-   - Unit test di recovery: single loss, burst, interleaving coverage
-
-2. **Step 4.35 — Integrazione e Deploy** (Prossimo)
-   - Config: `stripe_fec_interleave: 4` abilita RS interleaved, default K=4 M=1
-   - Metriche: `rsil_emitted`, `rsil_recovered`, `rsil_attempts`, `rsil_insufficient`
-   - Deploy always-on: `stripe_fec_mode: always`, `stripe_fec_type: rs`
-   - Campagna test reale vs baseline ARQ-only
-
-**Parametri iniziali**:
-
-| Parametro | Valore | Razionale |
-|-----------|--------|-----------|
-| K (data) | 4 | Generazione piccola, bassa latenza |
-| M (parity) | 1 | 20% overhead, recupera 1 loss per generazione |
-| Interleave depth | 4 | Copre burst fino a 4 pacchetti consecutivi |
-| Mode | always | Stabilità > efficienza, no gating instabile |
-| ARQ | attivo come fallback | Copre burst > depth×M |
-
-**Reference**: wangyu-/UDPspeeder (RS in produzione su link lossy), xtaci/kcp-go
+**Prossimi sviluppi**: monitorare stabilità per 48+ ore prima di procedere con nuove
+ottimizzazioni. Eventuali miglioramenti FEC futuri dovranno essere **sempre adattivi**
+e mai superare il 5-10% di overhead in regime stazionario
 
 ---
 

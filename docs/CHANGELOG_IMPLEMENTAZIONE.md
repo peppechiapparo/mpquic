@@ -1,5 +1,33 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-03-23
+
+### Step 4.34–4.35 — RS Interleaved Always-On: implementato, deployato, FALLITO, revertito
+- **Implementazione RS-IL** (`stripe_fec_rs_interleaved.go`):
+  - Engine TX/RX interleaved: K=4 data, M=1 parity, D=4 depth.
+  - Nuovo packet type `stripeRS_IL_PARITY` (0x08).
+  - 13 unit test passati (single loss, burst, interleaving, GC, stats).
+  - Metriche: `rsil_emitted`, `rsil_recovered`, `rsil_attempts`, `rsil_insufficient`.
+  - Integrazione client/server nel fast path M=0.
+- **Bug divide-by-zero** in `dynamicPacingLoop` (commit `4dc5fbc`):
+  - `baseNs := 1000000000 / ss.pacingRate` con `pacingRate=0` → panic server in loop.
+  - Fix: early return guard `if pacingRate <= 0 { return }`.
+- **Test in produzione**: iperf3 `-R -P 30 -t 20` con RS-IL always-on:
+  - **Risultato catastrofico**: 270 Mbps per 3 secondi → 0 Mbps permanente.
+  - **Root cause**: 25% overhead always-on satura Starlink → congestion collapse con ARQ feedback loop.
+- **Revert** (commit `1101c78`): config ripristinate a RS adattivo K=10, M=2, mode=adaptive.
+- **Test post-revert**: 323 Mbps stabili per 20 secondi, 18.310 FEC recovery lato server, zero crolli.
+- **Lezione**: FEC always-on controproducente su link satellite a capacità variabile.
+- **Procedura deploy documentata** in README.md (commit `881c4a5`).
+- **Tag**: **v4.7** su commit attuale.
+
+### Metriche verificate post-revert (server mp1, uptime ~12 min)
+| Sessione | fec_recovered | fec_encoded | adaptive_m | loss_rate_pct |
+|----------|--------------|-------------|------------|--------------|
+| wan5 (40e3bbdd) | 13.510 | 0 | 0 | 0% |
+| wan6 (47e3be94) | 4.800 | 0 | 0 | 0% |
+| **Totale** | **18.310** | **0** | — | — |
+
 ## 2026-03-22
 
 ### Step 4.33 — Sliding-Window RLC avviato dopo chiusura esperimento XOR

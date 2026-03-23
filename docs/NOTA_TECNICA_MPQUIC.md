@@ -2091,6 +2091,8 @@ vedere `ROADMAP_IMPLEMENTAZIONE.md` (Steps 4b.6 – 4.27).
 | v4.5 | 4.25 | Kernel Pacing SO_TXTIME | 333 Mbps | 491 Mbps | — | — |
 | v4.5 | 4.26 | XOR Sliding Window FEC (RFC 8681) | 307→333 Mbps | — | — | — |
 | v4.5 | 4.27 | Weighted scheduler (FALLITO, revert) | 374 Mbps | — | — | `c2e021a` |
+| v4.7 | 4.34-35 | RS Interleaved Always-On (FALLITO, revert) | 0 Mbps | 270 Mbps | — | `8ed7321` |
+| **v4.7** | **revert** | **RS Adattivo K=10 M=2 (stabile)** | **323 Mbps** | — | — | `1101c78` |
 
 \*Test in condizioni di pioggia (media non comparabile).
 
@@ -2119,6 +2121,32 @@ L'esperimento weighted scheduler (3 iterazioni) ha dimostrato che forzare distri
 50/50 su link con capacità asimmetrica (Starlink wan5/wan6) **peggiora** il throughput
 del 13-19%. La distribuzione naturale 67/33 del kernel TUN multiqueue hash riflette
 la capacità effettiva dei link. Issue #2 chiuso come **won't fix**.
+
+### Lezione Step 4.34-35: FEC always-on è controproducente su satellite
+
+L'esperimento RS Interleaved Always-On (K=4, M=1, D=4, interleaving tra generazioni)
+ha prodotto un **congestion collapse catastrofico** in produzione:
+
+| Metrica | Risultato |
+|---------|-----------|
+| Throughput iniziale (0-3s) | 270 Mbps |
+| Throughput dopo 3s | **0 Mbps** (permanente) |
+| Root cause | 25% overhead costante satura il link |
+| Meccanismo | FEC overhead → congestione → loss → ARQ retx → più congestione → collapse |
+
+**Post-revert a RS adattivo (K=10, M=2, mode=adaptive)**:
+
+| Metrica | Risultato |
+|---------|-----------|
+| Throughput (30 stream, 20s) | **323 Mbps** stabile |
+| FEC recovery (server, 12 min) | **18.310** pacchetti recuperati |
+| FEC overhead in regime | **0%** (adaptive_m=0, fec_encoded=0) |
+| FEC overhead sotto loss | fino a 20% (M=2/K=10), ritorna a 0% dopo cooldown |
+
+**Principio fondamentale confermato**: su link satellite LEO a capacità variabile,
+il FEC deve essere **esclusivamente adattivo** e mai superare il 5-10% di overhead
+medio. L'overhead costante, anche basso (20-25%), compete con il traffico utile e
+innesca un feedback loop di congestione con ARQ.
 
 ---
 
@@ -2192,16 +2220,22 @@ obiettivi delle fasi di sviluppo.
 | **4.24-4.26 — GSO/XOR** | UDP GSO record 548 Mbps; XOR FEC (RFC 8681) zero overhead | ~0% con adaptive gate |
 | **4.27 — Weighted (revert)** | Distribuzione 67/33 è ottimale per link asimmetrici | Issue #2 won't fix |
 
-**Stato finale**: piattaforma v4.5, throughput medio **374 Mbps** (picco **548 Mbps**),
+**Stato finale**: piattaforma v4.7, throughput medio **323 Mbps** (picco **548 Mbps**),
 bottleneck = variabilità Starlink (non software). CPU server ~30% per core a 340 Mbps.
+FEC RS adattivo (K=10, M=2): zero overhead in condizioni normali, 18.310 recovery
+osservati in ~12 minuti di test.
 
-**Prossimi sviluppi**: AI/ML feedback loop (Fase 6), tuning dinamico parametri
-basato su telemetria real-time.
+**Esperimento fallito in v4.7**: RS Interleaved always-on (K=4, M=1, D=4) ha causato
+congestion collapse (270→0 Mbps in 3s) per overhead FEC costante del 25%. Revertito
+a RS adattivo che mantiene overhead 0% in regime stazionario.
+
+**Prossimi sviluppi**: monitoraggio stabilità 48+ ore, poi eventuali ottimizzazioni
+adattive a basso overhead.
 
 ---
 
-*Documento aggiornato il 22/03/2026 — Piattaforma MPQUIC v4.5*
-*Commit di riferimento: 8a326a9 (main)*
+*Documento aggiornato il 23/03/2026 — Piattaforma MPQUIC v4.7*
+*Commit di riferimento: 881c4a5 (main)*
 
 ## 21. Appendice
 
