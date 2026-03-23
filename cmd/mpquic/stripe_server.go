@@ -2063,6 +2063,10 @@ var _ io.Closer = (*stripeClientConn)(nil)
 
 // dynamicPacingLoop adjusts session pacing speed based on reported peer loss.
 func (ss *stripeServer) dynamicPacingLoop(ctx context.Context, sess *stripeSession) {
+	if ss.pacingRate <= 0 {
+		return // pacing disabled, nothing to do
+	}
+
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
