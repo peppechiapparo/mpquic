@@ -80,3 +80,56 @@ Guide operative aggiuntive:
 - Il bind `if:<ifname>` risolve l'IPv4 corrente dell'interfaccia (utile su WAN DHCP).
 - Auto-heal eventi WAN supporta sia hook `ifupdown` sia `networkd-dispatcher` (hotplug carrier/DHCP).
 - Smoke test multipath sperimentale: `sudo /usr/local/sbin/mpquic-multipath-smoke.sh` (template `deploy/config/client/multipath.yaml`).
+
+## Procedura di deploy (OBBLIGATORIA)
+
+**MAI usare `scp` per trasferire binari o config. SEMPRE passare da git.**
+
+### 1. Commit e push dal dev box
+
+```bash
+cd /opt/TPZ/src/mpquic
+git add -A && git status          # verificare cosa cambia
+git commit -m "descrizione"
+git push origin main
+```
+
+### 2. Aggiornare il SERVER (VPS)
+
+```bash
+ssh vps-it-mpquic
+# Se servono modifiche ai file YAML, farle ORA prima di riavviare:
+#   vim /etc/mpquic/instances/mp1.yaml
+sudo /opt/mpquic/scripts/mpquic-update.sh /opt/mpquic
+journalctl -u mpquic@mp1 --no-pager -n 50
+# Ripetere journalctl per ogni tunnel da verificare
+exit
+```
+
+### 3. Aggiornare il CLIENT
+
+```bash
+# Se servono modifiche ai file YAML, farle prima:
+#   ssh mpquic "sudo vim /etc/mpquic/instances/mp1.yaml"
+ssh mpquic "sudo /opt/mpquic/scripts/mpquic-update.sh /opt/mpquic"
+```
+
+### 4. Verifica tunnel
+
+```bash
+# Ping di base
+ssh mpquic "ping -c 5 10.200.17.254"
+
+# Verifica log di un tunnel specifico
+ssh mpquic "sudo systemctl restart mpquic@mp1 && sleep 5 && sudo journalctl -u mpquic@mp1 --no-pager -n 30"
+
+# Stats JSON
+ssh mpquic "curl -s http://10.200.17.1:9090/api/v1/stats | python3 -m json.tool"
+```
+
+### Note
+
+- Lo script `mpquic-update.sh` fa: git pull → go build → stop istanze → install binary → start istanze
+- Se il server ha diverged history (dopo force push): `cd /opt/mpquic && git fetch origin && git reset --hard origin/main` poi rieseguire lo script
+- Le config YAML live sono in `/etc/mpquic/instances/` (NON in `deploy/config/`)
+- Le config in `deploy/config/` sono template di riferimento nel repo
