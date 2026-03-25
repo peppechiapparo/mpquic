@@ -2,6 +2,26 @@
 
 ## 2026-03-25
 
+### Security hardening mpquic-mgmt (commit `1003246` + `8095e01`)
+
+Audit di sicurezza completo con 10 vulnerabilità identificate e corrette:
+
+| # | Severità | Vulnerabilità | Fix |
+|---|----------|---------------|-----|
+| 1 | CRITICA | Token compare con `==` (timing attack) | `crypto/subtle.ConstantTimeCompare` |
+| 2 | CRITICA | Token visibile in `/proc/PID/cmdline` | Token solo via env var `MGMT_AUTH_TOKEN` |
+| 3 | ALTA | Nessun rate limiting | 10 fail / 5min per IP, 429 Retry-After |
+| 4 | ALTA | HTTP su tutte le interfacce | Default `127.0.0.1:8080` + opzione TLS |
+| 5 | ALTA | Command injection via tunnel name | Regex `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$` |
+| 6 | ALTA | CORS `*` aperto a tutti | CORS disabilitato, whitelist `--cors-origins` |
+| 7 | MEDIA | Token vuoto accettato | Obbligatorio, minimo 16 chars |
+| 8 | MEDIA | `level` param non validato (grep injection) | Whitelist: solo `error`/`warning` |
+| 9 | MEDIA | No security headers | X-Content-Type-Options, X-Frame-Options, HSTS |
+| 10 | BASSA | Systemd senza hardening | ProtectSystem=strict, NoNewPrivileges=true |
+
+Token TBOX rigenerato con `openssl rand -base64 32` (44 chars), `/etc/mpquic/mgmt.env` chmod 600.
+Security audit log attivo: auth failure + injection attempt loggati in journald con IP e user-agent.
+
 ### Implementazione mpquic-mgmt — Management REST API (commit `71cb88e`)
 
 Implementato il daemon `mpquic-mgmt` (Fase 5.1-5.3), binario separato che espone

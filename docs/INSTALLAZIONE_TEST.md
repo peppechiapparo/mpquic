@@ -1966,3 +1966,292 @@ Quando mwan3 verrà attivato:
 | **bulk**     | pol_bulk      | Tutto il resto (catch-all)                       |
 
 Ogni policy bilancia su 3 tunnel (uno per WAN) con failover automatico.
+
+## 24) Management API — `mpquic-mgmt` (Fase 5a)
+
+### 24.1 Panoramica
+
+`mpquic-mgmt` è un daemon REST API che gira sulla TBOX e fornisce controllo
+centralizzato su tutte le istanze tunnel mpquic. Viene consumato da:
+- **LuCI UI** su OpenWrt (via rpcd proxy)
+- **AI/ML Decision Layer** per auto-tuning
+- **Operatori** via curl/script dalla rete di management
+
+Il daemon è un binario Go separato (`cmd/mpquic-mgmt/`) che non interferisce
+con i tunnel in esecuzione.
+
+### 24.2 Architettura
+
+```
+┌────────────────────┐     ┌─────────────────────────────────────────────┐
+│ OpenWrt (LuCI)     │     │ TBOX (10.10.11.100)                        │
+│ 10.10.11.254       │────▶│                                             │
+│  rpcd → ubus       │     │  mpquic-mgmt :8080 ◀── Bearer token auth   │
+└────────────────────┘     │       │                                     │
+                           │       ├─▶ systemctl start/stop/restart      │
+┌────────────────────┐     │       ├─▶ /etc/mpquic/instances/*.yaml      │
+│ Operatore (curl)   │────▶│       ├─▶ mpquic@{name} journalctl         │
+└────────────────────┘     │       └─▶ {tunnel}:9090/api/v1/stats proxy  │
+                           └─────────────────────────────────────────────┘
+```
+
+### 24.3 Build
+
+```bash
+cd /opt/mpquic
+make build-mgmt
+# Produce: bin/mpquic-mgmt (versione iniettata via ldflags)
+
+# Per build completa (tunnel + mgmt):
+make build-all
+```
+
+### 24.4 Installazione
+
+#### 24.4.1 Copia binario
+
+```bash
+sudo cp bin/mpquic-mgmt /usr/local/bin/mpquic-mgmt
+sudo chmod 0755 /usr/local/bin/mpquic-mgmt
+```
+
+#### 24.4.2 Genera token autenticazione
+
+Il token DEVE essere:
+- Minimo 16 caratteri (il daemon rifiuta token più corti)
+- Generato con fonte crittografica (non valori predicibili)
+- Salvato in file con permessi 600
+
+```bash
+# Genera token casuale (44 chars base64)
+TOKEN=$(openssl rand -base64 32)
+
+# Scrivi environment file
+sudo bash -c "echo 'MGMT_AUTH_TOKEN=$TOKEN' > /etc/mpquic/mgmt.env"
+sudo chmod 600 /etc/mpquic/mgmt.env
+
+# Mostra (annotare per configurazione LuCI/client)
+echo "Token: $TOKEN"
+```
+
+**IMPORTANTE**: il token viene letto SOLO dalla variabile d'ambiente `MGMT_AUTH_TOKEN`
+(tramite `EnvironmentFile` di systemd), mai dalla riga di comando. Questo impedisce
+che sia visibile in `ps aux` o `/proc/PID/cmdline`.
+
+#### 24.4.3 Installa systemd unit
+
+```bash
+sudo cp deploy/systemd/mpquic-mgmt.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mpquic-mgmt
+```
+
+#### 24.4.4 Verifica servizio
+
+```bash
+sudo systemctl status mpquic-mgmt
+# Active: active (running)
+# Main PID: ... (mpquic-mgmt)
+# → listening on 127.0.0.1:8080
+
+# Test health endpoint
+TOKEN=$(sudo grep MGMT_AUTH_TOKEN /etc/mpquic/mgmt.env | cut -d= -f2-)
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8080/api/v1/health
+```
+
+**Output atteso:**
+```json
+{
+  "ok": true,
+  "version": "8095e01",
+  "hostname": "mpquic",
+  "tunnels_total": 16,
+  "tunnels_running": 4,
+  "tunnels_stopped": 12,
+  "tunnels_failed": 0,
+  "timestamp": "2026-03-25T11:40:56Z"
+}
+```
+
+### 24.5 Configurazione
+
+#### 24.5.1 Flag CLI
+
+| Flag | Default | Descrizione |
+|------|---------|-------------|
+| `--listen` | `127.0.0.1:8080` | Indirizzo di ascolto HTTP |
+| `--instance-dir` | `/etc/mpquic/instances` | Directory YAML tunnel |
+| `--auth-token` | (vuoto) | Token auth (preferire MGMT_AUTH_TOKEN env) |
+| `--tls-cert` | (vuoto) | Certificato TLS per HTTPS |
+| `--tls-key` | (vuoto) | Chiave privata TLS |
+| `--cors-origins` | (vuoto) | Origini CORS permesse, comma-separated |
+
+#### 24.5.2 Accesso dalla LAN
+
+Per default il daemon ascolta solo su localhost. Per permettere accesso dalla
+LAN (es. da OpenWrt o dalla rete di management), modificare il servizio:
+
+**Opzione A — Bind su interfaccia LAN (senza TLS):**
+Editare `/etc/systemd/system/mpquic-mgmt.service`:
+```ini
+ExecStart=/usr/local/bin/mpquic-mgmt \
+    --listen 10.10.11.100:8080 \
+    --instance-dir /etc/mpquic/instances
+```
+
+**Opzione B — HTTPS con certificato self-signed (raccomandato per produzione):**
+```bash
+# Genera certificato self-signed
+sudo openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout /etc/mpquic/tls/mgmt.key \
+  -out /etc/mpquic/tls/mgmt.crt \
+  -days 3650 -subj "/CN=mpquic-mgmt"
+```
+```ini
+ExecStart=/usr/local/bin/mpquic-mgmt \
+    --listen 10.10.11.100:8443 \
+    --instance-dir /etc/mpquic/instances \
+    --tls-cert /etc/mpquic/tls/mgmt.crt \
+    --tls-key /etc/mpquic/tls/mgmt.key
+```
+
+Dopo ogni modifica:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart mpquic-mgmt
+```
+
+#### 24.5.3 CORS per LuCI
+
+Se LuCI (OpenWrt su `http://10.10.11.254`) deve accedere direttamente all'API:
+```ini
+ExecStart=/usr/local/bin/mpquic-mgmt \
+    --listen 10.10.11.100:8080 \
+    --cors-origins http://10.10.11.254
+```
+
+### 24.6 API Reference
+
+#### Endpoints
+
+| Metodo | Endpoint | Descrizione | Auth |
+|--------|----------|-------------|------|
+| GET | `/api/v1/health` | Overview sistema | Sì |
+| GET | `/api/v1/tunnels` | Lista tunnel con stato | Sì |
+| GET | `/api/v1/tunnels/{name}` | Dettaglio + config completa | Sì |
+| POST | `/api/v1/tunnels/{name}/start` | Avvia istanza | Sì |
+| POST | `/api/v1/tunnels/{name}/stop` | Ferma istanza | Sì |
+| POST | `/api/v1/tunnels/{name}/restart` | Riavvia istanza | Sì |
+| GET | `/api/v1/tunnels/{name}/config` | Config JSON + categorie | Sì |
+| PATCH | `/api/v1/tunnels/{name}/config` | Modifica parziale config | Sì |
+| POST | `/api/v1/tunnels/{name}/config/validate` | Dry-run validazione | Sì |
+| GET | `/api/v1/tunnels/{name}/metrics` | Proxy metriche tunnel | Sì |
+| GET | `/api/v1/tunnels/{name}/logs?lines=N&level=error` | Journal logs | Sì |
+| GET | `/api/v1/metrics` | Metriche aggregate | Sì |
+| GET | `/api/v1/system/info` | Versione, uptime, OS | Sì |
+| GET | `/api/v1/system/logs/{name}?lines=N` | Logs via system route | Sì |
+
+#### Autenticazione
+
+Ogni richiesta deve includere header:
+```
+Authorization: Bearer <TOKEN>
+```
+
+Risposte errore:
+- **401 Unauthorized**: token mancante o errato
+- **429 Too Many Requests**: rate limit superato (10 tentativi falliti / 5min per IP)
+
+#### Classificazione parametri config
+
+I parametri YAML sono classificati in 3 categorie:
+
+| Categoria | Comportamento | Parametri |
+|-----------|---------------|-----------|
+| **A — Hot-reload** | Modifica applicata senza restart | `log_level`, `stripe_pacing_rate`, `stripe_fec_mode`, `multipath_policy` |
+| **B — Restart** | Richiede restart tunnel | `tun_mtu`, `congestion_algorithm`, `transport_mode`, `stripe_arq`, `stripe_fec_type`, `stripe_fec_window`, `stripe_fec_interleave`, `stripe_disable_gso`, `detect_starlink`, `starlink_default_pipes`, `starlink_transport`, `stripe_enabled` |
+| **C — Bloccato** | Non modificabile (server-coupled) | `role`, `bind_ip`, `remote_addr`, `remote_port`, `tun_name`, `tun_cidr`, `stripe_port`, `stripe_data_shards`, `stripe_parity_shards`, `tls_*`, `metrics_listen`, `control_api_*` |
+
+Esempio modifica Cat. A (nessun restart):
+```bash
+curl -X PATCH -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"log_level":"debug"}' \
+  http://127.0.0.1:8080/api/v1/tunnels/mp1/config
+# → {"ok": true, "needs_restart": false}
+```
+
+Esempio modifica Cat. B (richiede restart, auto_restart opzionale):
+```bash
+curl -X PATCH -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"congestion_algorithm":"cubic"}' \
+  'http://127.0.0.1:8080/api/v1/tunnels/mp1/config?auto_restart=true'
+# → {"ok": true, "needs_restart": true, "restart_applied": true}
+```
+
+Esempio modifica Cat. C (bloccata):
+```bash
+curl -X PATCH -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"remote_addr":"1.2.3.4"}' \
+  http://127.0.0.1:8080/api/v1/tunnels/mp1/config
+# → 400 {"error": "server-coupled parameters cannot be modified: [remote_addr]"}
+```
+
+### 24.7 Sicurezza
+
+Il daemon implementa le seguenti misure di sicurezza:
+
+| Misura | Dettaglio |
+|--------|-----------|
+| **Timing-safe compare** | `crypto/subtle.ConstantTimeCompare` per confronto token |
+| **Rate limiting** | 10 fallimenti auth / 5min per IP, poi 429 |
+| **Token da env var** | Non esposto in `/proc/PID/cmdline` |
+| **Token minimo 16 char** | Fatal error all'avvio se troppo corto |
+| **Input sanitization** | Nomi tunnel: regex `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$` |
+| **TLS opzionale** | `--tls-cert/--tls-key` per HTTPS |
+| **CORS locked** | Disabilitato default, whitelist esplicita |
+| **Localhost default** | `127.0.0.1:8080` (non esposto su LAN) |
+| **Security headers** | X-Frame-Options DENY, HSTS, no-sniff, no-cache |
+| **Systemd hardening** | NoNewPrivileges, ProtectSystem=strict, PrivateTmp |
+| **Audit logging** | Auth failure e injection attempt → journald con IP |
+
+Verifica audit log:
+```bash
+sudo journalctl -u mpquic-mgmt --grep='SECURITY' --no-pager -n 20
+```
+
+### 24.8 Aggiornamento
+
+`mpquic-mgmt` è automaticamente aggiornato da `mpquic-update.sh`:
+
+```bash
+sudo bash scripts/mpquic-update.sh /opt/mpquic
+# Step 2: make build-all  (include mgmt)
+# Step 5: installa bin/mpquic-mgmt in /usr/local/bin/
+# Step 7: systemctl restart mpquic-mgmt (se enabled)
+```
+
+### 24.9 Troubleshooting
+
+```bash
+# Servizio non parte
+sudo journalctl -u mpquic-mgmt --no-pager -n 50
+# Errori comuni:
+#   "FATAL: auth token required"     → manca MGMT_AUTH_TOKEN in mgmt.env
+#   "FATAL: auth token too short"    → token < 16 caratteri
+
+# Test da altra macchina (verifica bind)
+curl -v http://10.10.11.100:8080/api/v1/health
+# Se "Connection refused" → il daemon ascolta su 127.0.0.1 (default),
+# serve --listen 10.10.11.100:8080
+
+# Verifica che il token non sia in cmdline
+ps aux | grep mpquic-mgmt | grep -v grep
+# Il token NON deve apparire nella riga di comando
+
+# Verifica permessi env file
+ls -la /etc/mpquic/mgmt.env
+# -rw------- 1 root root ... → OK (solo root può leggere)
+```

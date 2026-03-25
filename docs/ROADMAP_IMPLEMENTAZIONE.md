@@ -163,6 +163,18 @@ per gestione di tutti i tunnel client dalla rete locale.
 - `GET /api/v1/system/logs/{name}?lines=100` → `journalctl -u mpquic@{name} -n 100 --no-pager`
 - `GET /api/v1/system/logs/{name}/errors` → solo righe ERROR degli ultimi 1000 log
 
+##### Step 5.5b — Security Hardening ✅ DONE (commit `1003246` + `8095e01`)
+- Timing-safe auth con `crypto/subtle.ConstantTimeCompare`
+- Rate limiting brute-force (10 fail / 5min per IP)
+- Token obbligatorio via env var (non più in cmdline), minimo 16 chars
+- Input sanitization: regex `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$` per tunnel names
+- TLS support: `--tls-cert` / `--tls-key` con TLS 1.2+ e cipher suite forti
+- CORS disabilitato per default, whitelist via `--cors-origins`
+- Default listen su `127.0.0.1:8080` (non più tutte le interfacce)
+- Log level sanitization (whitelist only)
+- Security headers: HSTS, X-Frame-Options DENY, X-Content-Type-Options nosniff
+- Systemd hardening: ProtectSystem=strict, NoNewPrivileges=true, PrivateTmp=true
+
 ##### Step 5.6 — Hot-Reload Protocol per Categoria A
 - Definire signal handler nel binary `mpquic` principale: SIGHUP → rilegge YAML selettivamente
 - Oppure: endpoint interno `POST /internal/reload-config` sulla porta control_api
