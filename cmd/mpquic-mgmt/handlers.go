@@ -238,6 +238,13 @@ func (h *APIHandler) HandleTunnelRoutes(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Input validation: prevent command injection via tunnel name
+	if !validName.MatchString(name) {
+		log.Printf("SECURITY: invalid tunnel name=%q remote=%s", name, r.RemoteAddr)
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid tunnel name"})
+		return
+	}
+
 	switch action {
 	case "":
 		h.handleTunnelDetail(w, r, name)
