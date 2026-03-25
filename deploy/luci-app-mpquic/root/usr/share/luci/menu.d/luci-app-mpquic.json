@@ -1,0 +1,28 @@
+{
+	"admin/services/mpquic": {
+		"title": "MPQUIC Tunnels",
+		"order": 60,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"uci": { "mpquic": true }
+		}
+	},
+	"admin/services/mpquic/dashboard": {
+		"title": "Dashboard",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "mpquic/dashboard"
+		}
+	},
+	"admin/services/mpquic/config": {
+		"title": "Configuration",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "mpquic/config"
+		}
+	}
+}

@@ -1,0 +1,30 @@
+{
+	"luci-app-mpquic": {
+		"description": "Grant access to MPQUIC Management API via rpcd proxy",
+		"read": {
+			"ubus": {
+				"mpquic": [
+					"health",
+					"tunnels",
+					"tunnel_detail",
+					"tunnel_config",
+					"tunnel_metrics",
+					"metrics",
+					"system_info",
+					"tunnel_logs"
+				]
+			}
+		},
+		"write": {
+			"ubus": {
+				"mpquic": [
+					"tunnel_start",
+					"tunnel_stop",
+					"tunnel_restart",
+					"tunnel_config_set",
+					"tunnel_config_validate"
+				]
+			}
+		}
+	}
+}

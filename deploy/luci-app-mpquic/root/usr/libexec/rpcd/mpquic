@@ -1,0 +1,278 @@
+#!/bin/sh
+# rpcd plugin: mpquic — bridges ubus calls to MPQUIC Management API on TBOX
+#
+# Methods exposed via ubus:
+#   mpquic.health             — system health overview
+#   mpquic.tunnels            — list all tunnels with state
+#   mpquic.tunnel_detail      — single tunnel detail      {name}
+#   mpquic.tunnel_start       — start tunnel instance      {name}
+#   mpquic.tunnel_stop        — stop tunnel instance       {name}
+#   mpquic.tunnel_restart     — restart tunnel instance    {name}
+#   mpquic.tunnel_config      — get tunnel configuration   {name}
+#   mpquic.tunnel_config_set  — patch tunnel configuration {name, config}
+#   mpquic.tunnel_config_validate — dry-run validate       {name, config}
+#   mpquic.tunnel_metrics     — single tunnel metrics      {name}
+#   mpquic.metrics            — aggregated metrics
+#   mpquic.system_info        — system version/uptime
+#   mpquic.tunnel_logs        — journal logs               {name, lines, level}
+#
+# Configuration: /etc/config/mpquic (UCI)
+
+. /lib/functions.sh
+
+# ── Load UCI config ──────────────────────────────────────────────────────────
+TBOX_HOST=""
+TBOX_PORT=""
+TBOX_TOKEN=""
+TBOX_PROTO=""
+TBOX_TIMEOUT=""
+
+load_config() {
+	config_load mpquic
+	config_get TBOX_HOST  api host     "10.10.11.100"
+	config_get TBOX_PORT  api port     "8080"
+	config_get TBOX_TOKEN api token    ""
+	config_get TBOX_PROTO api proto    "http"
+	config_get TBOX_TIMEOUT api timeout "10"
+}
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+# Validate tunnel name — must match server-side regex
+validate_name() {
+	echo "$1" | grep -qE '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$'
+}
+
+# JSON error response
+json_error() {
+	printf '{"error":"%s"}\n' "$1"
+}
+
+# HTTP call to TBOX management API
+# Usage: api_call METHOD /endpoint [json_body]
+api_call() {
+	local method="$1"
+	local endpoint="$2"
+	local body="$3"
+	local url="${TBOX_PROTO}://${TBOX_HOST}:${TBOX_PORT}/api/v1${endpoint}"
+
+	if [ -z "$TBOX_TOKEN" ]; then
+		json_error "no auth token configured in /etc/config/mpquic"
+		return 1
+	fi
+
+	local curl_args="-s -m ${TBOX_TIMEOUT} --fail-with-body"
+	curl_args="$curl_args -H 'Authorization: Bearer ${TBOX_TOKEN}'"
+	curl_args="$curl_args -H 'Content-Type: application/json'"
+	curl_args="$curl_args -H 'Accept: application/json'"
+
+	local result=""
+	case "$method" in
+		GET)
+			result=$(curl -s -m "${TBOX_TIMEOUT}" \
+				-H "Authorization: Bearer ${TBOX_TOKEN}" \
+				-H "Accept: application/json" \
+				"$url" 2>/dev/null)
+			;;
+		POST)
+			if [ -n "$body" ]; then
+				result=$(curl -s -m "${TBOX_TIMEOUT}" -X POST \
+					-H "Authorization: Bearer ${TBOX_TOKEN}" \
+					-H "Content-Type: application/json" \
+					-H "Accept: application/json" \
+					-d "$body" "$url" 2>/dev/null)
+			else
+				result=$(curl -s -m "${TBOX_TIMEOUT}" -X POST \
+					-H "Authorization: Bearer ${TBOX_TOKEN}" \
+					-H "Accept: application/json" \
+					"$url" 2>/dev/null)
+			fi
+			;;
+		PATCH)
+			result=$(curl -s -m "${TBOX_TIMEOUT}" -X PATCH \
+				-H "Authorization: Bearer ${TBOX_TOKEN}" \
+				-H "Content-Type: application/json" \
+				-H "Accept: application/json" \
+				-d "$body" "$url" 2>/dev/null)
+			;;
+	esac
+
+	if [ $? -ne 0 ] || [ -z "$result" ]; then
+		json_error "connection to TBOX failed ($url)"
+		return 1
+	fi
+
+	echo "$result"
+}
+
+# Read JSON param from stdin
+read_param() {
+	local input
+	read -r input
+	echo "$input" | jsonfilter -e "@.$1" 2>/dev/null
+}
+
+# Read full JSON object from stdin (for config_set)
+read_input() {
+	local input
+	read -r input
+	echo "$input"
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+case "$1" in
+	list)
+		cat <<'EOF'
+{
+	"health": {},
+	"tunnels": {},
+	"tunnel_detail": { "name": "str" },
+	"tunnel_start": { "name": "str" },
+	"tunnel_stop": { "name": "str" },
+	"tunnel_restart": { "name": "str" },
+	"tunnel_config": { "name": "str" },
+	"tunnel_config_set": { "name": "str", "config": "str", "auto_restart": "bool" },
+	"tunnel_config_validate": { "name": "str", "config": "str" },
+	"tunnel_metrics": { "name": "str" },
+	"metrics": {},
+	"system_info": {},
+	"tunnel_logs": { "name": "str", "lines": "int", "level": "str" }
+}
+EOF
+		;;
+	call)
+		load_config
+
+		case "$2" in
+			health)
+				api_call GET /health
+				;;
+
+			tunnels)
+				api_call GET /tunnels
+				;;
+
+			tunnel_detail)
+				input=$(read_input)
+				name=$(echo "$input" | jsonfilter -e '@.name' 2>/dev/null)
+				if ! validate_name "$name"; then
+					json_error "invalid tunnel name"
+					exit 1
+				fi
+				api_call GET "/tunnels/${name}"
+				;;
+
+			tunnel_start)
+				input=$(read_input)
+				name=$(echo "$input" | jsonfilter -e '@.name' 2>/dev/null)
+				if ! validate_name "$name"; then
+					json_error "invalid tunnel name"
+					exit 1
+				fi
+				api_call POST "/tunnels/${name}/start"
+				;;
+
+			tunnel_stop)
+				input=$(read_input)
+				name=$(echo "$input" | jsonfilter -e '@.name' 2>/dev/null)
+				if ! validate_name "$name"; then
+					json_error "invalid tunnel name"
+					exit 1
+				fi
+				api_call POST "/tunnels/${name}/stop"
+				;;
+
+			tunnel_restart)
+				input=$(read_input)
+				name=$(echo "$input" | jsonfilter -e '@.name' 2>/dev/null)
+				if ! validate_name "$name"; then
+					json_error "invalid tunnel name"
+					exit 1
+				fi
+				api_call POST "/tunnels/${name}/restart"
+				;;
+
+			tunnel_config)
+				input=$(read_input)
+				name=$(echo "$input" | jsonfilter -e '@.name' 2>/dev/null)
+				if ! validate_name "$name"; then
+					json_error "invalid tunnel name"
+					exit 1
+				fi
+				api_call GET "/tunnels/${name}/config"
+				;;
+
+			tunnel_config_set)
+				input=$(read_input)
+				name=$(echo "$input" | jsonfilter -e '@.name' 2>/dev/null)
+				cfg=$(echo "$input" | jsonfilter -e '@.config' 2>/dev/null)
+				auto_restart=$(echo "$input" | jsonfilter -e '@.auto_restart' 2>/dev/null)
+				if ! validate_name "$name"; then
+					json_error "invalid tunnel name"
+					exit 1
+				fi
+				if [ -z "$cfg" ]; then
+					json_error "config parameter required"
+					exit 1
+				fi
+				local qs=""
+				[ "$auto_restart" = "true" ] && qs="?auto_restart=true"
+				api_call PATCH "/tunnels/${name}/config${qs}" "$cfg"
+				;;
+
+			tunnel_config_validate)
+				input=$(read_input)
+				name=$(echo "$input" | jsonfilter -e '@.name' 2>/dev/null)
+				cfg=$(echo "$input" | jsonfilter -e '@.config' 2>/dev/null)
+				if ! validate_name "$name"; then
+					json_error "invalid tunnel name"
+					exit 1
+				fi
+				if [ -z "$cfg" ]; then
+					json_error "config parameter required"
+					exit 1
+				fi
+				api_call POST "/tunnels/${name}/config/validate" "$cfg"
+				;;
+
+			tunnel_metrics)
+				input=$(read_input)
+				name=$(echo "$input" | jsonfilter -e '@.name' 2>/dev/null)
+				if ! validate_name "$name"; then
+					json_error "invalid tunnel name"
+					exit 1
+				fi
+				api_call GET "/tunnels/${name}/metrics"
+				;;
+
+			metrics)
+				api_call GET /metrics
+				;;
+
+			system_info)
+				api_call GET /system/info
+				;;
+
+			tunnel_logs)
+				input=$(read_input)
+				name=$(echo "$input" | jsonfilter -e '@.name' 2>/dev/null)
+				lines=$(echo "$input" | jsonfilter -e '@.lines' 2>/dev/null)
+				level=$(echo "$input" | jsonfilter -e '@.level' 2>/dev/null)
+				if ! validate_name "$name"; then
+					json_error "invalid tunnel name"
+					exit 1
+				fi
+				[ -z "$lines" ] && lines=50
+				local qs="?lines=${lines}"
+				[ -n "$level" ] && qs="${qs}&level=${level}"
+				api_call GET "/system/logs/${name}${qs}"
+				;;
+
+			*)
+				json_error "unknown method: $2"
+				exit 1
+				;;
+		esac
+		;;
+esac

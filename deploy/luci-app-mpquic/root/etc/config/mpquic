@@ -1,0 +1,6 @@
+config api 'api'
+	option host '10.10.11.100'
+	option port '8080'
+	option proto 'http'
+	option token ''
+	option timeout '10'

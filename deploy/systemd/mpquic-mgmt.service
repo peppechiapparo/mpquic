@@ -7,7 +7,7 @@ Wants=network.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/mpquic-mgmt \
-    --listen 127.0.0.1:8080 \
+    --listen 10.10.11.100:8080 \
     --instance-dir /etc/mpquic/instances
 EnvironmentFile=-/etc/mpquic/mgmt.env
 Restart=on-failure
