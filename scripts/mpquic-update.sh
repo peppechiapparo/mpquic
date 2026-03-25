@@ -80,8 +80,9 @@ fi
 # ── Step 2: Build ─────────────────────────────────────────────────────────
 log "--- building ---"
 find_go
-PATH="$(dirname "$GO_BIN"):$PATH" make build
+PATH="$(dirname "$GO_BIN"):$PATH" make build-all
 log "binary: $(ls -lh bin/mpquic | awk '{print $5, $9}')"
+log "mgmt:   $(ls -lh bin/mpquic-mgmt 2>/dev/null | awk '{print $5, $9}' || echo 'not built')"
 
 # ── Step 3: Discover instances ────────────────────────────────────────────
 mapfile -t INSTANCES < <(list_instances)
@@ -118,6 +119,17 @@ if [[ -f deploy/systemd/mpquic@.service ]]; then
   cp deploy/systemd/mpquic@.service /etc/systemd/system/mpquic@.service
   log "systemd unit updated"
 fi
+# Install management API binary + service
+if [[ -f bin/mpquic-mgmt ]]; then
+  rm -f /usr/local/bin/mpquic-mgmt
+  cp bin/mpquic-mgmt /usr/local/bin/mpquic-mgmt
+  chmod 0755 /usr/local/bin/mpquic-mgmt
+  log "mpquic-mgmt installed to /usr/local/bin/mpquic-mgmt"
+fi
+if [[ -f deploy/systemd/mpquic-mgmt.service ]]; then
+  cp deploy/systemd/mpquic-mgmt.service /etc/systemd/system/mpquic-mgmt.service
+  log "mpquic-mgmt systemd unit updated"
+fi
 log "binary installed to /usr/local/bin/mpquic"
 
 # ── Step 6: Restart all instances (sequential to avoid TUN race) ──────────
@@ -145,6 +157,16 @@ if [[ ${#INSTANCES[@]} -gt 0 ]]; then
   if [[ $local_fail -eq 1 ]]; then
     log "WARNING: some instances failed to start. Check 'journalctl -u mpquic@<name>'."
   fi
+fi
+
+# ── Step 7: Restart management API if installed ───────────────────────────
+if systemctl is-enabled mpquic-mgmt.service &>/dev/null; then
+  log "--- restarting mpquic-mgmt ---"
+  systemctl daemon-reload
+  systemctl restart mpquic-mgmt
+  sleep 1
+  state="$(systemctl is-active mpquic-mgmt 2>/dev/null || echo 'unknown')"
+  log "mpquic-mgmt: $state"
 fi
 
 log "=== update complete: $NEW_HEAD ==="

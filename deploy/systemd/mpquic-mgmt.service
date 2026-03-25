@@ -1,0 +1,29 @@
+[Unit]
+Description=MPQUIC Management API
+Documentation=https://github.com/peppechiapparo/mpquic
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mpquic-mgmt \
+    --listen :8080 \
+    --instance-dir /etc/mpquic/instances \
+    --auth-token ${AUTH_TOKEN}
+EnvironmentFile=-/etc/mpquic/mgmt.env
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mpquic-mgmt
+
+[Install]
+WantedBy=multi-user.target
