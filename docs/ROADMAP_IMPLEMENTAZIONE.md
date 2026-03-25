@@ -118,7 +118,7 @@ lato client senza aggiornare il server rompe il tunnel.
 **Deliverable**: daemon Go in `cmd/mpquic-mgmt/` che espone API REST unificata
 per gestione di tutti i tunnel client dalla rete locale.
 
-##### Step 5.1 — Scaffold + Instance Discovery
+##### Step 5.1 — Scaffold + Instance Discovery ✅ DONE (commit `71cb88e`)
 - Nuovo binary `cmd/mpquic-mgmt/main.go`
 - Scan `/etc/mpquic/instances/*.yaml` per elenco tunnel
 - Query `systemctl show mpquic@{name}` per stato runtime
@@ -128,7 +128,7 @@ per gestione di tutti i tunnel client dalla rete locale.
 - Autenticazione Bearer token (`MGMT_AUTH_TOKEN` env var)
 - Systemd unit: `mpquic-mgmt.service`
 
-##### Step 5.2 — Instance Lifecycle Management
+##### Step 5.2 — Instance Lifecycle Management ✅ DONE (commit `71cb88e`)
 - `POST /api/v1/tunnels/{name}/start` → `systemctl start mpquic@{name}`
 - `POST /api/v1/tunnels/{name}/stop` → `systemctl stop mpquic@{name}`
 - `POST /api/v1/tunnels/{name}/restart` → `systemctl restart mpquic@{name}`
@@ -136,7 +136,7 @@ per gestione di tutti i tunnel client dalla rete locale.
 - Response include nuovo stato post-operazione
 - Timeout e error handling (systemctl failure → error response)
 
-##### Step 5.3 — Configuration CRUD + Validation
+##### Step 5.3 — Configuration CRUD + Validation ✅ DONE (commit `71cb88e`)
 - `GET /api/v1/tunnels/{name}/config` → YAML corrente come JSON
 - `PUT /api/v1/tunnels/{name}/config` → scrittura completa con validazione
 - `PATCH /api/v1/tunnels/{name}/config` → modifica parziale (solo campi Cat. A+B)
@@ -149,14 +149,14 @@ per gestione di tutti i tunnel client dalla rete locale.
 - Backup automatico del YAML pre-modifica (`.yaml.bak.{timestamp}`)
 - Audit log: ogni modifica API registrata in `/var/log/mpquic-mgmt/audit.log`
 
-##### Step 5.4 — Metrics Aggregation Proxy
+##### Step 5.4 — Metrics Aggregation Proxy ✅ DONE (commit `71cb88e`)
 - `GET /api/v1/metrics` → JSON aggregato da tutti i tunnel attivi
 - `GET /api/v1/tunnels/{name}/metrics` → proxy verso `metrics_listen` del tunnel
 - Logica: per ogni tunnel attivo, HTTP GET su `{tun_ip}:9090/api/v1/stats`
 - Cache 5s per evitare flood su metriche
 - Include heath score calcolato: `loss_rate`, `rtt_ms`, `throughput_mbps`, `arq_efficiency`
 
-##### Step 5.5 — System Operations
+##### Step 5.5 — System Operations ✅ DONE (commit `71cb88e`)
 - `GET /api/v1/system/info` → versione binary, commit hash, Go version, OS, uptime
 - `POST /api/v1/system/update` → trigger `mpquic-update.sh` (async, returns job ID)
 - `GET /api/v1/system/update/{job_id}` → stato aggiornamento in corso

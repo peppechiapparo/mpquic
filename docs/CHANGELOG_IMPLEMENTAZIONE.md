@@ -2,6 +2,44 @@
 
 ## 2026-03-25
 
+### Implementazione mpquic-mgmt — Management REST API (commit `71cb88e`)
+
+Implementato il daemon `mpquic-mgmt` (Fase 5.1-5.3), binario separato che espone
+REST API per il controllo centralizzato delle istanze tunnel sulla TBOX.
+
+**Componenti creati:**
+- `cmd/mpquic-mgmt/main.go` — Entry point HTTP, flag parsing, graceful shutdown
+- `cmd/mpquic-mgmt/instance.go` — Discovery, lifecycle, config CRUD, metrics proxy, logs
+- `cmd/mpquic-mgmt/handlers.go` — Handler HTTP con auth Bearer, CORS, JSON responses
+- `deploy/systemd/mpquic-mgmt.service` — Unit systemd con EnvironmentFile
+
+**API Endpoints:**
+| Metodo | Endpoint | Descrizione |
+|--------|----------|-------------|
+| GET | `/api/v1/health` | Overview sistema (tunnels running/stopped/failed) |
+| GET | `/api/v1/tunnels` | Lista tutte le istanze con stato |
+| GET | `/api/v1/tunnels/{name}` | Dettaglio singola istanza + config |
+| POST | `/api/v1/tunnels/{name}/start\|stop\|restart` | Lifecycle via systemctl |
+| GET | `/api/v1/tunnels/{name}/config` | Config YAML con categorie parametri |
+| PATCH | `/api/v1/tunnels/{name}/config` | Modifica config con validazione |
+| POST | `/api/v1/tunnels/{name}/config/validate` | Dry-run validazione |
+| GET | `/api/v1/tunnels/{name}/metrics` | Proxy metriche dal tunnel |
+| GET | `/api/v1/tunnels/{name}/logs` | Journalctl logs |
+| GET | `/api/v1/metrics` | Metriche aggregate tutti i tunnel |
+| GET | `/api/v1/system/info` | Versione, uptime, OS |
+
+**Validazione parametri (Cat. A/B/C):**
+- Cat. A (hot-reload): `log_level`, `stripe_pacing_rate`, `stripe_fec_mode`, `multipath_policy`, `dataplane_config_file`
+- Cat. B (restart): `tun_mtu`, `congestion_algorithm`, `transport_mode`, `stripe_arq`, ecc.
+- Cat. C (bloccati): `role`, `bind_ip`, `remote_addr`, `tun_name`, `tun_cidr`, `stripe_port`, `tls_*` — server-coupled
+
+**Deploy e test TBOX:**
+- Build: `make build-mgmt` (version via ldflags)
+- Servizio `mpquic-mgmt.service` attivo su `:8080`, auth token in `/etc/mpquic/mgmt.env`
+- Discovery: 16 istanze scoperte (4 running, 12 stopped)
+- Test API: health ✓, tunnels list ✓, detail ✓, metrics proxy ✓, config validate ✓, logs ✓, auth reject ✓
+- `mpquic-update.sh` aggiornato: build-all, installa mgmt binary, restart mgmt service
+
 ### Stato deploy v4.8 — Server + Client allineati
 - **Server VPS** (`vps-it-mpquic`): aggiornato a `64c52fc` (fix configureTUN). Confermato.
 - **Client TBOX** (`10.10.11.100`): aggiornato a `64c52fc`. 13 istanze attive:
