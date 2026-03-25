@@ -1,5 +1,33 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-03-25
+
+### Stato deploy v4.8 — Server + Client allineati
+- **Server VPS** (`vps-it-mpquic`): aggiornato a `64c52fc` (fix configureTUN). Confermato.
+- **Client TBOX** (`10.10.11.100`): aggiornato a `64c52fc`. 13 istanze attive:
+  mp1, 4, 5, 6, cr4-6, br4-6, df4-6.
+- **OpenWrt** (`10.10.11.254`): tutte le VLAN interfaces operative (9d+ uptime):
+  BOND1 (eth8.17), cr1-3, br1-3, df1-3 — IP assegnati, traffico in transito.
+  mwan3 classificazione posticipata (non bloccante).
+
+### Roadmap Fase 5 — Management API + LuCI UI + AI/ML Decision Layer
+- Definita roadmap completa Fase 5 in `ROADMAP_IMPLEMENTAZIONE.md`:
+  - **Fase 5a**: Management REST API daemon (`mpquic-mgmt`) su TBOX
+    - Instance discovery + lifecycle (start/stop/restart)
+    - Config CRUD con validazione e protezione parametri server-coupled
+    - Metrics aggregation proxy
+    - System operations (logs, update, info)
+    - Hot-reload per parametri runtime (Cat. A)
+  - **Fase 5b**: LuCI App per OpenWrt (`luci-app-mpquic`)
+    - rpcd plugin proxy TBOX ↔ OpenWrt
+    - Dashboard, config editor, actions, logs
+    - Deploy come pacchetto OpenWrt
+  - **Fase 5c**: AI/ML Decision Layer
+    - Rule-based auto-tuning engine
+    - ML model integration (futuro)
+- Classificazione completa parametri YAML: 5 hot-reload (Cat. A), 12 restart (Cat. B), 11 server-coupled (Cat. C).
+- Visione d'insieme aggiornata: Step 1-4 DONE, Step 5 IN PROGRESS.
+
 ## 2026-03-23
 
 ### Step 4.36 — Fix TUN race condition + validazione stabilità (v4.8)

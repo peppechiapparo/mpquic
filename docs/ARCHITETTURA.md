@@ -419,7 +419,9 @@ multipath **restano valide**, ma con perimetro diverso tra path QUIC e path stri
   Nonce monotono per anti-replay. Zero configurazione manuale.
 - Metriche sicurezza disponibili lato server: `decrypt_fail` (tentativi decifrazione falliti).
 
-## Limiti deliberati (fase corrente)
+## Limiti deliberati (fase corrente) → risolti in Fase 5
+- ~~Nessun endpoint/API di controllo dinamico runtime~~ → **Fase 5a**: Management REST API (`mpquic-mgmt`)
+- ~~Nessuna UI per operatori~~ → **Fase 5b**: LuCI app per OpenWrt (`luci-app-mpquic`)
+- ~~Nessun auto-tuning~~ → **Fase 5c**: Rule-based + AI/ML decision layer
 - Multipath in singola connessione QUIC disponibile in modalità sperimentale (scheduler path-aware con priorità/peso e fail-cooldown)
-- Nessun endpoint/API di controllo dinamico runtime (oggi policy caricata da YAML a startup)
 - TLS server self-signed runtime (POC)

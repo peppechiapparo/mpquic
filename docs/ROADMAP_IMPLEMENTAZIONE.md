@@ -1,6 +1,310 @@
 # Roadmap implementazione MPQUIC
 
-*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-23*
+*Allineata al documento "QUIC over Starlink TSPZ" — aggiornata 2026-03-25*
+
+---
+
+## Fase 5 — Management API + LuCI UI + AI/ML Decision Layer 🔄 IN CORSO
+
+**Obiettivo (Step 5 PDF)**: Fornire un piano di controllo completo per la piattaforma MPQUIC:
+- REST API per gestione tunnel, configurazione e metriche
+- UI integrata in LuCI (OpenWrt) per operatori
+- Layer decisionale AI/ML per auto-tuning basato su metriche realtime
+
+> "Quality on Demand — AI/ML driven decision layer"
+
+### Architettura Fase 5
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  OpenWrt (10.10.11.254) — LuCI UI                                       │
+│                                                                         │
+│  luci-app-mpquic ──▶ rpcd plugin ──▶ HTTP ──┐                           │
+│  (JS views: dashboard, config, metrics)     │                           │
+└─────────────────────────────────────────────┼───────────────────────────┘
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  TBOX Client (10.10.11.100) — Management API                            │
+│                                                                         │
+│  mpquic-mgmt daemon (:8080)                                             │
+│  ├── /api/v1/tunnels          (instance CRUD + start/stop/restart)      │
+│  ├── /api/v1/tunnels/{n}/config  (YAML read/write + validation)         │
+│  ├── /api/v1/metrics          (aggregated from all instances)           │
+│  ├── /api/v1/health           (system overview)                         │
+│  └── /api/v1/system           (version, update, logs)                   │
+│                                                                         │
+│  Interfaces: systemctl (instance mgmt) + YAML files + metrics proxy     │
+│                                                                         │
+│  ┌──────────────────────────────────────────────────────────────┐        │
+│  │ mpquic@mp1  mpquic@cr4  mpquic@br4  mpquic@df4  ...         │        │
+│  │ (13 tunnel instances, each with own YAML + metrics endpoint) │        │
+│  └──────────────────────────────────────────────────────────────┘        │
+└─────────────────────────────────────────────────────────────────────────┘
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  Server VPS (172.238.232.223) — Metrics read-only                       │
+│                                                                         │
+│  mpquic@mp1 metrics (:9090) — scraped by Prometheus (10.10.11.201)      │
+│  mt4/mt5/mt6 metrics — scraped via tunnel IPs                           │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Classificazione parametri YAML per Management API
+
+Analisi completa di ogni parametro del file di configurazione `.yaml` di un tunnel
+client, classificato per impatto e modalità di modifica.
+
+#### Categoria A — Client-only, hot-reload (runtime, senza restart tunnel)
+
+Parametri modificabili via API senza interrompere il tunnel. L'applicazione
+li rilegge o li riceve via signal/endpoint e li applica in-place.
+
+| Parametro | Tipo | Valori | Effetto |
+|-----------|------|--------|---------|
+| `log_level` | string | debug/info/error | Verbosità log locale |
+| `stripe_pacing_rate` | int | 0-1000 Mbps | Rate limiter TX locale (0=off) |
+| `stripe_fec_mode` | string | always/adaptive/off | Comportamento FEC TX |
+| `multipath_policy` | string | priority/failover/balanced | Policy scheduler path |
+| `dataplane` | object | classes/classifiers | QoS classifier (già API in control_api.go) |
+
+#### Categoria B — Client-only, richiede restart tunnel
+
+Parametri che modificano strutture allocate a startup. L'API li scrive nel
+YAML e poi fa restart del tunnel via systemctl.
+
+| Parametro | Tipo | Valori | Effetto |
+|-----------|------|--------|---------|
+| `tun_mtu` | int | 1200-1500 | MTU device TUN |
+| `congestion_algorithm` | string | bbr/cubic | CC per connessioni QUIC |
+| `transport_mode` | string | reliable/datagram | Framing QUIC |
+| `stripe_arq` | bool | true/false | Hybrid ARQ NACK bidirezionale |
+| `stripe_fec_type` | string | rs/xor/rlc | Codec FEC |
+| `stripe_fec_window` | int | 4-64 | Finestra sliding-window FEC |
+| `stripe_fec_interleave` | int | 0-8 | Profondità interleaving RS |
+| `stripe_disable_gso` | bool | true/false | Disabilita UDP GSO kernel |
+| `multipath_paths[].pipes` | int | 1-24 | N. pipe UDP per path |
+| `multipath_paths[].weight` | int | 1-100 | Peso scheduler per path |
+| `multipath_paths[].priority` | int | 1-100 | Priorità scheduler per path |
+| `multipath_paths[].transport` | string | quic/stripe/auto | Tipo trasporto per path |
+
+#### Categoria C — Server-coupled (NON modificabili via client-only API)
+
+Parametri che devono corrispondere alla configurazione server. Modificarli
+lato client senza aggiornare il server rompe il tunnel.
+
+| Parametro | Motivo | Impatto se modificato solo lato client |
+|-----------|--------|----------------------------------------|
+| `role` | Identità fondamentale | Crash |
+| `bind_ip` | Source IP/interfaccia WAN | Routing break |
+| `remote_addr` / `remote_port` | Endpoint server | Connessione fallita |
+| `tun_name` | Registrato con server | Routing TUN break |
+| `tun_cidr` | IP registrato con server | Routing break |
+| `stripe_port` | Porta UDP stripe (match server) | Connessione fallita |
+| `stripe_data_shards` | K RS codec (match server) | FEC decode failure |
+| `stripe_parity_shards` | M max RS codec (match server) | FEC decode failure |
+| `tls_*` | Catena certificati | Handshake TLS fallito |
+| `multipath_paths[].bind_ip` | Source WAN binding | Routing break |
+| `multipath_paths[].remote_*` | Endpoint server per path | Connessione fallita |
+| `metrics_listen` | Bind metrics server | Solo impatto osservabilità |
+
+### Step implementativi Fase 5
+
+---
+
+#### Fase 5a — Management REST API (`mpquic-mgmt`) — TBOX
+
+**Deliverable**: daemon Go in `cmd/mpquic-mgmt/` che espone API REST unificata
+per gestione di tutti i tunnel client dalla rete locale.
+
+##### Step 5.1 — Scaffold + Instance Discovery
+- Nuovo binary `cmd/mpquic-mgmt/main.go`
+- Scan `/etc/mpquic/instances/*.yaml` per elenco tunnel
+- Query `systemctl show mpquic@{name}` per stato runtime
+- `GET /api/v1/tunnels` → lista tunnel con stato/PID/uptime
+- `GET /api/v1/tunnels/{name}` → dettaglio singolo tunnel
+- `GET /api/v1/health` → overview sistema (CPU, RAM, uptime host, count tunnel)
+- Autenticazione Bearer token (`MGMT_AUTH_TOKEN` env var)
+- Systemd unit: `mpquic-mgmt.service`
+
+##### Step 5.2 — Instance Lifecycle Management
+- `POST /api/v1/tunnels/{name}/start` → `systemctl start mpquic@{name}`
+- `POST /api/v1/tunnels/{name}/stop` → `systemctl stop mpquic@{name}`
+- `POST /api/v1/tunnels/{name}/restart` → `systemctl restart mpquic@{name}`
+- `POST /api/v1/bulk/restart` → restart multipli con delay sequenziale (0.5s)
+- Response include nuovo stato post-operazione
+- Timeout e error handling (systemctl failure → error response)
+
+##### Step 5.3 — Configuration CRUD + Validation
+- `GET /api/v1/tunnels/{name}/config` → YAML corrente come JSON
+- `PUT /api/v1/tunnels/{name}/config` → scrittura completa con validazione
+- `PATCH /api/v1/tunnels/{name}/config` → modifica parziale (solo campi Cat. A+B)
+- `POST /api/v1/tunnels/{name}/config/validate` → dry-run validazione
+- Logica di validazione:
+  - Rifiuta modifiche a parametri Categoria C (server-coupled)
+  - Valida range/enum per ogni campo
+  - Se modifica è solo Cat. A → applica hot-reload (signal o endpoint interno)
+  - Se modifica include Cat. B → scrive YAML + restart automatico
+- Backup automatico del YAML pre-modifica (`.yaml.bak.{timestamp}`)
+- Audit log: ogni modifica API registrata in `/var/log/mpquic-mgmt/audit.log`
+
+##### Step 5.4 — Metrics Aggregation Proxy
+- `GET /api/v1/metrics` → JSON aggregato da tutti i tunnel attivi
+- `GET /api/v1/tunnels/{name}/metrics` → proxy verso `metrics_listen` del tunnel
+- Logica: per ogni tunnel attivo, HTTP GET su `{tun_ip}:9090/api/v1/stats`
+- Cache 5s per evitare flood su metriche
+- Include heath score calcolato: `loss_rate`, `rtt_ms`, `throughput_mbps`, `arq_efficiency`
+
+##### Step 5.5 — System Operations
+- `GET /api/v1/system/info` → versione binary, commit hash, Go version, OS, uptime
+- `POST /api/v1/system/update` → trigger `mpquic-update.sh` (async, returns job ID)
+- `GET /api/v1/system/update/{job_id}` → stato aggiornamento in corso
+- `GET /api/v1/system/logs/{name}?lines=100` → `journalctl -u mpquic@{name} -n 100 --no-pager`
+- `GET /api/v1/system/logs/{name}/errors` → solo righe ERROR degli ultimi 1000 log
+
+##### Step 5.6 — Hot-Reload Protocol per Categoria A
+- Definire signal handler nel binary `mpquic` principale: SIGHUP → rilegge YAML selettivamente
+- Oppure: endpoint interno `POST /internal/reload-config` sulla porta control_api
+- Implementare reload runtime per: `log_level`, `stripe_pacing_rate`, `stripe_fec_mode`
+- Il management daemon invia il reload dopo aver scritto il YAML aggiornato
+
+---
+
+#### Fase 5b — LuCI App per OpenWrt (`luci-app-mpquic`)
+
+**Deliverable**: modulo LuCI installabile su OpenWrt 24.10 (router 10.10.11.254)
+che fornisce UI web completa per gestione tunnel MPQUIC.
+
+**Stack tecnologico**: LuCI JavaScript client-side (luci-js-base), rpcd plugin
+Lua/shell come proxy verso Management API su TBOX.
+
+##### Step 5.7 — rpcd Plugin Proxy (`/usr/libexec/rpcd/mpquic`)
+- Script Lua/shell che funge da bridge ubus ↔ HTTP
+- Metodi ubus:
+  - `mpquic.tunnels` → `GET /api/v1/tunnels`
+  - `mpquic.tunnel_detail {name}` → `GET /api/v1/tunnels/{name}`
+  - `mpquic.tunnel_action {name, action}` → `POST /api/v1/tunnels/{name}/{action}`
+  - `mpquic.tunnel_config {name}` → `GET /api/v1/tunnels/{name}/config`
+  - `mpquic.tunnel_config_set {name, config}` → `PATCH /api/v1/tunnels/{name}/config`
+  - `mpquic.metrics` → `GET /api/v1/metrics`
+  - `mpquic.system_info` → `GET /api/v1/system/info`
+  - `mpquic.system_logs {name, lines}` → `GET /api/v1/system/logs/{name}`
+- Config: indirizzo TBOX + auth token in `/etc/config/mpquic`
+- ACL: `/usr/share/rpcd/acl.d/luci-app-mpquic.json`
+
+##### Step 5.8 — LuCI Dashboard View
+- Menu entry: **Services → MPQUIC Tunnels**
+- Vista principale: tabella tunnel con colonne:
+  - Nome | Tipo (stripe/quic) | Stato (running/stopped) | WAN | Uptime
+  - TX/RX bytes | Loss % | RTT ms | FEC recoveries | ARQ retx
+- Badge colorati: verde (UP), rosso (DOWN), giallo (degraded high-loss)
+- Refresh automatico ogni 10s
+- Health score aggregato in header
+
+##### Step 5.9 — LuCI Configuration Editor
+- Per ogni tunnel: form editor con soli parametri Categoria A + B
+- Parametri Categoria C mostrati read-only (grayed out) con tooltip "Richiede modifica server"
+- Validazione client-side + server-side (via `/validate` endpoint)
+- Preview diff prima di applicare
+- Indicatore "Richiede restart" per modifiche Cat. B
+- Bottone "Applica" con conferma
+
+##### Step 5.10 — LuCI Actions & Logs
+- Bottoni per-tunnel: Start / Stop / Restart
+- Vista log: ultime N righe journal, filtro per livello (ERROR/INFO/DEBUG)
+- Bulk actions: restart tutti, restart per WAN, restart per classe
+- System update trigger con progress indicator
+
+##### Step 5.11 — Packaging e Deploy
+- Struttura pacchetto OpenWrt (`luci-app-mpquic`):
+  ```
+  luci-app-mpquic/
+  ├── Makefile                          # OpenWrt package build
+  ├── htdocs/luci-static/resources/
+  │   └── view/mpquic/
+  │       ├── dashboard.js              # Dashboard view
+  │       ├── tunnels.js                # Tunnel list + actions
+  │       ├── config.js                 # Config editor per tunnel
+  │       ├── metrics.js                # Metrics graphs
+  │       └── system.js                 # System info + logs
+  ├── root/
+  │   ├── usr/share/luci/menu.d/
+  │   │   └── luci-app-mpquic.json      # Menu structure
+  │   ├── usr/share/rpcd/acl.d/
+  │   │   └── luci-app-mpquic.json      # ACL
+  │   ├── usr/libexec/rpcd/
+  │   │   └── mpquic                    # rpcd plugin
+  │   └── etc/config/
+  │       └── mpquic                    # UCI config (TBOX address, token)
+  └── po/                               # Translations (en, it)
+  ```
+- Deploy: `scp` pacchetto su OpenWrt + `opkg install`
+- Oppure: feed OpenWrt custom per aggiornamenti automatici
+
+---
+
+#### Fase 5c — AI/ML Decision Layer (preparazione)
+
+**Deliverable**: framework per auto-tuning dei tunnel basato su metriche realtime.
+Utilizza la Management API (Fase 5a) come attuatore.
+
+##### Step 5.12 — Decision Metrics Collection
+- Definire set minimo metriche per decisioni:
+  - Per path: `loss_rate`, `rtt_ms`, `jitter_ms`, `throughput_mbps`
+  - Per tunnel: `fec_effectiveness`, `arq_retx_rate`, `path_flap_count`
+  - Per sistema: `cpu_percent`, `mem_percent`, `total_throughput`
+- Endpoint: `GET /api/v1/metrics/decision` → snapshot strutturato
+- Storicizzazione: time-series locale (SQLite o file rotante) per trend analysis
+
+##### Step 5.13 — Rule-Based Auto-Tuning (Phase 1 AI)
+- Engine a regole configurabili (JSON/YAML):
+  - IF `loss_rate[wan5] > 5% for 30s` → SET `stripe_fec_mode=always` on mp1
+  - IF `loss_rate < 0.5% for 60s` → SET `stripe_fec_mode=adaptive` on mp1
+  - IF `rtt[wan5] > 200ms for 20s` AND `rtt[wan6] < 50ms` → SET `multipath_policy=failover`
+  - IF `throughput < 50Mbps for 60s` → INCREASE `pipes` on affected path
+  - IF `arq_retx_rate > 10%` → ENABLE `stripe_arq=true`
+- Attuazione via Management API (`PATCH /api/v1/tunnels/{name}/config`)
+- Cooldown tra azioni (min 60s)
+- Audit trail di ogni decisione automatica
+
+##### Step 5.14 — ML Model Integration (Phase 2 AI — futura)
+- Raccolta dataset: metriche + azioni + outcome (throughput delta)
+- Training offline: modello predittivo per parametri ottimali
+- Inference: modello leggero (TFLite o ONNX) sul TBOX
+- A/B testing: canary deployment di nuove policy
+- Feedback loop: misura impatto reale di ogni decisione
+
+---
+
+### Done criteria Fase 5
+
+- [ ] Management API daemon operativo su TBOX (:8080)
+- [ ] CRUD tunnel: list, detail, start, stop, restart via API
+- [ ] Config CRUD con validazione e protezione parametri server-coupled
+- [ ] Hot-reload parametri Categoria A senza restart
+- [ ] Metrics aggregation proxy funzionante
+- [ ] System operations: logs, update, info
+- [ ] LuCI app installata su OpenWrt (10.10.11.254)
+- [ ] Dashboard tunnel con status real-time
+- [ ] Config editor con validazione e diff preview
+- [ ] rpcd plugin proxy funzionante
+- [ ] Rule engine auto-tuning con almeno 3 regole attive
+- [ ] Audit log di tutte le modifiche API e auto-tuning
+
+### Priorità implementazione
+
+| Ordine | Step | Effort | Valore |
+|--------|------|--------|--------|
+| 1 | 5.1–5.3 (API core: tunnel + config) | 2-3 giorni | Base per tutto il resto |
+| 2 | 5.2 (lifecycle management) | 1 giorno | Operatività immediata |
+| 3 | 5.6 (hot-reload protocol) | 1 giorno | Evita restart per tuning |
+| 4 | 5.4 (metrics proxy) | 1 giorno | Osservabilità unificata |
+| 5 | 5.7–5.8 (rpcd + dashboard LuCI) | 2-3 giorni | UI operatore |
+| 6 | 5.9–5.11 (config editor + deploy) | 2-3 giorni | UI completa |
+| 7 | 5.12–5.13 (decision engine) | 3-5 giorni | Auto-tuning |
+
+---
 
 ### Roadmap Fase 4h — Fix TUN race + validazione stabilità v4.8 (2026-03-23)
 
@@ -252,10 +556,10 @@ MAC/rekey, eliminati i parametri `stripe_auth_key` e `stripe_rekey_seconds`.
 | Step | Descrizione | Nostro concetto | Stato |
 |------|-------------|-----------------|-------|
 | **1** | QUIC tunnels multi-link 1:1 | Multi-link | **✅ DONE** |
-| **2** | Traffico distribuito per applicazione, non per pacchetto | Multi-tunnel per link | **🔄 IN PROGRESS** (2.1-2.4 ✅, 2.5 🔄 deploy OK, OpenWrt net+fw ✅, mwan3 pending) |
+| **2** | Traffico distribuito per applicazione, non per pacchetto | Multi-tunnel per link | **✅ DONE** (2.1-2.5 ✅, OpenWrt VLAN+fw ✅, mwan3 posticipato) |
 | **3** | BBR + Reliable Transport | CC per tunnel + transport mode | **✅ DONE** (BBRv1, reliable streams, benchmarkato) |
-| **4** | Bonding, Backup, Duplicazione | Multi-path per tunnel | **✅ DONE** (4b ottimizzazioni ✅, 4c stabilizzazione 🔄) |
-| **5** | AI/ML-Ready (Quality on Demand) | Decision layer | **⬜ NOT STARTED** |
+| **4** | Bonding, Backup, Duplicazione + Stabilizzazione | Multi-path per tunnel | **✅ DONE** (v4.8 stabile, 328 Mbps avg) |
+| **5** | Management API + LuCI UI + AI/ML | Control plane + Decision layer | **🔄 IN PROGRESS** (5a API → 5b LuCI → 5c AI/ML) |
 
 ---
 
@@ -449,7 +753,7 @@ giusta (mwan3, firewall zone, DSCP→VLAN map, ecc.)
 5. ✅ Deploy server: 3 istanze multi-conn su porte 45014-45016 + nftables forward/NAT
 6. ✅ Deploy client: 9 istanze + VLAN interfaces + classifier + ip rules 800-808
 7. ✅ Integrare in install_mpquic.sh (ripetibile su nuove TBOX)
-8. 🔄 Configurare OpenWrt: VLAN trunking + firewall ✅ (2026-03-15), mwan3 posticipato a fase test
+8. ✅ Configurare OpenWrt: VLAN trunking + firewall ✅ (2026-03-15), VLAN interfaces UP (2026-03-25, confermato 9d uptime), mwan3 posticipato
 9. ✅ Test end-to-end: 9 tunnel UP + ping peer VPS bidirezionale verificato (2026-03-14)
 10. ✅ Script UCI in `deploy/openwrt/`: 01-network, 02-firewall, 03-mwan3, 04-dscp, 99-remove
 
@@ -461,7 +765,10 @@ giusta (mwan3, firewall zone, DSCP→VLAN map, ecc.)
 - [x] 9 tunnel VLAN: config + VLAN networkd + classifier nel repo
 - [x] install_mpquic.sh copre l'intero flusso (client + server)
 - [x] OpenWrt VLAN network + firewall zones configurati (2026-03-15)
-- [ ] OpenWrt mwan3 classificazione traffico (posticipato a fase test)
+- [x] OpenWrt VLAN interfaces UP e operativi (2026-03-25, 9d uptime confermato):
+  - BOND1 (eth8.17), cr1-3 (eth11.11, eth12.21, eth13.31),
+    br1-3 (eth11.12, eth12.22, eth13.32), df1-3 (eth11.13, eth12.23, eth13.33)
+- [ ] OpenWrt mwan3 classificazione traffico (posticipato — non bloccante per Fase 5)
 - [x] Test end-to-end: 9 tunnel UP, ping peer OK su tutti (WAN4 ~110ms, WAN5 ~13ms, WAN6 ~19ms)
 - [x] Isolamento dimostrato: loss su un tunnel non impatta gli altri (netem + iperf3)
 - [x] Risultati documentati con metriche (RTT + throughput tables)
