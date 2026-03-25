@@ -328,9 +328,11 @@ func (h *APIHandler) handleTunnelAction(w http.ResponseWriter, r *http.Request, 
 	})
 }
 
-// GET/PATCH /api/v1/tunnels/{name}/config
+// GET/PATCH/POST /api/v1/tunnels/{name}/config
+// POST with X-HTTP-Method-Override: PATCH is treated as PATCH (for wget/uclient-fetch)
 func (h *APIHandler) handleTunnelConfig(w http.ResponseWriter, r *http.Request, name string) {
-	switch r.Method {
+	method := resolveMethod(r)
+	switch method {
 	case http.MethodGet:
 		cfg, err := h.mgr.GetConfig(name)
 		if err != nil {
@@ -625,6 +627,17 @@ func (h *APIHandler) setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// resolveMethod returns the effective HTTP method, honoring X-HTTP-Method-Override
+// header for clients that don't support PATCH (e.g. BusyBox wget, uclient-fetch).
+func resolveMethod(r *http.Request) string {
+	if r.Method == http.MethodPost {
+		if override := r.Header.Get("X-HTTP-Method-Override"); strings.EqualFold(override, "PATCH") {
+			return http.MethodPatch
+		}
+	}
+	return r.Method
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

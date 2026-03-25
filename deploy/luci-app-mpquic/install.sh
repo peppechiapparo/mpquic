@@ -77,7 +77,7 @@ else
 fi
 
 # Write or update UCI config
-ssh "root@${OWRT}" bash -s <<UCIEOF
+ssh "root@${OWRT}" sh -s <<UCIEOF
 #!/bin/sh
 # Create config if missing
 [ -f /etc/config/mpquic ] || touch /etc/config/mpquic

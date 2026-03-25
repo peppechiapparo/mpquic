@@ -61,39 +61,38 @@ api_call() {
 		return 1
 	fi
 
-	local curl_args="-s -m ${TBOX_TIMEOUT} --fail-with-body"
-	curl_args="$curl_args -H 'Authorization: Bearer ${TBOX_TOKEN}'"
-	curl_args="$curl_args -H 'Content-Type: application/json'"
-	curl_args="$curl_args -H 'Accept: application/json'"
-
+	# Use wget (BusyBox) — available on all OpenWrt systems.
+	# For PATCH: use POST with X-HTTP-Method-Override header (server supports this).
 	local result=""
 	case "$method" in
 		GET)
-			result=$(curl -s -m "${TBOX_TIMEOUT}" \
-				-H "Authorization: Bearer ${TBOX_TOKEN}" \
-				-H "Accept: application/json" \
+			result=$(wget -q -O - -T "${TBOX_TIMEOUT}" \
+				--header="Authorization: Bearer ${TBOX_TOKEN}" \
+				--header="Accept: application/json" \
 				"$url" 2>/dev/null)
 			;;
 		POST)
 			if [ -n "$body" ]; then
-				result=$(curl -s -m "${TBOX_TIMEOUT}" -X POST \
-					-H "Authorization: Bearer ${TBOX_TOKEN}" \
-					-H "Content-Type: application/json" \
-					-H "Accept: application/json" \
-					-d "$body" "$url" 2>/dev/null)
+				result=$(wget -q -O - -T "${TBOX_TIMEOUT}" \
+					--header="Authorization: Bearer ${TBOX_TOKEN}" \
+					--header="Content-Type: application/json" \
+					--post-data="$body" \
+					"$url" 2>/dev/null)
 			else
-				result=$(curl -s -m "${TBOX_TIMEOUT}" -X POST \
-					-H "Authorization: Bearer ${TBOX_TOKEN}" \
-					-H "Accept: application/json" \
+				result=$(wget -q -O - -T "${TBOX_TIMEOUT}" \
+					--header="Authorization: Bearer ${TBOX_TOKEN}" \
+					--post-data="" \
 					"$url" 2>/dev/null)
 			fi
 			;;
 		PATCH)
-			result=$(curl -s -m "${TBOX_TIMEOUT}" -X PATCH \
-				-H "Authorization: Bearer ${TBOX_TOKEN}" \
-				-H "Content-Type: application/json" \
-				-H "Accept: application/json" \
-				-d "$body" "$url" 2>/dev/null)
+			# BusyBox wget has no PATCH support; use POST + method override
+			result=$(wget -q -O - -T "${TBOX_TIMEOUT}" \
+				--header="Authorization: Bearer ${TBOX_TOKEN}" \
+				--header="Content-Type: application/json" \
+				--header="X-HTTP-Method-Override: PATCH" \
+				--post-data="$body" \
+				"$url" 2>/dev/null)
 			;;
 	esac
 
