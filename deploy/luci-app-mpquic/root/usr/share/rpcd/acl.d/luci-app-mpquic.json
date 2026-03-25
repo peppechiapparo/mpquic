@@ -13,7 +13,8 @@
 					"system_info",
 					"tunnel_logs"
 				]
-			}
+			},
+			"uci": [ "mpquic" ]
 		},
 		"write": {
 			"ubus": {
@@ -24,7 +25,8 @@
 					"tunnel_config_set",
 					"tunnel_config_validate"
 				]
-			}
+			},
+			"uci": [ "mpquic" ]
 		}
 	}
 }

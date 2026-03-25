@@ -1,11 +1,13 @@
 {
 	"admin/services/mpquic": {
-		"title": "MPQUIC Tunnels",
+		"title": "mpquic-gui",
 		"order": 60,
 		"action": {
-			"type": "firstchild"
+			"type": "alias",
+			"path": "admin/services/mpquic/dashboard"
 		},
 		"depends": {
+			"acl": [ "luci-app-mpquic" ],
 			"uci": { "mpquic": true }
 		}
 	},

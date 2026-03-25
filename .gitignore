@@ -1,3 +1,4 @@
 bin/
 mpquic-bbr
 mpquic-linux-amd64
+mpquic-mgmt

@@ -31,12 +31,12 @@ function badge(text, color) {
 	return span;
 }
 
-function statusBadge(state) {
-	switch ((state || '').toLowerCase()) {
+function statusBadge(status) {
+	switch ((status || '').toLowerCase()) {
 	case 'running': return badge('RUNNING', '#22a722');
 	case 'stopped': return badge('STOPPED', '#d32f2f');
 	case 'failed':  return badge('FAILED', '#e65100');
-	default:        return badge(state || 'unknown', '#757575');
+	default:        return badge(status || 'unknown', '#757575');
 	}
 }
 
@@ -46,6 +46,13 @@ function formatBytes(b) {
 	if (b < 1048576)          return (b / 1024).toFixed(1) + ' KB';
 	if (b < 1073741824)       return (b / 1048576).toFixed(1) + ' MB';
 	return (b / 1073741824).toFixed(2) + ' GB';
+}
+
+function formatPkts(p) {
+	if (p == null || isNaN(p)) return '-';
+	if (p < 1000)    return String(p);
+	if (p < 1000000) return (p / 1000).toFixed(1) + 'K';
+	return (p / 1000000).toFixed(2) + 'M';
 }
 
 function formatUptime(seconds) {
@@ -58,9 +65,13 @@ function formatUptime(seconds) {
 	return m + 'm';
 }
 
-function safeNum(v, decimals) {
-	if (v == null || isNaN(v)) return '-';
-	return decimals != null ? Number(v).toFixed(decimals) : String(v);
+function transportLabel(t) {
+	switch ((t || '').toLowerCase()) {
+	case 'quic':             return 'QUIC';
+	case 'multipath-stripe': return 'MP-Stripe';
+	case 'stripe':           return 'Stripe';
+	default:                 return t || '-';
+	}
 }
 
 /* ── View ──────────────────────────────────────────────────────────────── */
@@ -68,11 +79,14 @@ function safeNum(v, decimals) {
 return view.extend({
 	title: _('MPQUIC Tunnels — Dashboard'),
 
+	/* Avoid stacking duplicate poll handlers on re-render */
+	_pollRegistered: false,
+
 	load: function() {
 		return Promise.all([
-			callHealth(),
-			callTunnels(),
-			callMetrics()
+			callHealth().catch(function() { return {}; }),
+			callTunnels().catch(function() { return {}; }),
+			callMetrics().catch(function() { return {}; })
 		]);
 	},
 
@@ -86,11 +100,27 @@ return view.extend({
 			tunnelList = Object.values(tunnelList);
 		}
 
+		/* ── Build metrics map (tunnels is an object keyed by name) ── */
+		var metricsMap = {};
+		var mt = metrics.tunnels || metrics;
+		if (mt && typeof mt === 'object' && !Array.isArray(mt)) {
+			Object.keys(mt).forEach(function(k) {
+				metricsMap[k] = mt[k];
+			});
+		} else if (Array.isArray(mt)) {
+			mt.forEach(function(m) { if (m.name) metricsMap[m.name] = m; });
+		}
+
 		/* ── Health cards ─────────────────────────────────────────── */
+		var nRunning = health.tunnels_running != null ? health.tunnels_running
+			: tunnelList.filter(function(t) { return t.status === 'running'; }).length;
+		var nStopped = health.tunnels_stopped != null ? health.tunnels_stopped
+			: tunnelList.filter(function(t) { return t.status === 'stopped'; }).length;
+
 		var healthCards = E('div', { 'class': 'cbi-section', 'style': 'display:flex;flex-wrap:wrap;gap:16px;margin-bottom:24px' }, [
 			this.renderCard('Total', health.tunnels_total || tunnelList.length, '#1565c0'),
-			this.renderCard('Running', health.tunnels_running || tunnelList.filter(function(t) { return t.state === 'running'; }).length, '#22a722'),
-			this.renderCard('Stopped', health.tunnels_stopped || tunnelList.filter(function(t) { return t.state === 'stopped'; }).length, '#d32f2f'),
+			this.renderCard('Running', nRunning, '#22a722'),
+			this.renderCard('Stopped', nStopped, '#d32f2f'),
 			this.renderCard('Failed', health.tunnels_failed || 0, '#e65100'),
 			this.renderCard('Version', health.version || '-', '#455a64'),
 		]);
@@ -99,41 +129,33 @@ return view.extend({
 		var tableHead = E('tr', {}, [
 			E('th', {}, 'Name'),
 			E('th', {}, 'State'),
-			E('th', {}, 'WAN'),
-			E('th', {}, 'Mode'),
+			E('th', {}, 'Interface'),
+			E('th', {}, 'CIDR'),
+			E('th', {}, 'Transport'),
 			E('th', {}, 'Uptime'),
-			E('th', {}, 'TX'),
-			E('th', {}, 'RX'),
-			E('th', { 'style': 'text-align:right' }, 'Loss %'),
-			E('th', { 'style': 'text-align:right' }, 'RTT ms'),
-			E('th', { 'style': 'text-align:right' }, 'FEC Recv'),
+			E('th', { 'style': 'text-align:right' }, 'TX'),
+			E('th', { 'style': 'text-align:right' }, 'RX'),
+			E('th', { 'style': 'text-align:right' }, 'TX pkts'),
+			E('th', { 'style': 'text-align:right' }, 'RX pkts'),
 			E('th', {}, 'Actions'),
 		]);
 
-		var metricsMap = {};
-		if (metrics && typeof metrics === 'object') {
-			var ml = metrics.tunnels || metrics;
-			if (Array.isArray(ml)) {
-				ml.forEach(function(m) { if (m.name) metricsMap[m.name] = m; });
-			}
-		}
-
 		var rows = tunnelList.map(L.bind(function(t) {
 			var name = t.name || t.instance || '';
-			var m = metricsMap[name] || t.metrics || {};
+			var m = metricsMap[name] || {};
 
 			return E('tr', {}, [
 				E('td', {}, E('strong', {}, name)),
-				E('td', {}, statusBadge(t.state)),
-				E('td', {}, t.wan || t.bind_ip || '-'),
-				E('td', {}, t.transport_mode || t.mode || '-'),
-				E('td', {}, formatUptime(t.uptime_seconds || t.uptime)),
-				E('td', {}, formatBytes(m.tx_bytes)),
-				E('td', {}, formatBytes(m.rx_bytes)),
-				E('td', { 'style': 'text-align:right' }, safeNum(m.loss_rate || m.loss_percent, 2)),
-				E('td', { 'style': 'text-align:right' }, safeNum(m.rtt_ms || m.srtt_ms, 1)),
-				E('td', { 'style': 'text-align:right' }, safeNum(m.fec_recovered || m.fec_recoveries)),
-				E('td', {}, this.renderActions(name, t.state)),
+				E('td', {}, statusBadge(t.status)),
+				E('td', {}, t.tun_name || '-'),
+				E('td', { 'style': 'font-size:0.85em' }, t.tun_cidr || '-'),
+				E('td', {}, transportLabel(t.transport)),
+				E('td', {}, formatUptime(t.uptime_sec)),
+				E('td', { 'style': 'text-align:right' }, formatBytes(m.total_tx_bytes)),
+				E('td', { 'style': 'text-align:right' }, formatBytes(m.total_rx_bytes)),
+				E('td', { 'style': 'text-align:right' }, formatPkts(m.total_tx_pkts)),
+				E('td', { 'style': 'text-align:right' }, formatPkts(m.total_rx_pkts)),
+				E('td', {}, this.renderActions(name, t.status)),
 			]);
 		}, this));
 
@@ -162,17 +184,20 @@ return view.extend({
 			]),
 		]);
 
-		/* ── Auto-refresh ─────────────────────────────────────────── */
-		poll.add(L.bind(function() {
-			return Promise.all([
-				callHealth(),
-				callTunnels(),
-				callMetrics()
-			]).then(L.bind(function(fresh) {
-				var newBody = this.render(fresh);
-				dom.content(document.querySelector('#view'), newBody);
-			}, this));
-		}, this), 10);
+		/* ── Auto-refresh (register only once) ────────────────────── */
+		if (!this._pollRegistered) {
+			this._pollRegistered = true;
+			poll.add(L.bind(function() {
+				return Promise.all([
+					callHealth().catch(function() { return {}; }),
+					callTunnels().catch(function() { return {}; }),
+					callMetrics().catch(function() { return {}; })
+				]).then(L.bind(function(fresh) {
+					var newBody = this.render(fresh);
+					dom.content(document.querySelector('#view'), newBody);
+				}, this));
+			}, this), 10);
+		}
 
 		return body;
 	},
@@ -187,8 +212,8 @@ return view.extend({
 		]);
 	},
 
-	renderActions: function(name, state) {
-		var isRunning = (state === 'running');
+	renderActions: function(name, status) {
+		var isRunning = (status === 'running');
 		var btns = [];
 
 		if (isRunning) {

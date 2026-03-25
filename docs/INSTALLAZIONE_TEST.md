@@ -1984,13 +1984,13 @@ con i tunnel in esecuzione.
 
 ```
 ┌────────────────────┐     ┌─────────────────────────────────────────────┐
-│ OpenWrt (LuCI)     │     │ TBOX (10.10.11.100)                        │
+│ OpenWrt (LuCI)     │     │ TBOX (10.10.11.100)                         │
 │ 10.10.11.254       │────▶│                                             │
-│  rpcd → ubus       │     │  mpquic-mgmt :8080 ◀── Bearer token auth   │
+│  rpcd → ubus       │     │  mpquic-mgmt :8080 ◀── Bearer token auth    │
 └────────────────────┘     │       │                                     │
                            │       ├─▶ systemctl start/stop/restart      │
 ┌────────────────────┐     │       ├─▶ /etc/mpquic/instances/*.yaml      │
-│ Operatore (curl)   │────▶│       ├─▶ mpquic@{name} journalctl         │
+│ Operatore (curl)   │────▶│       ├─▶ mpquic@{name} journalctl          │
 └────────────────────┘     │       └─▶ {tunnel}:9090/api/v1/stats proxy  │
                            └─────────────────────────────────────────────┘
 ```
