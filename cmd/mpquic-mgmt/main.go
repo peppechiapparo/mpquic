@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"log"
 	"net/http"
@@ -24,19 +25,28 @@ import (
 var version = "dev" // set via -ldflags at build time
 
 func main() {
-	listenAddr := flag.String("listen", ":8080", "HTTP listen address")
+	listenAddr := flag.String("listen", "127.0.0.1:8080", "HTTP listen address (default: localhost only)")
 	instanceDir := flag.String("instance-dir", "/etc/mpquic/instances", "directory containing tunnel YAML configs")
-	authToken := flag.String("auth-token", "", "Bearer token for API auth (or MGMT_AUTH_TOKEN env)")
+	authToken := flag.String("auth-token", "", "Bearer token for API auth (prefer MGMT_AUTH_TOKEN env)")
+	tlsCert := flag.String("tls-cert", "", "TLS certificate file (enables HTTPS)")
+	tlsKey := flag.String("tls-key", "", "TLS private key file")
+	allowedOrigins := flag.String("cors-origins", "", "Comma-separated allowed CORS origins (empty = none)")
 	flag.Parse()
 
-	// Auth token from flag or env
-	token := *authToken
+	// Auth token: prefer env var (avoids /proc/PID/cmdline leak)
+	token := os.Getenv("MGMT_AUTH_TOKEN")
 	if token == "" {
-		token = os.Getenv("MGMT_AUTH_TOKEN")
+		token = *authToken
+	}
+	if token == "" {
+		log.Fatal("FATAL: auth token required. Set MGMT_AUTH_TOKEN env var or --auth-token flag")
+	}
+	if len(token) < 16 {
+		log.Fatal("FATAL: auth token too short (minimum 16 characters)")
 	}
 
 	mgr := NewInstanceManager(*instanceDir)
-	h := NewAPIHandler(mgr, token)
+	h := NewAPIHandler(mgr, token, *allowedOrigins)
 
 	mux := http.NewServeMux()
 
@@ -73,9 +83,26 @@ func main() {
 		_ = server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("mpquic-mgmt %s listening on %s (instances: %s)", version, *listenAddr, *instanceDir)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("server error: %v", err)
+	if *tlsCert != "" && *tlsKey != "" {
+		server.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			CipherSuites: []uint16{
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			},
+		}
+		log.Printf("mpquic-mgmt %s listening on %s [HTTPS/TLS] (instances: %s)", version, *listenAddr, *instanceDir)
+		if err := server.ListenAndServeTLS(*tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	} else {
+		log.Printf("mpquic-mgmt %s listening on %s [HTTP] (instances: %s)", version, *listenAddr, *instanceDir)
+		log.Println("WARNING: running without TLS — use --tls-cert/--tls-key for production")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
 	}
 	log.Println("clean exit")
 }

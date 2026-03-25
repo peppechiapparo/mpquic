@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,35 +9,144 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // ─── API Handler ──────────────────────────────────────────────────────────
 
-type APIHandler struct {
-	mgr       *InstanceManager
-	authToken string
+// validName matches only safe tunnel instance names: alphanumeric, hyphen, underscore, dot.
+var validName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
+
+// rateLimiter tracks failed auth attempts per IP for brute-force protection.
+type rateLimiter struct {
+	mu       sync.Mutex
+	failures map[string][]time.Time // IP -> timestamps of recent failures
 }
 
-func NewAPIHandler(mgr *InstanceManager, authToken string) *APIHandler {
-	return &APIHandler{mgr: mgr, authToken: authToken}
+func newRateLimiter() *rateLimiter {
+	rl := &rateLimiter{failures: make(map[string][]time.Time)}
+	// Background cleanup of stale entries every 5 minutes
+	go func() {
+		for {
+			time.Sleep(5 * time.Minute)
+			rl.cleanup()
+		}
+	}()
+	return rl
+}
+
+const (
+	rateLimitWindow  = 5 * time.Minute
+	rateLimitMaxFail = 10 // max failures per IP per window
+)
+
+func (rl *rateLimiter) isBlocked(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := time.Now().Add(-rateLimitWindow)
+	recent := rl.pruneOld(ip, cutoff)
+	return len(recent) >= rateLimitMaxFail
+}
+
+func (rl *rateLimiter) recordFailure(ip string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.failures[ip] = append(rl.failures[ip], time.Now())
+}
+
+func (rl *rateLimiter) pruneOld(ip string, cutoff time.Time) []time.Time {
+	entries := rl.failures[ip]
+	var recent []time.Time
+	for _, t := range entries {
+		if t.After(cutoff) {
+			recent = append(recent, t)
+		}
+	}
+	rl.failures[ip] = recent
+	return recent
+}
+
+func (rl *rateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := time.Now().Add(-rateLimitWindow)
+	for ip := range rl.failures {
+		rl.pruneOld(ip, cutoff)
+		if len(rl.failures[ip]) == 0 {
+			delete(rl.failures, ip)
+		}
+	}
+}
+
+type APIHandler struct {
+	mgr            *InstanceManager
+	authTokenHash  []byte   // stored as bytes for constant-time compare
+	allowedOrigins []string // empty = no CORS
+	rl             *rateLimiter
+}
+
+func NewAPIHandler(mgr *InstanceManager, authToken string, corsOrigins string) *APIHandler {
+	var origins []string
+	if corsOrigins != "" {
+		for _, o := range strings.Split(corsOrigins, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				origins = append(origins, o)
+			}
+		}
+	}
+	return &APIHandler{
+		mgr:            mgr,
+		authTokenHash:  []byte("Bearer " + authToken),
+		allowedOrigins: origins,
+		rl:             newRateLimiter(),
+	}
 }
 
 // ─── Auth Middleware ──────────────────────────────────────────────────────
 
-func (h *APIHandler) authorize(w http.ResponseWriter, r *http.Request) bool {
-	if h.authToken == "" {
-		return true // no auth configured
+// clientIP extracts the remote IP (without port) from the request.
+func clientIP(r *http.Request) string {
+	ip := r.RemoteAddr
+	if idx := strings.LastIndex(ip, ":"); idx != -1 {
+		ip = ip[:idx]
 	}
-	expected := "Bearer " + h.authToken
-	if r.Header.Get("Authorization") != expected {
-		w.Header().Set("WWW-Authenticate", "Bearer")
+	return strings.Trim(ip, "[]")
+}
+
+func (h *APIHandler) authorize(w http.ResponseWriter, r *http.Request) bool {
+	// Handle CORS preflight (OPTIONS) — allow without auth
+	if r.Method == http.MethodOptions {
+		h.setCORSHeaders(w, r)
+		w.WriteHeader(http.StatusNoContent)
+		return false // signal caller to stop (preflight handled)
+	}
+
+	ip := clientIP(r)
+
+	// Rate limit check — block IPs with too many recent failures
+	if h.rl.isBlocked(ip) {
+		log.Printf("SECURITY: rate-limited ip=%s", ip)
+		w.Header().Set("Retry-After", "300")
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many failed attempts, retry later"})
+		return false
+	}
+
+	// Constant-time comparison to prevent timing attacks
+	provided := []byte(r.Header.Get("Authorization"))
+	if subtle.ConstantTimeCompare(provided, h.authTokenHash) != 1 {
+		h.rl.recordFailure(ip)
+		log.Printf("SECURITY: auth failure ip=%s ua=%s", ip, r.UserAgent())
+		w.Header().Set("WWW-Authenticate", `Bearer realm="mpquic-mgmt"`)
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return false
 	}
+
 	return true
 }
 
@@ -349,7 +459,14 @@ func (h *APIHandler) handleTunnelLogs(w http.ResponseWriter, r *http.Request, na
 			lines = n
 		}
 	}
-	level := r.URL.Query().Get("level") // "" or "error"
+	// Sanitize level: only allow known safe values
+	level := ""
+	switch r.URL.Query().Get("level") {
+	case "error", "ERROR":
+		level = "error"
+	case "warn", "WARN", "warning", "WARNING":
+		level = "warning"
+	}
 
 	output, err := h.mgr.FetchLogs(name, lines, level)
 	if err != nil {
@@ -448,13 +565,27 @@ func (h *APIHandler) HandleSystemLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Input validation: prevent command injection
+	if !validName.MatchString(name) {
+		log.Printf("SECURITY: invalid tunnel name=%q remote=%s", name, r.RemoteAddr)
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid tunnel name"})
+		return
+	}
+
 	lines := 100
 	if v := r.URL.Query().Get("lines"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 10000 {
 			lines = n
 		}
 	}
-	level := r.URL.Query().Get("level")
+	// Sanitize level: only allow known safe values
+	level := ""
+	switch r.URL.Query().Get("level") {
+	case "error", "ERROR":
+		level = "error"
+	case "warn", "WARN", "warning", "WARNING":
+		level = "warning"
+	}
 
 	output, err := h.mgr.FetchLogs(name, lines, level)
 	if err != nil {
@@ -472,11 +603,30 @@ func (h *APIHandler) HandleSystemLogs(w http.ResponseWriter, r *http.Request) {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
+func (h *APIHandler) setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == "" || len(h.allowedOrigins) == 0 {
+		return
+	}
+	for _, allowed := range h.allowedOrigins {
+		if origin == allowed {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.Header().Set("Vary", "Origin")
+			return
+		}
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+	// Security headers
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 	w.WriteHeader(status)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
