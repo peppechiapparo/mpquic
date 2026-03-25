@@ -215,7 +215,7 @@ EOF
 					json_error "config parameter required"
 					exit 1
 				fi
-				local qs=""
+				qs=""
 				[ "$auto_restart" = "true" ] && qs="?auto_restart=true"
 				api_call PATCH "/tunnels/${name}/config${qs}" "$cfg"
 				;;
@@ -263,7 +263,7 @@ EOF
 					exit 1
 				fi
 				[ -z "$lines" ] && lines=50
-				local qs="?lines=${lines}"
+				qs="?lines=${lines}"
 				[ -n "$level" ] && qs="${qs}&level=${level}"
 				api_call GET "/system/logs/${name}${qs}"
 				;;
