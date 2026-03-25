@@ -112,7 +112,12 @@ func runClientOnce(ctx context.Context, cfg *Config, logger *Logger) error {
 	} else {
 		dc = conn
 	}
-	return runTunnel(ctx, cfg, dc, logger)
+
+	// Wrap in countingConn to track TX/RX for single-path metrics
+	cc := newCountingConn(dc)
+	registerMetricsSinglePath(cc)
+
+	return runTunnel(ctx, cfg, cc, logger)
 }
 
 func runClientOnceMultipath(ctx context.Context, cfg *Config, logger *Logger) error {

@@ -34,6 +34,46 @@ type metricsRegistry struct {
 	server       *stripeServer
 	client       *multipathConn
 	clientPaths  func() []*multipathPathState // snapshot under lock
+	singlePath   *countingConn // non-nil for single-path client/server tunnels
+}
+
+// countingConn wraps a datagramConn and counts TX/RX bytes and packets
+// using lock-free atomics. Used for single-path tunnels that don't have
+// the multipathConn or stripeServer metrics subsystem.
+type countingConn struct {
+	inner   datagramConn
+	txBytes uint64
+	rxBytes uint64
+	txPkts  uint64
+	rxPkts  uint64
+}
+
+func newCountingConn(inner datagramConn) *countingConn {
+	return &countingConn{inner: inner}
+}
+
+func (c *countingConn) SendDatagram(pkt []byte) error {
+	err := c.inner.SendDatagram(pkt)
+	if err == nil {
+		atomic.AddUint64(&c.txBytes, uint64(len(pkt)))
+		atomic.AddUint64(&c.txPkts, 1)
+	}
+	return err
+}
+
+func (c *countingConn) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+	pkt, err := c.inner.ReceiveDatagram(ctx)
+	if err == nil {
+		atomic.AddUint64(&c.rxBytes, uint64(len(pkt)))
+		atomic.AddUint64(&c.rxPkts, 1)
+	}
+	return pkt, err
+}
+
+func registerMetricsSinglePath(cc *countingConn) {
+	globalMetrics.mu.Lock()
+	globalMetrics.singlePath = cc
+	globalMetrics.mu.Unlock()
 }
 
 func init() {
@@ -479,6 +519,16 @@ func buildGlobalStats() GlobalStats {
 			gs.TotalTxBytes += p.StripeTxBytes
 			gs.TotalRxBytes += p.StripeRxBytes
 		}
+	}
+
+	// Single-path fallback: if neither stripe server nor multipath client
+	// are registered, use the countingConn wrapper counters.
+	sp := globalMetrics.singlePath
+	if ss == nil && mc == nil && sp != nil {
+		gs.TotalTxBytes = atomic.LoadUint64(&sp.txBytes)
+		gs.TotalRxBytes = atomic.LoadUint64(&sp.rxBytes)
+		gs.TotalTxPkts = atomic.LoadUint64(&sp.txPkts)
+		gs.TotalRxPkts = atomic.LoadUint64(&sp.rxPkts)
 	}
 
 	return gs
