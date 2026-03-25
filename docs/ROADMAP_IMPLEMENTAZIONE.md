@@ -191,8 +191,8 @@ che fornisce UI web completa per gestione tunnel MPQUIC.
 **Stack tecnologico**: LuCI JavaScript client-side (luci-js-base), rpcd plugin
 Lua/shell come proxy verso Management API su TBOX.
 
-##### Step 5.7 — rpcd Plugin Proxy (`/usr/libexec/rpcd/mpquic`)
-- Script Lua/shell che funge da bridge ubus ↔ HTTP
+##### Step 5.7 — rpcd Plugin Proxy (`/usr/libexec/rpcd/mpquic`) ✅ DONE (commit `1a81452` + `c74c028` + `192a25d`)
+- Script shell che funge da bridge ubus ↔ HTTP (usa wget BusyBox, zero dipendenze)
 - Metodi ubus:
   - `mpquic.tunnels` → `GET /api/v1/tunnels`
   - `mpquic.tunnel_detail {name}` → `GET /api/v1/tunnels/{name}`
@@ -205,7 +205,7 @@ Lua/shell come proxy verso Management API su TBOX.
 - Config: indirizzo TBOX + auth token in `/etc/config/mpquic`
 - ACL: `/usr/share/rpcd/acl.d/luci-app-mpquic.json`
 
-##### Step 5.8 — LuCI Dashboard View
+##### Step 5.8 — LuCI Dashboard View ✅ DONE (commit `1a81452`)
 - Menu entry: **Services → MPQUIC Tunnels**
 - Vista principale: tabella tunnel con colonne:
   - Nome | Tipo (stripe/quic) | Stato (running/stopped) | WAN | Uptime
@@ -214,7 +214,7 @@ Lua/shell come proxy verso Management API su TBOX.
 - Refresh automatico ogni 10s
 - Health score aggregato in header
 
-##### Step 5.9 — LuCI Configuration Editor
+##### Step 5.9 — LuCI Configuration Editor ✅ DONE (commit `1a81452`)
 - Per ogni tunnel: form editor con soli parametri Categoria A + B
 - Parametri Categoria C mostrati read-only (grayed out) con tooltip "Richiede modifica server"
 - Validazione client-side + server-side (via `/validate` endpoint)

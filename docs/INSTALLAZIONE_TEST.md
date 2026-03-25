@@ -2255,3 +2255,200 @@ ps aux | grep mpquic-mgmt | grep -v grep
 ls -la /etc/mpquic/mgmt.env
 # -rw------- 1 root root ... → OK (solo root può leggere)
 ```
+
+## 25) LuCI App per OpenWrt — `luci-app-mpquic` (Fase 5b)
+
+### 25.1 Panoramica
+
+`luci-app-mpquic` fornisce interfaccia web LuCI integrata nel router OpenWrt
+(10.10.11.254) per gestione e monitoraggio di tutti i tunnel MPQUIC sulla TBOX.
+
+**Architettura:**
+```
+Browser → LuCI JS → ubus/rpcd → rpcd/mpquic (shell, wget) → TBOX mpquic-mgmt :8080
+```
+
+Il token di autenticazione è custodito in UCI (`/etc/config/mpquic`) sul router,
+mai esposto al browser. Il rpcd plugin inietta il token server-side nelle chiamate.
+
+### 25.2 Prerequisiti
+
+- OpenWrt 24.10+ (verificato su 24.10.0, x86_64)
+- `wget` BusyBox integrato (disponibile di default)
+- `jsonfilter` integrato (disponibile di default)
+- `mpquic-mgmt` sulla TBOX in ascolto su IP LAN (es. `10.10.11.100:8080`)
+- Token auth TBOX noto (da `/etc/mpquic/mgmt.env` sulla TBOX)
+
+**NON serve**: curl, Lua extra, node.js, compilatore. Zero dipendenze aggiuntive.
+
+### 25.3 Configurazione TBOX — Listen address
+
+Prima di installare LuCI, assicurarsi che `mpquic-mgmt` ascolti su IP LAN:
+
+```bash
+# Sulla TBOX:
+# Verificare /etc/systemd/system/mpquic-mgmt.service contiene:
+#   --listen 10.10.11.100:8080
+# Se serve cambiare da 127.0.0.1 a IP LAN:
+sudo sed -i 's/127.0.0.1:8080/10.10.11.100:8080/' /etc/systemd/system/mpquic-mgmt.service
+sudo systemctl daemon-reload
+sudo systemctl restart mpquic-mgmt
+
+# Verifica
+sudo systemctl status mpquic-mgmt | grep listen
+# → listening on 10.10.11.100:8080
+```
+
+### 25.4 Installazione automatica
+
+```bash
+# Dal dev machine, con ssh-agent verso OpenWrt e TBOX:
+cd /opt/mpquic
+TOKEN=$(ssh mpquic 'sudo grep MGMT_AUTH_TOKEN /etc/mpquic/mgmt.env | cut -d= -f2-')
+bash deploy/luci-app-mpquic/install.sh 10.10.11.254 10.10.11.100 "$TOKEN"
+```
+
+Lo script installa automaticamente:
+1. rpcd plugin → `/usr/libexec/rpcd/mpquic`
+2. ACL → `/usr/share/rpcd/acl.d/luci-app-mpquic.json`
+3. Menu LuCI → `/usr/share/luci/menu.d/luci-app-mpquic.json`
+4. Views JS → `/www/luci-static/resources/view/mpquic/`
+5. UCI config → `/etc/config/mpquic`
+6. Restart rpcd + uhttpd
+
+### 25.5 Installazione manuale (step-by-step)
+
+Se l'installazione automatica non funziona, eseguire manualmente:
+
+```bash
+# 1. Copiare rpcd plugin
+scp deploy/luci-app-mpquic/root/usr/libexec/rpcd/mpquic root@10.10.11.254:/usr/libexec/rpcd/mpquic
+ssh root@10.10.11.254 'chmod 0755 /usr/libexec/rpcd/mpquic'
+
+# 2. Copiare ACL
+scp deploy/luci-app-mpquic/root/usr/share/rpcd/acl.d/luci-app-mpquic.json \
+    root@10.10.11.254:/usr/share/rpcd/acl.d/luci-app-mpquic.json
+
+# 3. Copiare menu LuCI
+scp deploy/luci-app-mpquic/root/usr/share/luci/menu.d/luci-app-mpquic.json \
+    root@10.10.11.254:/usr/share/luci/menu.d/luci-app-mpquic.json
+
+# 4. Copiare views JavaScript
+ssh root@10.10.11.254 'mkdir -p /www/luci-static/resources/view/mpquic'
+scp deploy/luci-app-mpquic/htdocs/luci-static/resources/view/mpquic/*.js \
+    root@10.10.11.254:/www/luci-static/resources/view/mpquic/
+
+# 5. Creare config UCI
+TOKEN="..."  # Token dalla TBOX
+ssh root@10.10.11.254 "cat > /etc/config/mpquic <<EOF
+config api 'api'
+	option host '10.10.11.100'
+	option port '8080'
+	option proto 'http'
+	option token '${TOKEN}'
+	option timeout '10'
+EOF"
+
+# 6. Restart servizi
+ssh root@10.10.11.254 '/etc/init.d/rpcd restart && /etc/init.d/uhttpd restart'
+```
+
+### 25.6 Verifica rpcd
+
+```bash
+# Da locale verso OpenWrt:
+ssh root@10.10.11.254 'ubus call mpquic health'
+# Output atteso:
+# {
+#     "ok": true,
+#     "tunnels_total": 16,
+#     "tunnels_running": 4,
+#     ...
+# }
+
+# Test tutti i metodi:
+ssh root@10.10.11.254 'ubus call mpquic tunnels' | head -10
+ssh root@10.10.11.254 'ubus call mpquic tunnel_detail "{\"name\":\"mp1\"}"'
+ssh root@10.10.11.254 'ubus call mpquic system_info'
+ssh root@10.10.11.254 'ubus call mpquic tunnel_logs "{\"name\":\"mp1\",\"lines\":5}"'
+
+# Verifica sicurezza (injection):
+ssh root@10.10.11.254 'ubus call mpquic tunnel_detail "{\"name\":\"../etc/passwd\"}"'
+# → {"error": "invalid tunnel name"}
+```
+
+### 25.7 Accesso LuCI
+
+Dopo l'installazione, la UI è disponibile su:
+
+```
+http://10.10.11.254/cgi-bin/luci/admin/services/mpquic/dashboard
+```
+
+Menu LuCI: **Services → MPQUIC Tunnels → Dashboard / Configuration**
+
+**Dashboard**: mostra health cards (Total/Running/Stopped/Failed/Version),
+tabella tunnel con stato, WAN, uptime, TX/RX, loss, RTT, FEC, azioni start/stop/restart.
+Auto-refresh ogni 10 secondi.
+
+**Configuration**: selettore tunnel, form editor con parametri divisi per categoria:
+- **Cat. A** (verde): modificabili senza restart — `log_level`, `stripe_pacing_rate`, ecc.
+- **Cat. B** (giallo): modificabili con restart — `tun_mtu`, `congestion_algorithm`, ecc.
+- **Cat. C** (rosso): read-only — `remote_addr`, `tun_name`, ecc.
+Bottoni: Validate (dry-run), Apply, Apply+Restart.
+
+### 25.8 Note tecniche
+
+**Perché wget e non curl:**
+OpenWrt 24.10.0 ha una versione di curl con libcurl mismatch (8.12.1 vs 8.10.1)
+che causa `Error relocating: curl_easy_ssls_import: symbol not found`.
+BusyBox wget è sempre presente e funzionante.
+
+**PATCH via X-HTTP-Method-Override:**
+BusyBox wget non supporta il metodo HTTP PATCH. Il rpcd plugin usa POST con
+header `X-HTTP-Method-Override: PATCH` che il server mpquic-mgmt riconosce.
+
+**Config UCI protetto:**
+Il token è in `/etc/config/mpquic`, leggibile solo da root. L'ACL rpcd
+limita l'accesso ubus al solo utente `admin` di LuCI.
+
+### 25.9 Aggiornamento
+
+Per aggiornare le views LuCI dopo un commit:
+```bash
+cd /opt/mpquic
+git pull origin main
+# Reinstallare files modificati:
+scp deploy/luci-app-mpquic/htdocs/luci-static/resources/view/mpquic/*.js \
+    root@10.10.11.254:/www/luci-static/resources/view/mpquic/
+scp deploy/luci-app-mpquic/root/usr/libexec/rpcd/mpquic \
+    root@10.10.11.254:/usr/libexec/rpcd/mpquic
+ssh root@10.10.11.254 'chmod 0755 /usr/libexec/rpcd/mpquic && /etc/init.d/rpcd restart'
+```
+
+### 25.10 Troubleshooting
+
+```bash
+# rpcd non elenca mpquic
+ubus list | grep mpquic
+# Se assente: verificare che /usr/libexec/rpcd/mpquic è eseguibile (chmod 0755)
+# e che /etc/init.d/rpcd restart è stato eseguito
+
+# "no auth token configured"
+cat /etc/config/mpquic
+# → Verificare option token non sia vuoto
+
+# "connection to TBOX failed"
+# 1. Verificare connettività: ping 10.10.11.100
+# 2. Verificare mgmt ascolta su LAN: ssh satcom@10.10.11.100 'ss -tlnp | grep 8080'
+# 3. Test manuale: wget -q -O - --header="Authorization: Bearer TOKEN" http://10.10.11.100:8080/api/v1/health
+
+# LuCI mostra pagina vuota
+# Svuotare cache browser, poi verificare file JS:
+ls -la /www/luci-static/resources/view/mpquic/
+# Se mancanti, reinstallare views (vedi 25.5 punto 4)
+
+# Menu "MPQUIC Tunnels" non appare
+ls -la /usr/share/luci/menu.d/luci-app-mpquic.json
+# Se presente ma non visibile: /etc/init.d/uhttpd restart
+```

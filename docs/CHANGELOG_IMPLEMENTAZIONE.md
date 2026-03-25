@@ -2,6 +2,42 @@
 
 ## 2026-03-25
 
+### LuCI App per OpenWrt — `luci-app-mpquic` (commit `1a81452` + `c74c028` + `192a25d`)
+
+Implementata interfaccia LuCI per gestione tunnel MPQUIC da OpenWrt (Fase 5b, Step 5.7-5.9).
+
+**Architettura:**
+```
+Browser → LuCI JS → ubus/rpcd → rpcd/mpquic (shell) → wget → TBOX mpquic-mgmt :8080
+```
+
+**Componenti creati in `deploy/luci-app-mpquic/`:**
+- **rpcd plugin** (`root/usr/libexec/rpcd/mpquic`) — Shell script bridge ubus ↔ HTTP
+  - 12 metodi ubus: health, tunnels, tunnel_detail, tunnel_{start,stop,restart},
+    tunnel_config, tunnel_config_{set,validate}, tunnel_metrics, metrics, system_info, tunnel_logs
+  - Usa `wget` BusyBox (zero dipendenze esterne)
+  - Validazione nomi tunnel + lettura token da UCI `/etc/config/mpquic`
+- **ACL** (`root/usr/share/rpcd/acl.d/luci-app-mpquic.json`) — Permessi admin read/write
+- **Menu** (`root/usr/share/luci/menu.d/luci-app-mpquic.json`) — Services → MPQUIC Tunnels
+- **Dashboard** (`htdocs/.../view/mpquic/dashboard.js`) — Health cards, tunnel table live, azioni
+- **Config editor** (`htdocs/.../view/mpquic/config.js`) — Form Cat.A/B/C, validate, apply+restart
+- **UCI config** (`root/etc/config/mpquic`) — Host TBOX, porta, token, timeout
+- **install.sh** — Script deploy one-command via SSH
+
+**Fix di compatibilità OpenWrt:**
+- Sostituito `curl` con `wget` BusyBox (curl su OpenWrt 24.10 con libcurl mismatch)
+- Aggiunto `X-HTTP-Method-Override: PATCH` nel server per PATCH via POST (wget non supporta PATCH)
+- Rimosso `local` keyword fuori funzioni (ash POSIX compat)
+- Cambiato listen address mgmt da `127.0.0.1:8080` a `10.10.11.100:8080` (raggiungibile da LAN)
+
+**Verification:**
+- ubus call mpquic health → OK (16 tunnel, 4 running)
+- ubus call mpquic tunnels → OK (lista completa con stato)
+- ubus call mpquic tunnel_detail → OK (config + uptime + metrics_url)
+- ubus call mpquic tunnel_logs → OK (output journalctl)
+- ubus call mpquic system_info → OK (versione v4.8-8-gc74c028)
+- Injection protection → rifiutato `../etc/passwd` → "invalid tunnel name"
+
 ### Security hardening mpquic-mgmt (commit `1003246` + `8095e01`)
 
 Audit di sicurezza completo con 10 vulnerabilità identificate e corrette:
