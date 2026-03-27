@@ -1,7 +1,7 @@
 # Requisiti Tecnici — Integrazione VM Tunnel MPQUIC
 
-**Progetto**: ROMARS  
-**Data**: 2026-06-11  
+**Progetto**: MPQUIC ROMARS  
+**Data**: 2026-03-26  
 **Versione**: 1.0  
 **Classificazione**: Riservato — Solo per il fornitore designato  
 
@@ -9,15 +9,15 @@
 
 ## Indice
 
-1. [Scopo del Documento](#1-scopo-del-documento)
-2. [Architettura di Riferimento](#2-architettura-di-riferimento)
-3. [Specifiche VM](#3-specifiche-vm)
-4. [Interfacce di Rete](#4-interfacce-di-rete)
-5. [VLAN](#5-vlan)
-6. [Indirizzamento IP](#6-indirizzamento-ip)
-7. [Routing e Policy Routing](#7-routing-e-policy-routing)
-8. [NAT e Firewall (nftables)](#8-nat-e-firewall-nftables)
-9. [Tunnel — Nomenclatura e Addressing](#9-tunnel--nomenclatura-e-addressing)
+1.  [Scopo del Documento](#1-scopo-del-documento)
+2.  [Architettura di Riferimento](#2-architettura-di-riferimento)
+3.  [Specifiche VM](#3-specifiche-vm)
+4.  [Interfacce di Rete](#4-interfacce-di-rete)
+5.  [VLAN](#5-vlan)
+6.  [Indirizzamento IP](#6-indirizzamento-ip)
+7.  [Routing e Policy Routing](#7-routing-e-policy-routing)
+8.  [NAT e Firewall (nftables)](#8-nat-e-firewall-nftables)
+9.  [Tunnel — Nomenclatura e Addressing](#9-tunnel--nomenclatura-e-addressing)
 10. [Configurazione Tunnel (YAML)](#10-configurazione-tunnel-yaml)
 11. [Gestione Servizi (systemd)](#11-gestione-servizi-systemd)
 12. [Watchdog e Health-Check](#12-watchdog-e-health-check)
@@ -31,48 +31,58 @@
 
 ## 1. Scopo del Documento
 
-Questo documento definisce i requisiti tecnici che la VM tunnel MPQUIC fornita
-dal fornitore deve soddisfare per integrarsi nell'infrastruttura TBOX/OpenWrt
-del progetto ROMARS.
+Il presente documento definisce i requisiti tecnici e di integrazione che la Virtual Machine MPQUIC fornita dal fornitore ROMARS deve soddisfare per operare correttamente all’interno dell’architettura TBOX/OpenWrt nell’ambito del progetto pilota TRINA SOLAR.
 
-La VM deve essere **funzionalmente intercambiabile** con l'attuale slot VM della
-TBOX: stesse interfacce di rete, stessa nomenclatura, stesso piano di
-indirizzamento, stesse API di gestione, stessi formati metriche.
+L’obiettivo è garantire una piena interoperabilità tra la VM del fornitore e l’infrastruttura TBOX, attraverso la definizione chiara e vincolante delle interfacce esterne, includendo in particolare:
 
-Il fornitore è libero nella scelta dell'implementazione interna (linguaggio,
-librerie, architettura del codice) purché le interfacce esterne — rete, API,
-metriche, servizi systemd — siano compatibili con quanto specificato di seguito.
+- interfacce di rete e relativa nomenclatura
+- piano di indirizzamento IP
+- API di gestione e controllo
+- formati e modalità di esposizione delle metriche
+- integrazione con i servizi di sistema (es. systemd)
 
+Il fornitore mantiene piena libertà nella progettazione e implementazione interna della soluzione (linguaggi, librerie, architettura software), a condizione che tutte le interfacce esposte verso l’esterno risultino pienamente conformi alle specifiche definite nel presente documento.
+
+Nel contesto del progetto pilota TRINA, l’architettura di connettività prevede esclusivamente due interfacce WAN, con i seguenti ruoli operativi:
+
+- **WAN6**: connessione primaria tramite modem Starlink (assegnazione IP via DHCP)
+- **WAN5**: connessione di backup tramite modem LTE/5G (assegnazione IP via DHCP)
+
+La VM MPQUIC dovrà operare in questo scenario dual-WAN garantendo continuità del servizio e corretta gestione del traffico tra i due uplink, in coerenza con le politiche definite dalla TBOX.
+
+La soluzione dovrà basarsi esclusivamente su un’implementazione MPQUIC conforme ai requisiti di integrazione descritti nel presente documento.
+
+Il resto delle funzionalità richieste deve essere inteso come parte integrante del processo di integrazione della VM ROMARS all’interno dell’ecosistema TBOX.
 ---
 
 ## 2. Architettura di Riferimento
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                       TBOX (Server fisico)                      │
+│                       TBOX (Proxmox embedded)                   │
 │                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │                 OpenWrt Router (x86_64)                   │  │
+│  │                                                           │  │
+│  │   6× LAN ports ─── /30 point-to-point ──> VM tunnel       │  │
+│  │   VLANs           ─── tagged traffic  ──> VM tunnel       │  │
+│  │   Policy routing   ─── per-subnet      ──> LAN→WAN map    │  │
+│  │   LuCI GUI         ─── dashboard + config via API         │  │
+│  └───────────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │                    VM Tunnel (Debian 12)                  │  │
 │  │                                                           │  │
-│  │   6× WAN (DHCP)         ─────────>   Internet (Starlink) │  │
-│  │   6× LAN (static /30)  <─────────   OpenWrt router       │  │
-│  │   2× MGMT (static)     <─────────>  Rete gestione        │  │
+│  │   6× WAN (DHCP)         ─────────>   Internet (Starlink)  │  │
+│  │   6× LAN (static /30)  <─────────   OpenWrt router        │  │
+│  │   2× MGMT (static)     <─────────>  Rete gestione         │  │
 │  │                                                           │  │
 │  │   Tunnel QUIC client per ogni WAN ──> VPS Server remoto   │  │
-│  │   TUN interfaces (mpqN) ──> routing policy ──> LAN       │  │
+│  │   TUN interfaces (mpqN) ──> routing policy ──> LAN        │  │
 │  │                                                           │  │
 │  │   Management API (REST) ──> LuCI / orchestrator           │  │
 │  │   Metrics (HTTP/JSON)   ──> Prometheus / Grafana          │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                 │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                 OpenWrt Router (x86_64)                   │  │
-│  │                                                           │  │
-│  │   6× LAN ports ─── /30 point-to-point ──> VM tunnel      │  │
-│  │   VLANs           ─── tagged traffic  ──> VM tunnel      │  │
-│  │   Policy routing   ─── per-subnet      ──> LAN→WAN map   │  │
-│  │   LuCI GUI         ─── dashboard + config via API        │  │
-│  └───────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
                           │
                      Internet/Starlink
@@ -87,12 +97,17 @@ metriche, servizi systemd — siano compatibili con quanto specificato di seguit
               │  6× TUN + listener    │
               └───────────────────────┘
 ```
+Nel contesto del progetto pilota TRINA, l’architettura deve essere considerata in configurazione ridotta, con utilizzo esclusivo delle seguenti interfacce:
+wan6: uplink primario Starlink
+wan5: uplink secondario LTE/5G
+
+Tutte le altre interfacce WAN, i relativi tunnel e le configurazioni multi-link sono da considerarsi fuori scope per la fase pilota e potranno essere attivate in fasi successive del progetto.
 
 ### Flusso dati
 
 1. Traffico LAN arriva alla VM tramite interfacce LAN punto-punto /30
 2. Policy routing nella VM inoltra il traffico verso la TUN associata
-3. Il processo tunnel incapsula i pacchetti IP in QUIC DATAGRAM
+3. Il processo tunnel incapsula i pacchetti IP in QUIC DATAGRAM utilizzando MPQUIC
 4. Il socket UDP è bindata sull'interfaccia WAN corretta
 5. Il pacchetto attraversa Internet verso il VPS
 6. Il VPS decapsula e inoltra (o viceversa per il ritorno)
@@ -101,19 +116,19 @@ metriche, servizi systemd — siano compatibili con quanto specificato di seguit
 
 ## 3. Specifiche VM
 
-| Parametro | Valore |
-|-----------|--------|
-| **Hypervisor** | KVM/QEMU (libvirt) |
-| **SO** | Debian 12 (bookworm) x86_64 |
-| **vCPU** | Minimo 2 (assegnati: i7-10710U 1.10GHz) |
-| **RAM** | Minimo 4 GB |
-| **Disco** | Minimo 20 GB (SSD) |
-| **NIC fisiche (passthrough)** | 14 (vedi § 4) |
-| **Kernel** | >= 6.1 (supporto TUN multi_queue, nftables, SO_BINDTODEVICE) |
-| **Init** | systemd |
-| **Network manager** | systemd-networkd (NO NetworkManager) |
-| **Firewall** | nftables (NO iptables legacy) |
-| **Pacchetti minimi** | iproute2, nftables, systemd, curl, jq, inetutils-ping |
+| Parametro                     | Valore                                                        |
+|-------------------------------|---------------------------------------------------------------|
+| **Hypervisor**                | KVM/QEMU (libvirt)                                            |
+| **SO**                        | Debian 12 (bookworm) x86_64                                   |
+| **vCPU**                      | Massimo 2 vCPU (assegnati: i7-10710U 1.10GHz)                 |
+| **RAM**                       | Massimo 4 GB                                                  |
+| **Disco**                     | Massimo 20 GB (SSD)                                           |
+| **NIC fisiche (passthrough)** | 14 (vedi § 4)                                                 |
+| **Kernel**                    | >= 6.1 (supporto TUN multi_queue, nftables, SO_BINDTODEVICE)  |
+| **Init**                      | systemd                                                       |
+| **Network manager**           | systemd-networkd (NO NetworkManager)                          |
+| **Firewall**                  | nftables (NO iptables legacy)                                 |
+| **Pacchetti minimi**          | iproute2, nftables, systemd, curl, jq, inetutils-ping         |
 
 ### Requisiti kernel
 
@@ -130,14 +145,24 @@ La VM dispone di **14 NIC fisiche** in PCI passthrough, suddivise in 3 gruppi fu
 
 ### 4.1 WAN — Uplink Internet (6 interfacce)
 
-| Interfaccia | Nome logico | Connettività | Addressing |
-|-------------|-------------|--------------|------------|
-| `enp7s3` | WAN1 | Uplink ISP #1 | DHCP |
-| `enp7s4` | WAN2 | Uplink ISP #2 | DHCP |
-| `enp7s5` | WAN3 | Uplink ISP #3 | DHCP |
-| `enp7s6` | WAN4 | Uplink ISP #4 | DHCP |
-| `enp7s7` | WAN5 | Starlink #1 | DHCP (CGNAT 100.x.x.x) |
-| `enp7s8` | WAN6 | Starlink #2 | DHCP (CGNAT 100.x.x.x) |
+Nel progetto pilota TRINA devono essere configurate esclusivamente le seguenti interfacce:
+
+| Interfaccia | Nome logico             | Connettività | 
+|-------------|-------------------------|--------------|
+| `enp7s7`    | WAN5 | LTE/5G (backup)       | DHCP         |
+| `enp7s8`    | WAN6 | Starlink (primario)   | DHCP         |
+
+Le restanti interfacce WAN sono da considerarsi opzionali e fuori scope per la fase pilota.
+Ma per completezza sono riportate qui di seguito (lo stesso vale per interfacce tun e indirizzamenti).
+
+| Interfaccia | Nome logico          | Connettività | 
+|-------------|----------------------|--------------|
+| `enp7s3`    | WAN1 | Uplink ISP #1 | DHCP         |
+| `enp7s4`    | WAN2 | Uplink ISP #2 | DHCP         |
+| `enp7s5`    | WAN3 | Uplink ISP #3 | DHCP         |
+| `enp7s6`    | WAN4 | Uplink ISP #4 | DHCP         |
+| `enp7s7`    | WAN5 | Starlink #1   | DHCP         |
+| `enp7s8`    | WAN6 | Starlink #2   | DHCP         |
 
 > **Nota**: gli IP WAN sono dinamici (DHCP). Il software tunnel deve gestire
 > il binding per interfaccia (`SO_BINDTODEVICE`) o per IP sorgente, con
@@ -145,23 +170,32 @@ La VM dispone di **14 NIC fisiche** in PCI passthrough, suddivise in 3 gruppi fu
 
 ### 4.2 LAN — Collegamento verso OpenWrt (6 interfacce)
 
-| Interfaccia | Nome logico | IP VM | IP OpenWrt | Subnet |
-|-------------|-------------|-------|------------|--------|
-| `enp6s20` | LAN1 | `172.16.1.1` | `172.16.1.2` | `/30` |
-| `enp6s21` | LAN2 | `172.16.2.1` | `172.16.2.2` | `/30` |
-| `enp6s22` | LAN3 | `172.16.3.1` | `172.16.3.2` | `/30` |
-| `enp6s23` | LAN4 | `172.16.4.1` | `172.16.4.2` | `/30` |
-| `enp7s1`  | LAN5 | `172.16.5.1` | `172.16.5.2` | `/30` |
-| `enp7s2`  | LAN6 | `172.16.6.1` | `172.16.6.2` | `/30` |
+Anche per questa parte vale quanto definito sopra, la configurazione del progetto pilota TRINA
+prevede esclusivamente la configurazione delle seguenti interfacce:
+| Interfaccia | Nome logico   | IP VM        | IP OpenWrt   | Subnet |
+|-------------|---------------|--------------|--------------|--------|
+| `enp7s1`    | LAN5          | `172.16.5.1` | `172.16.5.2` | `/30`  |
+| `enp7s2`    | LAN6          | `172.16.6.1` | `172.16.6.2` | `/30`  |
+
+Le restanti interfacce LAN sono da considerarsi opzionali e fuori scope per la fase pilota.
+
+| Interfaccia | Nome logico   | IP VM        | IP OpenWrt   | Subnet |
+|-------------|---------------|--------------|--------------|--------|
+| `enp6s20`   | LAN1          | `172.16.1.1` | `172.16.1.2` | `/30`  |
+| `enp6s21`   | LAN2          | `172.16.2.1` | `172.16.2.2` | `/30`  |
+| `enp6s22`   | LAN3          | `172.16.3.1` | `172.16.3.2` | `/30`  |
+| `enp6s23`   | LAN4          | `172.16.4.1` | `172.16.4.2` | `/30`  |
+| `enp7s1`    | LAN5          | `172.16.5.1` | `172.16.5.2` | `/30`  |
+| `enp7s2`    | LAN6          | `172.16.6.1` | `172.16.6.2` | `/30`  |
 
 Ogni coppia LAN forma un link point-to-point /30 tra la VM e OpenWrt.
 
 ### 4.3 MGMT — Gestione (2 interfacce)
 
-| Interfaccia | Rete | IP |
-|-------------|------|-----|
-| `enp6s18` | Management primaria | `10.10.11.100/24` |
-| `enp6s19` | Management secondaria | `10.10.10.100/24` |
+| Interfaccia | Rete                  | IP                |
+|-------------|-----------------------|-------------------|
+| `enp6s18`   | Management primaria   | `10.10.11.100/24` |
+| `enp6s19`   | Management secondaria | `10.10.10.100/24` |
 
 L'API di gestione (§ 13) deve essere raggiungibile sulla rete MGMT primaria.
 
@@ -169,13 +203,16 @@ L'API di gestione (§ 13) deve essere raggiungibile sulla rete MGMT primaria.
 
 ## 5. VLAN
 
-Alcune interfacce LAN trasportano traffico tagged (802.1Q). La VM deve creare
-le sotto-interfacce VLAN corrispondenti.
+Il supporto alla configurazione VLAN deve essere garantito. Tuttavia, l’attivazione delle specifiche VLAN descritte nel presente documento è da considerarsi opzionale nell’ambito del progetto pilota TRINA.
+
+Le interfacce VLAN di seguito riportate sono pertanto da ritenersi fuori scope per la fase pilota e vengono incluse esclusivamente a scopo di completezza architetturale.
+
+Alcune interfacce LAN trasportano traffico tagged secondo lo standard IEEE 802.1Q. La VM dovrà essere in grado di gestire tali flussi creando le corrispondenti sotto-interfacce VLAN.
 
 ### 5.1 VLAN su LAN4 (`enp6s23`)
 
-| VLAN ID | Sotto-interfaccia | IP VM |
-|---------|-------------------|-------|
+| VLAN ID | Sotto-interfaccia | IP VM  |
+|---------|-------------------|------- |
 | 11 | `enp6s23.11` | `172.16.11.1/30` |
 | 12 | `enp6s23.12` | `172.16.12.1/30` |
 | 13 | `enp6s23.13` | `172.16.13.1/30` |
@@ -196,11 +233,11 @@ le sotto-interfacce VLAN corrispondenti.
 | 32 | `enp7s2.32` | `172.16.32.1/30` |
 | 33 | `enp7s2.33` | `172.16.33.1/30` |
 
-### 5.4 VLAN su LAN1 (`enp6s20`)
+### 5.4 VLAN su LAN1 (Interfaccia di Bonding) (`enp6s20`)
 
-| VLAN ID | Sotto-interfaccia | IP VM |
-|---------|-------------------|-------|
-| 17 | `enp6s20.17` | `172.16.17.1/30` |
+| VLAN ID | Sotto-interfaccia | IP VM            |
+|---------|-------------------|------------------|
+| 17      | `enp6s20.17`      | `172.16.17.1/30` |
 
 ### Configurazione VLAN (systemd-networkd)
 
@@ -244,55 +281,73 @@ VLAN=enp6s23.13
 
 ### 6.1 Riepilogo subnet
 
-| Ruolo | Subnet | Gateway | Note |
-|-------|--------|---------|------|
-| WAN1-6 | DHCP | DHCP-assegnato | IP dinamici |
-| LAN1 | `172.16.1.0/30` | — | point-to-point |
-| LAN2 | `172.16.2.0/30` | — | point-to-point |
-| LAN3 | `172.16.3.0/30` | — | point-to-point |
-| LAN4 | `172.16.4.0/30` | — | point-to-point |
-| LAN5 | `172.16.5.0/30` | — | point-to-point |
-| LAN6 | `172.16.6.0/30` | — | point-to-point |
-| VLAN 11 | `172.16.11.0/30` | — | su LAN4 |
-| VLAN 12 | `172.16.12.0/30` | — | su LAN4 |
-| VLAN 13 | `172.16.13.0/30` | — | su LAN4 |
-| VLAN 21 | `172.16.21.0/30` | — | su LAN5 |
-| VLAN 22 | `172.16.22.0/30` | — | su LAN5 |
-| VLAN 23 | `172.16.23.0/30` | — | su LAN5 |
-| VLAN 31 | `172.16.31.0/30` | — | su LAN6 |
-| VLAN 32 | `172.16.32.0/30` | — | su LAN6 |
-| VLAN 33 | `172.16.33.0/30` | — | su LAN6 |
-| VLAN 17 | `172.16.17.0/30` | — | su LAN1 |
-| MGMT1 | `10.10.11.0/24` | `10.10.11.254` | gestione |
-| MGMT2 | `10.10.10.0/24` | — | gestione secondaria |
-| TUN 1-6 | `10.200.{1-6}.0/30` | — | tunnel single-path |
-| TUN cr/br/df | `10.200.{14-16}.0/24` | — | tunnel multi-class |
-| TUN mp1 | `10.200.17.0/24` | — | tunnel multipath |
+Per il progetto pilota TRINA, devono essere implementati esclusivamente i tunnel associati alle WAN attive (WAN5 e WAN6), ovvero:
+- **mpq5**: tunnel single-path su WAN5 (LTE/5G, backup)
+- **mpq6**: tunnel single-path su WAN6 (Starlink, primario)
+- **mp1**: tunnel multipath/bonding su WAN5+WAN6 con policy **failover** (WAN6 primaria, WAN5 backup)
+
+Configurazione Progetto Pilota:
+
+| Ruolo         | Subnet                | Gateway       | Note                |   
+|---------------|-----------------------|---------------|---------------------|
+| WAN1-6        | DHCP                  | DHCP-assegnato| IP dinamici         |
+| LAN1          | `172.16.1.0/30`       | —             | point-to-point      |
+| LAN2          | `172.16.2.0/30`       | —             | point-to-point      |
+| LAN3          | `172.16.3.0/30`       | —             | point-to-point      |
+| LAN4          | `172.16.4.0/30`       | —             | point-to-point      |
+| LAN5          | `172.16.5.0/30`       | —             | point-to-point      |
+| LAN6          | `172.16.6.0/30`       | —             | point-to-point      |
+| MGMT1         | `10.10.11.0/24`       | `10.10.11.254`| gestione            |
+| MGMT2         | `10.10.10.0/24`       | —             | gestione secondaria |
+| TUN 1-6       | `10.200.{1-6}.0/30`   | —             | tunnel single-path  |
+
+Configurazione mancante Template:
+
+| Ruolo         | Subnet                | Gateway       | Note                |   
+|---------------|-----------------------|---------------|---------------------|
+| VLAN 11       | `172.16.11.0/30`      | —             | su LAN4             |
+| VLAN 12       | `172.16.12.0/30`      | —             | su LAN4             |
+| VLAN 13       | `172.16.13.0/30`      | —             | su LAN4             |
+| VLAN 21       | `172.16.21.0/30`      | —             | su LAN5             |
+| VLAN 22       | `172.16.22.0/30`      | —             | su LAN5             |
+| VLAN 23       | `172.16.23.0/30`      | —             | su LAN5             |
+| VLAN 31       | `172.16.31.0/30`      | —             | su LAN6             |
+| VLAN 32       | `172.16.32.0/30`      | —             | su LAN6             |
+| VLAN 33       | `172.16.33.0/30`      | —             | su LAN6             |
+| VLAN 17       | `172.16.17.0/30`      | —             | su LAN1             |
+| TUN cr/br/df  | `10.200.{14-16}.0/24` | —             | tunnel multi-class  |
+| TUN mp1       | `10.200.17.0/24`      | —             | tunnel multipath    |
 
 ### 6.2 Piano TUN (dettaglio)
 
-| Tunnel | TUN name | Client IP | Server IP | Porta server |
-|--------|----------|-----------|-----------|-------------|
-| 1 | `mpq1` | `10.200.1.1` | `10.200.1.2` | `45001` |
-| 2 | `mpq2` | `10.200.2.1` | `10.200.2.2` | `45002` |
-| 3 | `mpq3` | `10.200.3.1` | `10.200.3.2` | `45003` |
-| 4 | `mpq4` | `10.200.4.1` | `10.200.4.2` | `45004` |
-| 5 | `mpq5` | `10.200.5.1` | `10.200.5.2` | `45005` |
-| 6 | `mpq6` | `10.200.6.1` | `10.200.6.2` | `45006` |
-| cr4 | `tun-cr4` | `10.200.14.1` | — | `45014` |
-| br4 | `tun-br4` | `10.200.14.5` | — | `45014` |
-| df4 | `tun-df4` | `10.200.14.9` | — | `45014` |
-| cr5 | `tun-cr5` | `10.200.15.1` | — | `45015` |
-| br5 | `tun-br5` | `10.200.15.5` | — | `45015` |
-| df5 | `tun-df5` | `10.200.15.9` | — | `45015` |
-| cr6 | `tun-cr6` | `10.200.16.1` | — | `45016` |
-| br6 | `tun-br6` | `10.200.16.5` | — | `45016` |
-| df6 | `tun-df6` | `10.200.16.9` | — | `45016` |
-| mp1 | `mp1` | `10.200.17.1` | `10.200.17.254` | `46017` |
+Configurazione Progetto Pilota:
 
-> **Nota**: i tunnel cr/br/df (traffic-class) per lo stesso link condividono la
-> stessa porta server e lo stesso TUN server-side, con routing interno basato
-> su IP sorgente. Questo approccio è opzionale per il fornitore nella prima fase.
+| Tunnel | TUN name  | Client IP     | Server IP        | Porta server  |
+|--------|-----------|---------------|------------------|---------------|
+| 1      | `mpq1`    | `10.200.1.1`  | `10.200.1.2`     | `45001`       | 
+| 2      | `mpq2`    | `10.200.2.1`  | `10.200.2.2`     | `45002`       |
+| 3      | `mpq3`    | `10.200.3.1`  | `10.200.3.2`     | `45003`       |
+| 4      | `mpq4`    | `10.200.4.1`  | `10.200.4.2`     | `45004`       |
+| 5      | `mpq5`    | `10.200.5.1`  | `10.200.5.2`     | `45005`       |
+| 6      | `mpq6`    | `10.200.6.1`  | `10.200.6.2`     | `45006`       |
+
+Configurazione mancante Template:
+
+| Tunnel | TUN name  | Client IP     | Server IP        | Porta server  |
+|--------|-----------|---------------|------------------|---------------|
+| cr4    | `tun-cr4` | `10.200.14.1` | —                | `45014`       |
+| br4    | `tun-br4` | `10.200.14.5` | —                | `45014`       |
+| df4    | `tun-df4` | `10.200.14.9` | —                | `45014`       |
+| cr5    | `tun-cr5` | `10.200.15.1` | —                | `45015`       |
+| br5    | `tun-br5` | `10.200.15.5` | —                | `45015`       |
+| df5    | `tun-df5` | `10.200.15.9` | —                | `45015`       |
+| cr6    | `tun-cr6` | `10.200.16.1` | —                | `45016`       |
+| br6    | `tun-br6` | `10.200.16.5` | —                | `45016`       |
+| df6    | `tun-df6` | `10.200.16.9` | —                | `45016`       |
+| mp1    | `mp1`     | `10.200.17.1` | `10.200.17.254`  | `46017`       |
+
+> **Nota**: la configurazione dei tunnel cr/br/df (traffic-class) per lo stesso link
+> è a carico del fornitore 
 
 ---
 
@@ -441,40 +496,42 @@ Il traffico tra LAN, TUN e WAN deve poter transitare liberamente.
 
 ## 9. Tunnel — Nomenclatura e Addressing
 
+La nomenclatura e l'indirizzamento descritti in questo paragrafo rappresentano le best practice dell'architettura target. Per il progetto pilota TRINA, il fornitore è tenuto a implementare esclusivamente i tunnel `mpq5`, `mpq6` e `mp1`; per il naming e l'indirizzamento degli stessi è fortemente consigliato seguire le indicazioni riportate di seguito, al fine di garantire piena compatibilità con i sistemi di monitoraggio e gestione già predisposti (Prometheus, Grafana, LuCI).
+
 ### 9.1 Nomenclatura tunnel
 
 Il sistema di naming è **fisso** e deve essere rispettato esattamente.
 
 #### Single-path (1 tunnel per WAN)
 
-| Istanza | Nome TUN | WAN | Porta VPS | TUN CIDR |
-|---------|----------|-----|-----------|----------|
-| `1` | `mpq1` | enp7s3 | 45001 | `10.200.1.1/30` |
-| `2` | `mpq2` | enp7s4 | 45002 | `10.200.2.1/30` |
-| `3` | `mpq3` | enp7s5 | 45003 | `10.200.3.1/30` |
-| `4` | `mpq4` | enp7s6 | 45004 | `10.200.4.1/30` |
-| `5` | `mpq5` | enp7s7 | 45005 | `10.200.5.1/30` |
-| `6` | `mpq6` | enp7s8 | 45006 | `10.200.6.1/30` |
+| Istanza | Nome TUN | WAN    | Porta VPS | TUN CIDR        |
+|---------|----------|--------|-----------|-----------------|
+| `1`     | `mpq1`   | enp7s3 | 45001     | `10.200.1.1/30` |
+| `2`     | `mpq2`   | enp7s4 | 45002     | `10.200.2.1/30` |
+| `3`     | `mpq3`   | enp7s5 | 45003     | `10.200.3.1/30` |
+| `4`     | `mpq4`   | enp7s6 | 45004     | `10.200.4.1/30` |
+| `5`     | `mpq5`   | enp7s7 | 45005     | `10.200.5.1/30` |
+| `6`     | `mpq6`   | enp7s8 | 45006     | `10.200.6.1/30` |
 
 #### Multi-tunnel per link (3 classi traffico per WAN)
 
-| Istanza | Nome TUN | WAN | Porta VPS | TUN CIDR | Classe |
-|---------|----------|-----|-----------|----------|--------|
-| `cr4` | `tun-cr4` | enp7s6 | 45014 | `10.200.14.1/30` | critical |
-| `br4` | `tun-br4` | enp7s6 | 45014 | `10.200.14.5/30` | browsing |
-| `df4` | `tun-df4` | enp7s6 | 45014 | `10.200.14.9/30` | default |
-| `cr5` | `tun-cr5` | enp7s7 | 45015 | `10.200.15.1/30` | critical |
-| `br5` | `tun-br5` | enp7s7 | 45015 | `10.200.15.5/30` | browsing |
-| `df5` | `tun-df5` | enp7s7 | 45015 | `10.200.15.9/30` | default |
-| `cr6` | `tun-cr6` | enp7s8 | 45016 | `10.200.16.1/30` | critical |
-| `br6` | `tun-br6` | enp7s8 | 45016 | `10.200.16.5/30` | browsing |
-| `df6` | `tun-df6` | enp7s8 | 45016 | `10.200.16.9/30` | default |
+| Istanza   | Nome TUN  | WAN    | Porta VPS | TUN CIDR         | Classe   |
+|-----------|-----------|--------|-----------|------------------|----------|
+| `cr4`     | `tun-cr4` | enp7s6 | 45014     | `10.200.14.1/30` | critical |
+| `br4`     | `tun-br4` | enp7s6 | 45014     | `10.200.14.5/30` | browsing |
+| `df4`     | `tun-df4` | enp7s6 | 45014     | `10.200.14.9/30` | default  |
+| `cr5`     | `tun-cr5` | enp7s7 | 45015     | `10.200.15.1/30` | critical |
+| `br5`     | `tun-br5` | enp7s7 | 45015     | `10.200.15.5/30` | browsing |
+| `df5`     | `tun-df5` | enp7s7 | 45015     | `10.200.15.9/30` | default  |
+| `cr6`     | `tun-cr6` | enp7s8 | 45016     | `10.200.16.1/30` | critical |
+| `br6`     | `tun-br6` | enp7s8 | 45016     | `10.200.16.5/30` | browsing |
+| `df6`     | `tun-df6` | enp7s8 | 45016     | `10.200.16.9/30` | default  |
 
 #### Multipath bonding
 
-| Istanza | Nome TUN | WAN | Porta VPS | TUN CIDR |
-|---------|----------|-----|-----------|----------|
-| `mp1` | `mp1` | enp7s6+7+8 | 46017 | `10.200.17.1/24` |
+| Istanza | Nome TUN | WAN        | Porta VPS | TUN CIDR         |
+|---------|----------|------------|-----------|------------------|
+| `mp1`   | `mp1`    | enp7s6+7+8 | 46017     | `10.200.17.1/24` |
 
 ### 9.2 Interfacce TUN
 
@@ -484,14 +541,6 @@ Ogni tunnel richiede un dispositivo TUN Linux dedicato. Il dispositivo deve:
 - Avere MTU configurabile (default: 1280)
 - Supportare `multi_queue` per prestazioni multi-core
 - Avere l'IP assegnato come da piano (§ 6.2)
-
-Esempio di creazione:
-
-```bash
-ip tuntap add dev mpq5 mode tun multi_queue
-ip addr add 10.200.5.1/30 dev mpq5
-ip link set mpq5 mtu 1280 up
-```
 
 ---
 
@@ -539,47 +588,26 @@ tun_name: mp1
 tun_cidr: "10.200.17.1/24"
 tun_mtu: 1280
 multipath_enabled: true
-multipath_policy: balanced       # priority | failover | balanced
+multipath_policy: failover       # priority | failover | balanced
 log_level: info
 metrics_port: 9117
 
 multipath_paths:
-  - name: wan4
-    bind_ip: "if:enp7s6"
+  - name: wan6
+    bind_ip: "if:enp7s8"
     remote_addr: "<VPS_PUBLIC_IP>"
     remote_port: 46017
-    priority: 10
+    priority: 10                  # priorità più alta (valore numerico più basso)
     weight: 1
-    transport: stripe            # quic | stripe
-    # parametri stripe (se transport=stripe)
-    stripe_pipes: 4
-    stripe_fec_data_shards: 10
-    stripe_fec_parity_shards: 2
-    stripe_fec_mode: adaptive
+    transport: quic
 
   - name: wan5
     bind_ip: "if:enp7s7"
     remote_addr: "<VPS_PUBLIC_IP>"
     remote_port: 46017
-    priority: 10
+    priority: 100                 # backup — usato solo se wan6 non disponibile
     weight: 1
-    transport: stripe
-    stripe_pipes: 4
-    stripe_fec_data_shards: 10
-    stripe_fec_parity_shards: 2
-    stripe_fec_mode: adaptive
-
-  - name: wan6
-    bind_ip: "if:enp7s8"
-    remote_addr: "<VPS_PUBLIC_IP>"
-    remote_port: 46017
-    priority: 10
-    weight: 1
-    transport: stripe
-    stripe_pipes: 4
-    stripe_fec_data_shards: 10
-    stripe_fec_parity_shards: 2
-    stripe_fec_mode: adaptive
+    transport: quic
 ```
 
 ### 10.4 Variabili ambiente (.env)
@@ -604,23 +632,23 @@ VPS_PUBLIC_IP=<indirizzo_vps>
 
 ### 10.5 Parametri YAML — Lista completa
 
-| Parametro | Tipo | Obbligatorio | Descrizione |
-|-----------|------|-------------|-------------|
-| `role` | string | Sì | `client` o `server` |
-| `bind_ip` | string | Sì (client) | IP o `if:<ifname>` per SO_BINDTODEVICE |
-| `remote_addr` | string | Sì (client) | IP del server VPS |
-| `remote_port` | int | Sì | Porta UDP server (es. 45005) |
-| `listen_addr` | string | Sì (server) | Indirizzo di ascolto (es. `0.0.0.0`) |
-| `listen_port` | int | Sì (server) | Porta di ascolto |
-| `tun_name` | string | Sì | Nome interfaccia TUN |
-| `tun_cidr` | string | Sì | CIDR dell'interfaccia TUN |
-| `tun_mtu` | int | No | MTU della TUN (default: 1280) |
-| `log_level` | string | No | `debug`, `info`, `warn`, `error` |
-| `metrics_port` | int | No | Porta HTTP metriche (0 = disabilitato) |
-| `multipath_enabled` | bool | No | Abilita modalità multipath |
-| `multipath_policy` | string | No | `priority`, `failover`, `balanced` |
-| `multipath_paths` | array | Se multipath | Lista path (vedi § 10.3) |
-| `congestion` | string | No | `bbr`, `cubic` (default: bbr) |
+| Parametro             | Tipo   | Obbligatorio | Descrizione |
+|-----------------------|--------|--------------|-------------|
+| `role`                | string | Sì           | `client` o `server` |
+| `bind_ip`             | string | Sì (client)  | IP o `if:<ifname>` per SO_BINDTODEVICE |
+| `remote_addr`         | string | Sì (client)  | IP del server VPS |
+| `remote_port`         | int    | Sì           | Porta UDP server (es. 45005) |
+| `listen_addr`         | string | Sì (server)  | Indirizzo di ascolto (es. `0.0.0.0`) |
+| `listen_port`         | int    | Sì (server)  | Porta di ascolto |
+| `tun_name`            | string | Sì           | Nome interfaccia TUN |
+| `tun_cidr`            | string | Sì           | CIDR dell'interfaccia TUN |
+| `tun_mtu`             | int    | No           | MTU della TUN (default: 1280) |
+| `log_level`           | string | No           | `debug`, `info`, `warn`, `error` |
+| `metrics_port`        | int    | No           | Porta HTTP metriche (0 = disabilitato) |
+| `multipath_enabled`   | bool   | No           | Abilita modalità multipath |
+| `multipath_policy`    | string | No           | `priority`, `failover`, `balanced` |
+| `multipath_paths`     | array  | Se multipath | Lista path (vedi § 10.3) |
+| `congestion`          | string | No           | `bbr`, `cubic` (default: bbr) |
 
 ---
 
@@ -686,7 +714,7 @@ journalctl -u mpquic@5 -f
 #### `ensure_tun.sh`
 
 Script idempotente che crea la TUN se non esiste, assegna IP e MTU.
-Leggoe le variabili `TUN_NAME`, `TUN_CIDR`, `TUN_MTU` dall'ambiente.
+Legge le variabili `TUN_NAME`, `TUN_CIDR`, `TUN_MTU` dall'ambiente.
 
 ```bash
 #!/bin/bash
@@ -788,13 +816,13 @@ con il contratto definito di seguito.
 
 ### 13.1 Informazioni generali
 
-| Parametro | Valore |
-|-----------|--------|
-| **Bind address** | `10.10.11.100:8080` (MGMT primaria) |
-| **Protocollo** | HTTP (fase 1), HTTPS/TLS 1.2+ (fase 2) |
-| **Autenticazione** | Bearer token (`Authorization: Bearer <token>`) |
-| **Content-Type** | `application/json` |
-| **CORS** | Opzionale, configurabile |
+| Parametro         | Valore                                        |
+|-------------------|-----------------------------------------------|
+| **Bind address**  | `10.10.11.100:8080` (MGMT primaria)           |
+| **Protocollo**    | HTTP (fase 1), HTTPS/TLS 1.2+ (fase 2)        |
+| **Autenticazione**| Bearer token (`Authorization: Bearer <token>`)|
+| **Content-Type**  | `application/json`                            |
+| **CORS**          | Opzionale, configurabile                      |
 
 ### 13.2 Sicurezza
 
@@ -855,7 +883,7 @@ Lista tutte le istanze tunnel con stato corrente.
       "uptime_sec": 7200,
       "tun_name": "mp1",
       "tun_cidr": "10.200.17.1/24",
-      "transport": "stripe",
+      "transport": "quic",
       "config_file": "/etc/mpquic/instances/mp1.yaml"
     }
   ]
@@ -864,15 +892,15 @@ Lista tutte le istanze tunnel con stato corrente.
 
 Campi obbligatori per ogni tunnel:
 
-| Campo | Tipo | Descrizione |
-|-------|------|-------------|
-| `name` | string | Nome istanza (es. `5`, `cr5`, `mp1`) |
-| `status` | string | `running`, `stopped`, `failed` |
-| `uptime_sec` | int | Secondi dall'avvio (0 se non running) |
-| `tun_name` | string | Nome interfaccia TUN |
-| `tun_cidr` | string | CIDR assegnato alla TUN |
-| `transport` | string | `quic` o `stripe` |
-| `config_file` | string | Path assoluto al file YAML |
+| Campo         | Tipo   | Descrizione                          |
+|---------------|--------|--------------------------------------|
+| `name`        | string | Nome istanza (es. `5`, `cr5`, `mp1`) |
+| `status`      | string | `running`, `stopped`, `failed`       |
+| `uptime_sec`  | int    | Secondi dall'avvio (0 se non running)|
+| `tun_name`    | string | Nome interfaccia TUN                 |
+| `tun_cidr`    | string | CIDR assegnato alla TUN              |
+| `transport`   | string | `quic`                               |
+| `config_file` | string | Path assoluto al file YAML           |
 
 #### `GET /api/v1/tunnels/{name}`
 
@@ -999,10 +1027,10 @@ Risposta: passthrough del JSON restituito dall'endpoint metriche dell'istanza
 
 Ultimi log dell'istanza da journald.
 
-| Query param | Default | Descrizione |
-|-------------|---------|-------------|
-| `lines` | 100 | Numero righe (max 10000) |
-| `level` | (tutti) | Filtra: `error`, `warning` |
+| Query param | Default | Descrizione                |
+|-------------|---------|----------------------------|
+| `lines`     | 100     | Numero righe (max 10000)   |
+| `level`     | (tutti) | Filtra: `error`, `warning` |
 
 **Risposta** (200 OK):
 
@@ -1042,7 +1070,7 @@ Informazioni di sistema.
   "mgmt_version": "1.0.0",
   "mpquic_version": "v2.3.0",
   "git_commit": "abc1234 fix: ...",
-  "go_version": "go1.22.0",
+  "version": "1.22.0",
   "hostname": "tbox-mpquic",
   "os": "linux",
   "arch": "amd64",
@@ -1071,22 +1099,22 @@ configurata nel YAML.
 
 | Istanza | Porta |
 |---------|-------|
-| 1 | 9091 |
-| 2 | 9092 |
-| 3 | 9093 |
-| 4 | 9094 |
-| 5 | 9095 |
-| 6 | 9096 |
-| cr4 | 9114 |
-| br4 | 9114 |
-| df4 | 9114 |
-| cr5 | 9115 |
-| br5 | 9115 |
-| df5 | 9115 |
-| cr6 | 9116 |
-| br6 | 9116 |
-| df6 | 9116 |
-| mp1 | 9117 |
+| 1       | 9091  |
+| 2       | 9092  |
+| 3       | 9093  |
+| 4       | 9094  |
+| 5       | 9095  |
+| 6       | 9096  |
+| cr4     | 9114  |
+| br4     | 9114  |
+| df4     | 9114  |
+| cr5     | 9115  |
+| br5     | 9115  |
+| df5     | 9115  |
+| cr6     | 9116  |
+| br6     | 9116  |
+| df6     | 9116  |
+| mp1     | 9117  |
 
 > **Nota**: i tunnel multi-class che condividono lo stesso server process
 > possono condividere la stessa porta metriche.
@@ -1124,41 +1152,39 @@ configurata nel YAML.
   "uptime_sec": 7200,
   "tun_name": "mp1",
   "tun_cidr": "10.200.17.1/24",
-  "transport": "stripe",
+  "transport": "quic",
   "paths": [
     {
-      "name": "wan4",
+      "name": "wan6",
       "state": "up",
-      "tx_bytes": 1000000,
-      "rx_bytes": 2000000,
-      "tx_pkts": 500,
-      "rx_pkts": 1000,
+      "tx_bytes": 1500000,
+      "rx_bytes": 2500000,
+      "tx_pkts": 800,
+      "rx_pkts": 1200,
       "rtt_us": 25000,
       "loss_pct": 0.1,
       "consecutive_fails": 0
     },
     {
       "name": "wan5",
-      "state": "up",
-      "tx_bytes": 1500000,
-      "rx_bytes": 2500000
+      "state": "standby",
+      "tx_bytes": 0,
+      "rx_bytes": 0,
+      "tx_pkts": 0,
+      "rx_pkts": 0,
+      "rtt_us": 45000,
+      "loss_pct": 0.0,
+      "consecutive_fails": 0
     }
   ],
   "global": {
-    "total_tx_bytes": 5000000,
-    "total_rx_bytes": 8000000,
-    "total_tx_pkts": 2500,
-    "total_rx_pkts": 4000,
-    "active_paths": 3,
-    "total_paths": 3,
+    "total_tx_bytes": 1500000,
+    "total_rx_bytes": 2500000,
+    "total_tx_pkts": 800,
+    "total_rx_pkts": 1200,
+    "active_paths": 1,
+    "total_paths": 2,
     "uptime_seconds": 7200
-  },
-  "fec": {
-    "groups_encoded": 10000,
-    "groups_decoded_ok": 9900,
-    "groups_decoded_fail": 2,
-    "effective_parity": 2,
-    "mode": "adaptive"
   }
 }
 ```
@@ -1194,9 +1220,8 @@ mpquic_tunnel_up{instance="5",tun="mpq5"} 1
 
 # HELP mpquic_path_state Multipath path state (1=up, 0=down)
 # TYPE mpquic_path_state gauge
-mpquic_path_state{instance="mp1",path="wan4"} 1
-mpquic_path_state{instance="mp1",path="wan5"} 1
 mpquic_path_state{instance="mp1",path="wan6"} 1
+mpquic_path_state{instance="mp1",path="wan5"} 0
 ```
 
 ---
@@ -1205,18 +1230,20 @@ mpquic_path_state{instance="mp1",path="wan6"} 1
 
 ### 15.1 Test funzionali obbligatori
 
-| # | Test | Criterio di successo |
-|---|------|----------------------|
-| T1 | **Connettività single-path** | Ping dal VPS verso `10.200.N.1` per N=1..6 con RTT < 200ms |
-| T2 | **Throughput single-path** | iperf3 TCP attraverso tunnel: >= 40 Mbps per link Starlink |
-| T3 | **Isolamento traffico** | Loss artificiale (tc netem 10%) su un tunnel non impatta i tunnel adiacenti |
-| T4 | **Failover multipath** | Disconnect WAN→WAN5: traffico migra su WAN4/6 in < 15s, packet loss < 5% |
-| T5 | **Bonding throughput** | iperf3 attraverso mp1 con 3 WAN: >= 150 Mbps aggregati |
-| T6 | **Watchdog recovery** | Kill processo mpquic@5: watchdog lo riavvia entro 120s |
-| T7 | **API health** | `GET /api/v1/health` ritorna 200 con `ok: true` |
-| T8 | **API tunnel lifecycle** | stop/start/restart via API cambiano stato systemd |
-| T9 | **Metriche non-zero** | Dopo traffico iperf3, TX/RX bytes > 0 per ogni tunnel attivo |
-| T10 | **NAT masquerade** | Traffico dalla LAN OpenWrt esce verso Internet con IP WAN corretto |
+I test che coinvolgono tunnel che non siano quelli necessari alla fase pilota sono opzionali
+
+| #  | Test                         | Criterio di successo                                                        |
+|----|------------------------------|-----------------------------------------------------------------------------|
+| T1 | **Connettività single-path** | Ping dal VPS verso `10.200.N.1` per N=1..6 con RTT < 200ms                  |
+| T2 | **Throughput single-path**   | iperf3 TCP attraverso tunnel: >= 80 Mbps per link Starlink                  |
+| T3 | **Isolamento traffico**      | Loss artificiale (tc netem 10%) su un tunnel non impatta i tunnel adiacenti |
+| T4 | **Failover multipath**       | Disconnect WAN6 (Starlink): traffico migra su WAN5 (LTE) in < 15s, packet loss < 5% |
+| T5 | **Failover recovery**        | Ripristino WAN6: traffico torna su WAN6 (primaria) entro 30s, automaticamente |
+| T6 | **Watchdog recovery**        | Kill processo mpquic@5: watchdog lo riavvia entro 120s                      |
+| T7 | **API health**               | `GET /api/v1/health` ritorna 200 con `ok: true`                             |
+| T8 | **API tunnel lifecycle**     | stop/start/restart via API cambiano stato systemd                           |
+| T9 | **Metriche non-zero**        | Dopo traffico iperf3, TX/RX bytes > 0 per ogni tunnel attivo                |
+| T10 | **NAT masquerade**          | Traffico dalla LAN OpenWrt esce verso Internet con IP WAN                   |
 
 ### 15.2 Procedura iperf3
 
@@ -1232,6 +1259,8 @@ iperf3 -c 10.200.17.254 -p 5201 -t 30 -P 8
 ```
 
 ### 15.3 Test Grafana
+
+Questo paragrafo è opzionale
 
 Il fornitore deve dimostrare che le metriche sono visibili su una dashboard
 Grafana con:
@@ -1280,23 +1309,25 @@ export default function () {
 Il fornitore deve garantire supporto di Livello 3 (L3) per i seguenti
 componenti:
 
-| Componente | Descrizione |
-|------------|-------------|
-| Software tunnel | Bug fix, patch di sicurezza, aggiornamenti funzionali |
-| Management API | Manutenzione endpoint, fix compatibilità |
-| Watchdog | Correzioni logica health-check |
-| Configurazione rete | Assistenza su routing, NAT, VLAN |
+| Componente            | Descrizione                                           |
+|-----------------------|-------------------------------------------------------|
+| Software tunnel       | Bug fix, patch di sicurezza, aggiornamenti funzionali |
+| Management API        | Manutenzione endpoint, fix compatibilità              |
+| Watchdog              | Correzioni logica health-check                        |
+| Configurazione rete   | Assistenza su routing, NAT, VLAN                      |
 
 ### 16.2 SLA
 
-| Metrica | Valore target |
-|---------|--------------|
-| Tempo di risposta (P1 — tunnel down) | < 4 ore lavorative |
-| Tempo di risposta (P2 — degradazione) | < 8 ore lavorative |
-| Tempo di risposta (P3 — richiesta info) | < 2 giorni lavorativi |
-| Uptime tunnel (target mensile) | >= 99.5% |
-| Manutenzione preventiva | Inclusa |
-| Aggiornamento software | Trimestrale (minimo) |
+Gli SLA faranno parte di un contratto a parte e perciò non sono applicabili.
+
+| Metrica                                   | Valore target         |
+|-------------------------------------------|-----------------------|
+| Tempo di risposta (P1 — tunnel down)      | < 4 ore lavorative    |
+| Tempo di risposta (P2 — degradazione)     | < 8 ore lavorative    |
+| Tempo di risposta (P3 — richiesta info)   | < 2 giorni lavorativi |
+| Uptime tunnel (target mensile)            | >= 99.5%              |            
+| Manutenzione preventiva                   | Inclusa               |
+| Aggiornamento software                    | Trimestrale (minimo)  |
 
 ### 16.3 Canali di comunicazione
 
@@ -1310,15 +1341,15 @@ componenti:
 
 ### 17.1 Deliverable attesi
 
-| # | Deliverable | Formato |
-|---|-------------|---------|
-| D1 | Immagine VM Debian 12 pre-configurata | QCOW2 / OVA |
-| D2 | Binario tunnel (client + server) | Eseguibile Linux amd64 |
-| D3 | Configurazione systemd | File .service + .timer |
-| D4 | Script helper (ensure_tun, watchdog, render) | Bash scripts |
-| D5 | Management API daemon | Eseguibile Linux amd64 |
-| D6 | Documentazione tecnica | Markdown |
-| D7 | Risultati test (§ 15) | Report con evidenze |
+| #  | Deliverable                                  | Formato                   |
+|----|----------------------------------------------|---------------------------|
+| D1 | Immagine VM Debian 12 pre-configurata        | QCOW2 / OVA               |
+| D2 | Binario tunnel (client + server)             | Eseguibile Linux amd64    |
+| D3 | Configurazione systemd                       | File .service + .timer    |
+| D4 | Script helper (ensure_tun, watchdog, render) | Bash scripts              |
+| D5 | Management API daemon                        | Eseguibile Linux amd64    |
+| D6 | Documentazione tecnica                       | Markdown                  |
+| D7 | Risultati test (§ 15)                        | Report con evidenze       |
 
 ### 17.2 Acceptance Criteria
 
@@ -1327,8 +1358,7 @@ La VM fornita sarà accettata quando:
 1. **Tutti i 10 test funzionali (T1-T10)** sono superati
 2. **L'API risponde correttamente** a tutti gli endpoint definiti in § 13
 3. **Le metriche** sono coerenti con il formato definito in § 14
-4. **La nomenclatura** di interfacce, tunnel, file config rispetta esattamente
-   quanto definito in §§ 4, 9, 10
+4. **La nomenclatura** di interfacce, tunnel, file config rispetta esattamente quanto definito in §§ 4, 9, 10
 5. **Il watchdog** rileva e recupera automaticamente un tunnel in errore
 6. **La VM si avvia al boot** con tutti i tunnel configurati attivi
 7. **Il piano di indirizzamento** (§ 6) è rispettato senza deviazioni
@@ -1336,12 +1366,12 @@ La VM fornita sarà accettata quando:
 
 ### 17.3 Timeline
 
-| Fase | Descrizione | Durata stimata |
-|------|-------------|----------------|
-| Fase 1 | Single-path (6 tunnel) + API + metriche | 4 settimane |
-| Fase 2 | Multi-tunnel traffic-class (9 tunnel) | 3 settimane |
-| Fase 3 | Multipath bonding + FEC | 4 settimane |
-| Fase 4 | Integration test + acceptance | 2 settimane |
+| Fase | Descrizione                                | Durata stimata |
+|------|--------------------------------------------|----------------|
+| Fase 1 | Single-path (6 tunnel) + API + metriche  | 4 settimane    |
+| Fase 2 | Multi-tunnel traffic-class (9 tunnel)    | 1 settimane    |
+| Fase 3 | Multipath bonding                        | 1 settimane    |
+| Fase 4 | Integration test + acceptance            | 2 settimane    |
 
 ---
 
