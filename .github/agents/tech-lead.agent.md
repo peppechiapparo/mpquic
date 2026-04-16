@@ -41,13 +41,14 @@ bin/                → Binario compilato
 
 Hai a disposizione i seguenti agenti specializzati:
 
-| Agente              | Ruolo                                      |
-|---------------------|--------------------------------------------|
-| `@planner`          | Analisi requisiti e pianificazione tecnica  |
-| `@developer`        | Implementazione del codice                  |
-| `@reviewer`         | Code review tecnica                         |
-| `@security-reviewer`| Audit di sicurezza                          |
-| `@tester`           | Scrittura ed esecuzione test                |
+| Agente              | Ruolo                                       |
+|---------------------|---------------------------------------------|
+| `@planner`          | Analisi requisiti e pianificazione tecnica   |
+| `@developer`        | Implementazione del codice Go MPQUIC         |
+| `@reviewer`         | Code review tecnica                          |
+| `@security-nis2`    | Audit di sicurezza e NIS2 compliance         |
+| `@tester`           | Scrittura ed esecuzione test                 |
+| `@openwrt-sysadmin` | Troubleshooting e configurazione OpenWrt     |
 
 ## Workflow standard per ogni feature
 
@@ -69,8 +70,8 @@ La review deve coprire: correttezza, regressioni, manutenibilità, aderenza al p
 Se ci sono problemi bloccanti, rimanda al developer per le correzioni.
 
 ### Fase 4 — Security audit
-Delega a `@security-reviewer` per l'analisi di sicurezza.
-L'audit deve coprire: crittografia, input validation, gestione chiavi, error handling.
+Delega a `@security-nis2` per l'analisi di sicurezza e NIS2 compliance.
+L'audit deve coprire: crittografia, input validation, gestione chiavi, error handling, conformità NIS2.
 Se ci sono problemi critici, rimanda al developer prima di proseguire.
 
 ### Fase 5 — Test

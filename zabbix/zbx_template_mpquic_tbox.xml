@@ -1,0 +1,1337 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<zabbix_export>
+    <version>6.0</version>
+    <date>2026-04-13T00:00:00Z</date>
+    <groups>
+        <group>
+            <uuid>a571c0d144b14fd4a87a9d9b2a9fcd89</uuid>
+            <name>Templates/TBOX MPQUIC</name>
+        </group>
+    </groups>
+    <templates>
+        <template>
+            <uuid>b682d1e255c25ge5b98baea3b0afdea0</uuid>
+            <template>TBOX MPQUIC Satellite</template>
+            <name>TBOX MPQUIC — VSAT / Starlink Monitoring</name>
+            <description>Template per monitoraggio TBOX MPQUIC con doppio uplink satellitare (VSAT + Starlink). Acquisisce metriche Prometheus da endpoint /metrics esposto sul tunnel IP.</description>
+            <groups>
+                <group>
+                    <name>Templates/TBOX MPQUIC</name>
+                </group>
+            </groups>
+            <macros>
+                <macro>
+                    <macro>{$MPQUIC.ENDPOINT}</macro>
+                    <value>http://{HOST.CONN}:9090/metrics</value>
+                    <description>URL endpoint Prometheus metriche TBOX</description>
+                </macro>
+                <macro>
+                    <macro>{$MPQUIC.SCRAPE.INTERVAL}</macro>
+                    <value>30s</value>
+                    <description>Intervallo di scrape metriche</description>
+                </macro>
+                <macro>
+                    <macro>{$MPQUIC.LOSS.WARN}</macro>
+                    <value>2</value>
+                    <description>Soglia loss warning (%)</description>
+                </macro>
+                <macro>
+                    <macro>{$MPQUIC.LOSS.HIGH}</macro>
+                    <value>5</value>
+                    <description>Soglia loss high (%)</description>
+                </macro>
+                <macro>
+                    <macro>{$MPQUIC.NODATA.TIMEOUT}</macro>
+                    <value>120s</value>
+                    <description>Timeout no-data per allarme processo down</description>
+                </macro>
+                <macro>
+                    <macro>{$MPQUIC.WAN.VSAT}</macro>
+                    <value>wan5</value>
+                    <description>Nome path VSAT nella configurazione MPQUIC</description>
+                </macro>
+                <macro>
+                    <macro>{$MPQUIC.WAN.STARLINK}</macro>
+                    <value>wan6</value>
+                    <description>Nome path Starlink nella configurazione MPQUIC</description>
+                </macro>
+            </macros>
+
+            <!-- ============================================================ -->
+            <!--  ITEM MASTER: Scrape Prometheus /metrics                     -->
+            <!-- ============================================================ -->
+            <items>
+                <item>
+                    <uuid>c793e2f366d36hf6ca9cbfb4c1bgefc1</uuid>
+                    <name>MPQUIC: Prometheus raw metrics</name>
+                    <type>HTTP_AGENT</type>
+                    <key>mpquic.prometheus.raw</key>
+                    <delay>{$MPQUIC.SCRAPE.INTERVAL}</delay>
+                    <history>0</history>
+                    <trends>0</trends>
+                    <value_type>TEXT</value_type>
+                    <url>{$MPQUIC.ENDPOINT}</url>
+                    <retrieve_mode>BODY</retrieve_mode>
+                    <request_method>GET</request_method>
+                    <timeout>10s</timeout>
+                    <description>Raw Prometheus text exposition scrape dall'endpoint MPQUIC</description>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <!-- ======================================================== -->
+                <!--  METRICHE GLOBALI                                        -->
+                <!-- ======================================================== -->
+                <item>
+                    <uuid>d804f3a477e47ig7db0dcgc5d2chgfd2</uuid>
+                    <name>MPQUIC: Uptime</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.uptime</key>
+                    <delay>0</delay>
+                    <value_type>FLOAT</value_type>
+                    <units>s</units>
+                    <description>Uptime del processo MPQUIC in secondi</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_uptime_seconds</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>global</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>e915g4b588f58jh8ec1edhd6e3diige3</uuid>
+                    <name>MPQUIC: Total TX bytes</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.tx.bytes.total</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <units>B</units>
+                    <description>Byte totali trasmessi (tutte le sessioni/path)</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_tx_bytes_total</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>global</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>fa26h5c699g69ki9fd2feie7f4ejjhe4</uuid>
+                    <name>MPQUIC: Total RX bytes</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.rx.bytes.total</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <units>B</units>
+                    <description>Byte totali ricevuti (tutte le sessioni/path)</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_rx_bytes_total</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>global</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>0b37i6d700h70lj0ge3gfjf8g5fkkie5</uuid>
+                    <name>MPQUIC: Total TX packets</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.tx.pkts.total</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <units>pkt</units>
+                    <description>Pacchetti totali trasmessi</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_tx_packets_total</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>global</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>1c48j7e811i81mk1hf4hgkg9h6gllif6</uuid>
+                    <name>MPQUIC: Total RX packets</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.rx.pkts.total</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <units>pkt</units>
+                    <description>Pacchetti totali ricevuti</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_rx_packets_total</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>global</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <!-- ======================================================== -->
+                <!--  METRICHE PER-PATH: VSAT (wan5)                          -->
+                <!-- ======================================================== -->
+                <item>
+                    <uuid>2d59k8f922j92nl2ig5ihlh0i7hmmjg7</uuid>
+                    <name>MPQUIC VSAT: Link alive</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.path.wan5.alive</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <description>Stato link VSAT: 1 = attivo, 0 = inattivo</description>
+                    <valuemap>
+                        <name>MPQUIC Link State</name>
+                    </valuemap>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_path_alive{path="wan5"}</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>vsat</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>3e60l9g033k03om3jh6jimj1j8innkh8</uuid>
+                    <name>MPQUIC VSAT: Stripe TX bytes</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.path.wan5.stripe.tx.bytes</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <units>B</units>
+                    <description>Byte stripe trasmessi sul link VSAT</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_path_stripe_tx_bytes{path="wan5"}</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>vsat</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>4f71m0h144l14pn4ki7kjnk2k9joolj9</uuid>
+                    <name>MPQUIC VSAT: Stripe RX bytes</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.path.wan5.stripe.rx.bytes</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <units>B</units>
+                    <description>Byte stripe ricevuti sul link VSAT</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_path_stripe_rx_bytes{path="wan5"}</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>vsat</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>5g82n1i255m25qo5lj8lkok3l0kppmk0</uuid>
+                    <name>MPQUIC VSAT: TX packets</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.path.wan5.tx.pkts</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <units>pkt</units>
+                    <description>Pacchetti trasmessi sul path VSAT</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_path_tx_packets{path="wan5"}</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>vsat</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>6h93o2j366n36rp6mk9mlpl4m1lqqnl1</uuid>
+                    <name>MPQUIC VSAT: RX packets</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.path.wan5.rx.pkts</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <units>pkt</units>
+                    <description>Pacchetti ricevuti sul path VSAT</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_path_rx_packets{path="wan5"}</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>vsat</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>7i04p3k477o47sq7nl0nmqm5n2mrrom2</uuid>
+                    <name>MPQUIC VSAT: FEC recovered</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.path.wan5.fec.recovered</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <description>Gruppi FEC recuperati sullo stripe VSAT</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_path_stripe_fec_recovered{path="wan5"}</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>vsat</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <!-- ======================================================== -->
+                <!--  METRICHE PER-PATH: STARLINK (wan6)                      -->
+                <!-- ======================================================== -->
+                <item>
+                    <uuid>8j15q4l588p58tr8om1onrn6o3nsspn3</uuid>
+                    <name>MPQUIC Starlink: Link alive</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.path.wan6.alive</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <description>Stato link Starlink: 1 = attivo, 0 = inattivo</description>
+                    <valuemap>
+                        <name>MPQUIC Link State</name>
+                    </valuemap>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_path_alive{path="wan6"}</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>starlink</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>9k26r5m699q69us9pn2posq7p4ottqo4</uuid>
+                    <name>MPQUIC Starlink: Stripe TX bytes</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.path.wan6.stripe.tx.bytes</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <units>B</units>
+                    <description>Byte stripe trasmessi sul link Starlink</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_path_stripe_tx_bytes{path="wan6"}</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>starlink</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>0l37s6n700r70vt0qo3qptr8q5puuro5</uuid>
+                    <name>MPQUIC Starlink: Stripe RX bytes</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.path.wan6.stripe.rx.bytes</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <units>B</units>
+                    <description>Byte stripe ricevuti sul link Starlink</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_path_stripe_rx_bytes{path="wan6"}</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>starlink</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>1m48t7o811s81wu1rp4rqus9r6qvvsp6</uuid>
+                    <name>MPQUIC Starlink: TX packets</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.path.wan6.tx.pkts</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <units>pkt</units>
+                    <description>Pacchetti trasmessi sul path Starlink</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_path_tx_packets{path="wan6"}</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>starlink</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>2n59u8p922t92xv2sq5srvt0s7rwwtq7</uuid>
+                    <name>MPQUIC Starlink: RX packets</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.path.wan6.rx.pkts</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <units>pkt</units>
+                    <description>Pacchetti ricevuti sul path Starlink</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_path_rx_packets{path="wan6"}</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>starlink</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>3o60v9q033u03yw3tr6tswu1t8sxxur8</uuid>
+                    <name>MPQUIC Starlink: FEC recovered</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.path.wan6.fec.recovered</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <description>Gruppi FEC recuperati sullo stripe Starlink</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_path_stripe_fec_recovered{path="wan6"}</parameter>
+                                <parameter></parameter>
+                                <parameter></parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>starlink</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <!-- ======================================================== -->
+                <!--  METRICHE PER-SESSION (server-side, prima sessione)      -->
+                <!--  Per multi-session usare LLD discovery rule              -->
+                <!-- ======================================================== -->
+                <item>
+                    <uuid>4p71w0r144v14zx4us7utxv2u9tyyws9</uuid>
+                    <name>MPQUIC Session: Loss rate %</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.session.loss.pct</key>
+                    <delay>0</delay>
+                    <value_type>FLOAT</value_type>
+                    <units>%</units>
+                    <description>Tasso di perdita pacchetti riportato dal peer (0-100%)</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_session_loss_rate_pct</parameter>
+                                <parameter></parameter>
+                                <parameter>avg</parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>session</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>5q82x1s255w25ay5vt8vuyw3v0uzxxt0</uuid>
+                    <name>MPQUIC Session: Pipes active</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.session.pipes</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <description>Numero di pipe UDP attive nella sessione</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_session_pipes</parameter>
+                                <parameter></parameter>
+                                <parameter>sum</parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>session</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>6r93y2t366x36bz6wu9wvzx4w1vayyu1</uuid>
+                    <name>MPQUIC Session: FEC encoded</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.session.fec.encoded</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <description>Gruppi FEC codificati (TX) — totale sessioni</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_session_fec_encoded</parameter>
+                                <parameter></parameter>
+                                <parameter>sum</parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>session</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>7s04z3u477y47c08xv0xway5x2wbzzv2</uuid>
+                    <name>MPQUIC Session: FEC recovered</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.session.fec.recovered</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <description>Gruppi FEC recuperati (RX) — totale sessioni</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_session_fec_recovered</parameter>
+                                <parameter></parameter>
+                                <parameter>sum</parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>session</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>8t15a4v588z58d19yw1yxbz6y3xcaaw3</uuid>
+                    <name>MPQUIC Session: ARQ NACK sent</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.session.arq.nack</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <description>NACK ARQ inviati — indicatore di pacchetti mancanti</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_session_arq_nack_sent</parameter>
+                                <parameter></parameter>
+                                <parameter>sum</parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>session</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>9u26b5w699a69e20zx2zyca7z4ydbby4</uuid>
+                    <name>MPQUIC Session: ARQ retransmissions received</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.session.arq.retx</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <description>Ritrasmissioni ARQ ricevute</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_session_arq_retx_recv</parameter>
+                                <parameter></parameter>
+                                <parameter>sum</parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>session</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>0v37c6x700b70f31ay3azdb8a5zeecz5</uuid>
+                    <name>MPQUIC Session: Duplicates filtered</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.session.arq.dup</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <description>Pacchetti duplicati filtrati</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_session_arq_dup_filtered</parameter>
+                                <parameter></parameter>
+                                <parameter>sum</parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>session</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>1w48d7y811c81g42bz4baec9b6affd06</uuid>
+                    <name>MPQUIC Session: Decrypt failures</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.session.decrypt.fail</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <description>Fallimenti decifratura — potenziale indicatore di anomalia sicurezza</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_session_decrypt_fail</parameter>
+                                <parameter></parameter>
+                                <parameter>sum</parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>session</value>
+                        </tag>
+                        <tag>
+                            <tag>security</tag>
+                            <value>crypto</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>2x59e8z922d92h53ca5cbfd0c7bgge17</uuid>
+                    <name>MPQUIC Session: Adaptive FEC M</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.session.fec.adaptive_m</key>
+                    <delay>0</delay>
+                    <value_type>UNSIGNED</value_type>
+                    <description>Parità FEC corrente (M). 0 = FEC inattivo</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_session_adaptive_m</parameter>
+                                <parameter></parameter>
+                                <parameter>max</parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>session</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>3y60f900e03i64db6dcge1e8dhhi28</uuid>
+                    <name>MPQUIC Session: Uptime</name>
+                    <type>DEPENDENT</type>
+                    <key>mpquic.session.uptime</key>
+                    <delay>0</delay>
+                    <value_type>FLOAT</value_type>
+                    <units>s</units>
+                    <description>Durata della sessione in secondi</description>
+                    <master_item>
+                        <key>mpquic.prometheus.raw</key>
+                    </master_item>
+                    <preprocessing>
+                        <step>
+                            <type>PROMETHEUS_PATTERN</type>
+                            <parameters>
+                                <parameter>mpquic_session_uptime_seconds</parameter>
+                                <parameter></parameter>
+                                <parameter>min</parameter>
+                            </parameters>
+                        </step>
+                    </preprocessing>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>session</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <!-- ======================================================== -->
+                <!--  CALCULATED ITEMS: Bitrate derivati                      -->
+                <!-- ======================================================== -->
+                <item>
+                    <uuid>4z71g0a1f14j75ec7edhe2f9eiij39</uuid>
+                    <name>MPQUIC VSAT: TX bitrate</name>
+                    <type>CALCULATED</type>
+                    <key>mpquic.path.wan5.stripe.tx.rate</key>
+                    <delay>{$MPQUIC.SCRAPE.INTERVAL}</delay>
+                    <value_type>FLOAT</value_type>
+                    <units>bps</units>
+                    <params>change(//mpquic.path.wan5.stripe.tx.bytes) / {$MPQUIC.SCRAPE.INTERVAL} * 8</params>
+                    <description>Bitrate TX istantaneo VSAT (calcolato dalla variazione dei byte)</description>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>vsat</value>
+                        </tag>
+                        <tag>
+                            <tag>metric</tag>
+                            <value>throughput</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>50820b2g25k86fd8feiif3g0fjjk40</uuid>
+                    <name>MPQUIC VSAT: RX bitrate</name>
+                    <type>CALCULATED</type>
+                    <key>mpquic.path.wan5.stripe.rx.rate</key>
+                    <delay>{$MPQUIC.SCRAPE.INTERVAL}</delay>
+                    <value_type>FLOAT</value_type>
+                    <units>bps</units>
+                    <params>change(//mpquic.path.wan5.stripe.rx.bytes) / {$MPQUIC.SCRAPE.INTERVAL} * 8</params>
+                    <description>Bitrate RX istantaneo VSAT</description>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>vsat</value>
+                        </tag>
+                        <tag>
+                            <tag>metric</tag>
+                            <value>throughput</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>61931c3h36l97ge9gfjjg4h1gkkl51</uuid>
+                    <name>MPQUIC Starlink: TX bitrate</name>
+                    <type>CALCULATED</type>
+                    <key>mpquic.path.wan6.stripe.tx.rate</key>
+                    <delay>{$MPQUIC.SCRAPE.INTERVAL}</delay>
+                    <value_type>FLOAT</value_type>
+                    <units>bps</units>
+                    <params>change(//mpquic.path.wan6.stripe.tx.bytes) / {$MPQUIC.SCRAPE.INTERVAL} * 8</params>
+                    <description>Bitrate TX istantaneo Starlink</description>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>starlink</value>
+                        </tag>
+                        <tag>
+                            <tag>metric</tag>
+                            <value>throughput</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>72042d4i47m08hf0hgkkh5i2hllm62</uuid>
+                    <name>MPQUIC Starlink: RX bitrate</name>
+                    <type>CALCULATED</type>
+                    <key>mpquic.path.wan6.stripe.rx.rate</key>
+                    <delay>{$MPQUIC.SCRAPE.INTERVAL}</delay>
+                    <value_type>FLOAT</value_type>
+                    <units>bps</units>
+                    <params>change(//mpquic.path.wan6.stripe.rx.bytes) / {$MPQUIC.SCRAPE.INTERVAL} * 8</params>
+                    <description>Bitrate RX istantaneo Starlink</description>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>link</tag>
+                            <value>starlink</value>
+                        </tag>
+                        <tag>
+                            <tag>metric</tag>
+                            <value>throughput</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>83153e5j58n19ig1ihlli6j3immn73</uuid>
+                    <name>MPQUIC: Aggregate TX bitrate</name>
+                    <type>CALCULATED</type>
+                    <key>mpquic.agg.tx.rate</key>
+                    <delay>{$MPQUIC.SCRAPE.INTERVAL}</delay>
+                    <value_type>FLOAT</value_type>
+                    <units>bps</units>
+                    <params>change(//mpquic.tx.bytes.total) / {$MPQUIC.SCRAPE.INTERVAL} * 8</params>
+                    <description>Bitrate TX aggregato (tutti i link)</description>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>aggregate</value>
+                        </tag>
+                        <tag>
+                            <tag>metric</tag>
+                            <value>throughput</value>
+                        </tag>
+                    </tags>
+                </item>
+
+                <item>
+                    <uuid>94264f6k69o20jh2jimml7k4jnno84</uuid>
+                    <name>MPQUIC: Aggregate RX bitrate</name>
+                    <type>CALCULATED</type>
+                    <key>mpquic.agg.rx.rate</key>
+                    <delay>{$MPQUIC.SCRAPE.INTERVAL}</delay>
+                    <value_type>FLOAT</value_type>
+                    <units>bps</units>
+                    <params>change(//mpquic.rx.bytes.total) / {$MPQUIC.SCRAPE.INTERVAL} * 8</params>
+                    <description>Bitrate RX aggregato (tutti i link)</description>
+                    <tags>
+                        <tag>
+                            <tag>component</tag>
+                            <value>mpquic</value>
+                        </tag>
+                        <tag>
+                            <tag>scope</tag>
+                            <value>aggregate</value>
+                        </tag>
+                        <tag>
+                            <tag>metric</tag>
+                            <value>throughput</value>
+                        </tag>
+                    </tags>
+                </item>
+            </items>
+
+            <!-- ============================================================ -->
+            <!--  TRIGGERS                                                    -->
+            <!-- ============================================================ -->
+            <triggers>
+                <!-- Link availability -->
+                <trigger>
+                    <uuid>a5375g7l70p31ki3kjnnm8l5kooo95</uuid>
+                    <expression>last(/TBOX MPQUIC Satellite/mpquic.path.wan5.alive)=0</expression>
+                    <name>MPQUIC: VSAT link down</name>
+                    <priority>HIGH</priority>
+                    <description>Il link VSAT (wan5) non è raggiungibile</description>
+                    <tags>
+                        <tag>
+                            <tag>link</tag>
+                            <value>vsat</value>
+                        </tag>
+                    </tags>
+                </trigger>
+
+                <trigger>
+                    <uuid>b6486h8m81q42lj4lkoom9m6lppp06</uuid>
+                    <expression>last(/TBOX MPQUIC Satellite/mpquic.path.wan6.alive)=0</expression>
+                    <name>MPQUIC: Starlink link down</name>
+                    <priority>HIGH</priority>
+                    <description>Il link Starlink (wan6) non è raggiungibile</description>
+                    <tags>
+                        <tag>
+                            <tag>link</tag>
+                            <value>starlink</value>
+                        </tag>
+                    </tags>
+                </trigger>
+
+                <trigger>
+                    <uuid>c7597i9n92r53mk5mlppn0n7mqqq17</uuid>
+                    <expression>last(/TBOX MPQUIC Satellite/mpquic.path.wan5.alive)=0 and last(/TBOX MPQUIC Satellite/mpquic.path.wan6.alive)=0</expression>
+                    <name>MPQUIC: ALL WAN links down — NO CONNECTIVITY</name>
+                    <priority>DISASTER</priority>
+                    <description>Entrambi i link WAN (VSAT e Starlink) sono inattivi. La TBOX non ha connettività.</description>
+                    <tags>
+                        <tag>
+                            <tag>link</tag>
+                            <value>all</value>
+                        </tag>
+                    </tags>
+                </trigger>
+
+                <!-- Quality -->
+                <trigger>
+                    <uuid>d860aj0o03s64nl6nmqqo1o8nrrr28</uuid>
+                    <expression>last(/TBOX MPQUIC Satellite/mpquic.session.loss.pct)>{$MPQUIC.LOSS.WARN}</expression>
+                    <name>MPQUIC: Packet loss warning ({ITEM.LASTVALUE}%)</name>
+                    <priority>WARNING</priority>
+                    <description>Tasso di perdita pacchetti superiore alla soglia warning ({$MPQUIC.LOSS.WARN}%)</description>
+                    <dependencies>
+                        <dependency>
+                            <name>MPQUIC: Packet loss HIGH ({ITEM.LASTVALUE}%)</name>
+                            <expression>last(/TBOX MPQUIC Satellite/mpquic.session.loss.pct)>{$MPQUIC.LOSS.HIGH}</expression>
+                        </dependency>
+                    </dependencies>
+                </trigger>
+
+                <trigger>
+                    <uuid>e971bk1p14t75om7onrrp2p9osss39</uuid>
+                    <expression>last(/TBOX MPQUIC Satellite/mpquic.session.loss.pct)>{$MPQUIC.LOSS.HIGH}</expression>
+                    <name>MPQUIC: Packet loss HIGH ({ITEM.LASTVALUE}%)</name>
+                    <priority>HIGH</priority>
+                    <description>Tasso di perdita pacchetti critico ({$MPQUIC.LOSS.HIGH}%). Verificare stato link e condizioni meteo.</description>
+                </trigger>
+
+                <!-- Security -->
+                <trigger>
+                    <uuid>f082cl2q25u86pn8possp3q0pttt40</uuid>
+                    <expression>change(/TBOX MPQUIC Satellite/mpquic.session.decrypt.fail)>0</expression>
+                    <name>MPQUIC: Decrypt failure detected</name>
+                    <priority>HIGH</priority>
+                    <description>Rilevato fallimento di decifratura. Possibile anomalia di sicurezza o mismatch di chiavi.</description>
+                    <tags>
+                        <tag>
+                            <tag>security</tag>
+                            <value>crypto</value>
+                        </tag>
+                    </tags>
+                </trigger>
+
+                <!-- Process health -->
+                <trigger>
+                    <uuid>0193dm3r36v97qo9qpttt4r1quuu51</uuid>
+                    <expression>nodata(/TBOX MPQUIC Satellite/mpquic.uptime,{$MPQUIC.NODATA.TIMEOUT})=1</expression>
+                    <name>MPQUIC: Process unreachable (no data for {$MPQUIC.NODATA.TIMEOUT})</name>
+                    <priority>DISASTER</priority>
+                    <description>Nessun dato ricevuto dall'endpoint metriche per {$MPQUIC.NODATA.TIMEOUT}. Il processo MPQUIC potrebbe essere down o la rete tunnel non raggiungibile.</description>
+                </trigger>
+
+                <trigger>
+                    <uuid>1204en4s47w08rp0rquuu5s2rvvv62</uuid>
+                    <expression>change(/TBOX MPQUIC Satellite/mpquic.uptime)&lt;0</expression>
+                    <name>MPQUIC: Process restarted</name>
+                    <priority>INFO</priority>
+                    <description>L'uptime del processo MPQUIC è diminuito, indicando un riavvio.</description>
+                </trigger>
+
+                <!-- FEC -->
+                <trigger>
+                    <uuid>2315fo5t58x19sq1srvvv6t3swww73</uuid>
+                    <expression>last(/TBOX MPQUIC Satellite/mpquic.session.fec.adaptive_m)>5</expression>
+                    <name>MPQUIC: FEC high parity (M={ITEM.LASTVALUE})</name>
+                    <priority>WARNING</priority>
+                    <description>La parità FEC adattiva è elevata (M &gt; 5), indicando un canale degradato con perdita significativa.</description>
+                </trigger>
+
+                <!-- Throughput anomaly (link up but zero traffic) -->
+                <trigger>
+                    <uuid>3426gp6u69y20tr2tswww7u4txxu84</uuid>
+                    <expression>last(/TBOX MPQUIC Satellite/mpquic.path.wan5.stripe.tx.rate)=0 and last(/TBOX MPQUIC Satellite/mpquic.path.wan5.alive)=1</expression>
+                    <name>MPQUIC: VSAT link up but zero TX throughput</name>
+                    <priority>WARNING</priority>
+                    <description>Il link VSAT è attivo ma non transita traffico in trasmissione.</description>
+                    <tags>
+                        <tag>
+                            <tag>link</tag>
+                            <value>vsat</value>
+                        </tag>
+                    </tags>
+                </trigger>
+
+                <trigger>
+                    <uuid>4537hq7v70z31us3utxxw8v5uyyv95</uuid>
+                    <expression>last(/TBOX MPQUIC Satellite/mpquic.path.wan6.stripe.tx.rate)=0 and last(/TBOX MPQUIC Satellite/mpquic.path.wan6.alive)=1</expression>
+                    <name>MPQUIC: Starlink link up but zero TX throughput</name>
+                    <priority>WARNING</priority>
+                    <description>Il link Starlink è attivo ma non transita traffico in trasmissione.</description>
+                    <tags>
+                        <tag>
+                            <tag>link</tag>
+                            <value>starlink</value>
+                        </tag>
+                    </tags>
+                </trigger>
+            </triggers>
+
+            <!-- ============================================================ -->
+            <!--  VALUE MAPS                                                  -->
+            <!-- ============================================================ -->
+            <valuemaps>
+                <valuemap>
+                    <uuid>5648ir8w81041vt4vuyyy9w6vzzw06</uuid>
+                    <name>MPQUIC Link State</name>
+                    <mappings>
+                        <mapping>
+                            <value>0</value>
+                            <newvalue>Down</newvalue>
+                        </mapping>
+                        <mapping>
+                            <value>1</value>
+                            <newvalue>Up</newvalue>
+                        </mapping>
+                    </mappings>
+                </valuemap>
+            </valuemaps>
+        </template>
+    </templates>
+</zabbix_export>

@@ -102,9 +102,19 @@ func runClientOnce(ctx context.Context, cfg *Config, logger *Logger) error {
 
 	logger.Infof("connected local=%s remote=%s tun=%s", udpConn.LocalAddr(), remoteUDP.String(), cfg.TunName)
 
+	// Start IP change watcher: if the bind interface's IP changes (e.g. Starlink
+	// CGNAT reassignment), cancel the tunnel context to force a fast reconnect
+	// instead of waiting for the 60s QUIC idle timeout.
+	tunnelCtx, tunnelCancel := context.WithCancelCause(ctx)
+	defer tunnelCancel(nil)
+	go watchInterfaceIP(tunnelCtx, cfg.BindIP, bindIP, func(newIP string) {
+		logger.Infof("WARN bind IP changed on %s: %s → %s, triggering reconnect", cfg.BindIP, bindIP, newIP)
+		tunnelCancel(fmt.Errorf("bind IP changed: %s → %s", bindIP, newIP))
+	})
+
 	var dc datagramConn
 	if cfg.TransportMode == "reliable" {
-		sc, err := openStreamConn(ctx, conn)
+		sc, err := openStreamConn(tunnelCtx, conn)
 		if err != nil {
 			return fmt.Errorf("open stream: %w", err)
 		}
@@ -117,7 +127,17 @@ func runClientOnce(ctx context.Context, cfg *Config, logger *Logger) error {
 	cc := newCountingConn(dc)
 	registerMetricsSinglePath(cc)
 
-	return runTunnel(ctx, cfg, cc, logger)
+	err = runTunnel(tunnelCtx, cfg, cc, logger)
+	// Distinguish IP-watcher cancellation from real shutdown: if the parent
+	// context is still alive, the cancel came from the IP watcher — wrap the
+	// cause so runClientLoop sees a non-Canceled error and reconnects.
+	if err != nil && errors.Is(err, context.Canceled) && ctx.Err() == nil {
+		cause := context.Cause(tunnelCtx)
+		if cause != nil {
+			return fmt.Errorf("ip watcher: %w", cause)
+		}
+	}
+	return err
 }
 
 func runClientOnceMultipath(ctx context.Context, cfg *Config, logger *Logger) error {
@@ -280,6 +300,31 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 		if !mp.paths[idx].alive && mp.paths[idx].reconnecting {
 			go mp.reconnectLoop(ctx, idx)
 		}
+	}
+
+	// Start IP watchers for QUIC paths with interface-based bindings.
+	// If a Starlink modem changes IP (CGNAT reassignment), detect it
+	// and trigger a fast reconnect instead of waiting for idle timeout.
+	for idx := range mp.paths {
+		p := mp.paths[idx]
+		pathIdx := idx
+		pcfg := p.cfg
+		effectiveTransport := resolvePathTransport(pcfg, cfg, logger)
+		if effectiveTransport == "stripe" {
+			continue // stripe has its own keepalive/re-register mechanism
+		}
+		if !strings.HasPrefix(pcfg.BindIP, "if:") {
+			continue
+		}
+		currentIP, _ := resolveBindIP(pcfg.BindIP)
+		if currentIP == "" {
+			continue
+		}
+		go watchInterfaceIP(ctx, pcfg.BindIP, currentIP, func(newIP string) {
+			mp.logger.Infof("WARN bind IP changed on %s (path %s): %s → %s, triggering reconnect",
+				pcfg.BindIP, pcfg.Name, currentIP, newIP)
+			mp.onPathError(ctx, pathIdx, fmt.Errorf("bind IP changed: %s → %s", currentIP, newIP))
+		})
 	}
 
 	go mp.telemetryLoop(ctx)
@@ -865,6 +910,18 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 		m.mu.Unlock()
 
 		m.logger.Infof("path recovered name=%s local=%s remote=%s", pcfg.Name, udpConn.LocalAddr(), remoteUDP.String())
+
+		// Restart IP watcher for QUIC paths with interface-based bindings
+		if strings.HasPrefix(pcfg.BindIP, "if:") {
+			newIP, _ := resolveBindIP(pcfg.BindIP)
+			if newIP != "" {
+				go watchInterfaceIP(ctx, pcfg.BindIP, newIP, func(changedIP string) {
+					m.logger.Infof("WARN bind IP changed on %s (path %s): %s → %s, triggering reconnect",
+						pcfg.BindIP, pcfg.Name, newIP, changedIP)
+					m.onPathError(ctx, idx, fmt.Errorf("bind IP changed: %s → %s", newIP, changedIP))
+				})
+			}
+		}
 		return
 	}
 }
