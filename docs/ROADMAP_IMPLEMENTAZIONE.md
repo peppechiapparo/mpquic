@@ -4,6 +4,118 @@
 
 ---
 
+## Addendum — Incidente mp1/BOND1 (2026-04-30)
+
+### Contesto operativo
+
+- Evento iniziale: WAN5 (Starlink) temporaneamente offline.
+- Sintomo lato client MPQUIC (10.10.11.100): `mpquic@mp1` attivo ma dataplane non instradante.
+- Sintomo lato OpenWrt (10.10.11.254): interfaccia `BOND1` offline nonostante `SL5/SL6` online.
+- Recovery osservata: restart manuale `mpquic@mp1` con ripristino immediato del ping verso `10.200.17.254`.
+
+### Evidenze forensi (Fase 1) ✅ COMPLETATA
+
+Finestra analizzata: 2026-04-30 11:45-12:10 CEST.
+
+- Error storm su `mp1`: timeout stripe ripetuti su entrambi i path (`wan5`, `wan6`).
+- Conteggi nel window:
+  - `wan5 path down`: 207
+  - `wan6 path down`: 214
+  - `stripe timeout (no rx)`: 421
+- Ultimo timeout pre-recovery: 12:01:56 CEST.
+- Restart automatici di `mp1`: nessuno (`NRestarts=0` nel periodo).
+- Restart manuale: 12:02:03 CEST, seguito da:
+  - `stripe path up name=wan5`
+  - `stripe path up name=wan6`
+  - `connected multipath paths=2`
+  - `TUN mp1 configured`
+
+Correlazione lato OpenWrt:
+- `BOND1` torna online subito dopo il recovery lato `mp1`.
+
+### Root cause confermata
+
+Il watchdog client (`mpquic-watchdog`) viene eseguito regolarmente, ma non monitora l'istanza `mp1`.
+La lista istanze attuale copre solo `1..6`; in caso di dataplane blackhole su `mp1`, il processo resta attivo e non viene riavviato automaticamente.
+
+### Roadmap implementativa incidente mp1
+
+#### Fase 1 — Forensics e timeline ✅ COMPLETATA
+
+- Raccolta log correlati da:
+  - `mpquic@mp1`, `mpquic@5`, `mpquic@6`
+  - `mpquic-watchdog`, `wan-watchdog`, `systemd-networkd`
+  - OpenWrt `mwan3` (`SL5`, `SL6`, `BOND1`)
+- Validazione della sequenza evento-degrado-recovery.
+
+#### Fase 2 — Design tecnico recovery mp1 ✅ COMPLETATA
+
+Obiettivo: eliminare il single point of manual intervention su `mp1`.
+
+Design adottato:
+- `mp1` è multipath (wan5+wan6): nessun WAN device singolo, non si può fermare il servizio se un solo WAN è down.
+- Condizione di restart: almeno un WAN usabile tra enp7s7/enp7s8, AND (servizio inattivo OR TUN degradata OR peer 10.200.17.254 irraggiungibile via ping -I mp1 per ≥ PEER_FAIL_THRESHOLD cicli consecutivi).
+- Anti-flap: contatore persistente in `/run/mpquic/watchdog-peer-fail/mp1.count`, reset su recovery.
+- Il servizio NON viene fermato se entrambi i WAN sono down (stripe gestisce internamente la disconnessione; lo riavviamo solo quando torna almeno un WAN).
+
+#### Fase 3 — Implementazione hardening ✅ COMPLETATA
+
+- Aggiornato `scripts/mpquic-tunnel-watchdog.sh`: blocco dedicato mp1 dopo il loop istanze 1-6.
+- Aggiornato `scripts/mpquic-healthcheck.sh`: health check mp1 in modalità client.
+- Deploy effettuato su VM MPQUIC (10.10.11.100).
+
+#### Fase 4 — Validazione regressione ⏳ IN CORSO
+
+Protocollo di test fisico concordato con l'operatore:
+
+**Test A — Flap alternato WAN5/WAN6 (almeno 5 cicli per WAN):**
+1. Staccare cavo WAN5 → attendere 30s → verificare mp1 online con loss 0% su WAN6 sola.
+2. Riattaccare cavo WAN5 → attendere 30s → verificare mp1 online con entrambi i WAN.
+3. Staccare cavo WAN6 → attendere 30s → verificare mp1 online con loss 0% su WAN5 sola.
+4. Riattaccare cavo WAN6 → attendere 30s → verificare mp1 online con entrambi i WAN.
+5. Ripetere ciclo (almeno 5 cicli per WAN, mai entrambe staccate contemporaneamente).
+
+Criterio di accettazione Test A: `mp1` resta instradante per tutta la durata, loss 0%, nessun restart del servizio richiesto dall'operatore, `NRestarts` sale al massimo in caso di blackhole dataplane (non per ogni flap fisico).
+
+**Test B — Entrambe le WAN disconnesse + recovery sequenziale:**
+1. Staccare WAN5 e WAN6 (entrambe) → attendere 2 minuti.
+2. Riattaccare una sola WAN (es. WAN5) → attendere fino a 120s.
+3. Verificare: `mpquic@mp1` si riavvia automaticamente entro la finestra watchdog (≤ 120s).
+4. Verificare: ping verso `10.200.17.254` via `mp1` torna a 0% loss.
+5. Verificare: `BOND1` su OpenWrt (10.10.11.254) torna ONLINE non appena mp1 è operativo.
+6. Riattaccare anche la seconda WAN → verificare multipath torna a 2 path.
+
+Criterio di accettazione Test B: mp1 recovery automatica senza intervento umano entro 2 cicli watchdog (120s); BOND1 ritorna attivo entro 60s dal recovery mp1.
+
+Comando di monitoraggio durante i test:
+```bash
+watch -n2 '{
+  echo "=== mp1 service ===";
+  systemctl is-active mpquic@mp1.service;
+  echo "=== TUN peer ===";
+  ping -I mp1 -c1 -W1 10.200.17.254 2>&1 | tail -1;
+  echo "=== WAN5/WAN6 ===";
+  ip -4 addr show enp7s7 | grep inet || echo "WAN5: no IP";
+  ip -4 addr show enp7s8 | grep inet || echo "WAN6: no IP";
+  echo "=== BOND1 OpenWrt ===";
+  ssh root@10.10.11.254 "mwan3 interfaces 2>/dev/null | grep -A3 BOND1" 2>/dev/null;
+}'
+```
+
+**Nessuna regressione su tunnel single-path** (`mpq4`, `mpq5`, `mpq6`): verificata assenza di restart indesiderati durante i test.
+
+### Decisione operativa
+
+Fase 3 completata: il recovery di `mp1` è ora automatico tramite watchdog esteso.
+
+Comando di restart manuale (mitigazione di emergenza se watchdog non converge):
+
+```bash
+systemctl restart mpquic@mp1
+```
+
+---
+
 ## Fase 5 — Management API + LuCI UI + AI/ML Decision Layer 🔄 IN CORSO
 
 **Obiettivo (Step 5 PDF)**: Fornire un piano di controllo completo per la piattaforma MPQUIC:

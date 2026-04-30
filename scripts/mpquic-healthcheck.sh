@@ -120,6 +120,33 @@ for idx in "${!INSTANCES[@]}"; do
   fi
 done
 
+# --- mp1: multipath stripe (wan5=enp7s7 + wan6=enp7s8) ---
+# Solo lato client; lato server mp1 non esiste.
+if [[ "$ROLE" == "client" ]]; then
+  MP1_INST="mp1"
+  mp1_any_wan_usable() {
+    local dev
+    for dev in "enp7s7" "enp7s8"; do
+      wan_usable "$dev" && return 0
+    done
+    return 1
+  }
+
+  if mp1_any_wan_usable; then
+    if ! svc_active "$MP1_INST" || ! tun_healthy "$MP1_INST"; then
+      echo "[mpquic-healthcheck] mp1: degraded (svc or tun unhealthy)"
+      [[ "$MODE" == "fix" ]] && restart_instance "$MP1_INST"
+      degraded=$((degraded + 1))
+    else
+      echo "[mpquic-healthcheck] mp1: healthy"
+      healthy=$((healthy + 1))
+    fi
+  else
+    echo "[mpquic-healthcheck] mp1: both WANs down, skipping"
+    # Non contare come degraded: condizione esterna
+  fi
+fi
+
 if [[ "$changed" -eq 1 ]]; then
   if [[ "$ROLE" == "client" ]]; then
     systemctl list-unit-files | grep -q '^mpquic-routing\.service' && systemctl restart mpquic-routing.service || true

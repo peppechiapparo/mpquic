@@ -157,6 +157,50 @@ for idx in "${!WAN_DEVS[@]}"; do
   fi
 done
 
+# --- mp1: multipath stripe (wan5=enp7s7 + wan6=enp7s8) ---
+# mp1 non ha un singolo WAN device: si monitora con logica dedicata.
+# Non lo fermiamo se un solo WAN è down (stripe gestisce internamente).
+# Lo riavviamo solo se: almeno un WAN è usabile AND (servizio inattivo OR
+# TUN degradata OR peer irraggiungibile per >= PEER_FAIL_THRESHOLD cicli).
+MP1_WAN_DEVS=("enp7s7" "enp7s8")
+MP1_SVC="mpquic@mp1.service"
+MP1_INST="mp1"
+
+mp1_any_wan_usable() {
+  local dev
+  for dev in "${MP1_WAN_DEVS[@]}"; do
+    if wan_usable "$dev"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+if mp1_any_wan_usable; then
+  if ! systemctl is-active --quiet "$MP1_SVC"; then
+    systemctl restart "$MP1_SVC" || true
+    reset_peer_fail "$MP1_INST"
+    changed=1
+  elif ! tun_healthy "$MP1_INST"; then
+    systemctl restart "$MP1_SVC" || true
+    reset_peer_fail "$MP1_INST"
+    changed=1
+  elif peer_reachable "$MP1_INST"; then
+    reset_peer_fail "$MP1_INST"
+  else
+    fails="$(inc_peer_fail "$MP1_INST")"
+    if (( fails >= PEER_FAIL_THRESHOLD )); then
+      systemctl restart "$MP1_SVC" || true
+      reset_peer_fail "$MP1_INST"
+      changed=1
+    fi
+  fi
+else
+  # Entrambe le WAN down: reset counter, non toccare il servizio.
+  # Quando tornerà almeno un WAN, il blocco sopra lo riavvierà se necessario.
+  reset_peer_fail "$MP1_INST"
+fi
+
 if [ "$changed" -eq 1 ] && systemctl list-unit-files | grep -q '^mpquic-routing\.service'; then
   systemctl restart mpquic-routing.service || true
 fi
