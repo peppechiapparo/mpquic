@@ -113,6 +113,17 @@ rm -f /usr/local/bin/mpquic
 cp bin/mpquic /usr/local/bin/mpquic
 cp scripts/ensure_tun.sh    /usr/local/lib/mpquic/ensure_tun.sh    2>/dev/null || true
 cp scripts/render_config.sh /usr/local/lib/mpquic/render_config.sh 2>/dev/null || true
+# Watchdog + healthcheck (referenced by mpquic-watchdog.service)
+if [[ -f scripts/mpquic-tunnel-watchdog.sh ]]; then
+  cp scripts/mpquic-tunnel-watchdog.sh /usr/local/lib/mpquic/mpquic-tunnel-watchdog.sh
+  chmod 0755 /usr/local/lib/mpquic/mpquic-tunnel-watchdog.sh
+  log "watchdog script updated"
+fi
+if [[ -f scripts/mpquic-healthcheck.sh ]]; then
+  cp scripts/mpquic-healthcheck.sh /usr/local/lib/mpquic/mpquic-healthcheck.sh
+  chmod 0755 /usr/local/lib/mpquic/mpquic-healthcheck.sh
+  log "healthcheck script updated"
+fi
 chmod 0755 /usr/local/bin/mpquic
 # Install updated systemd service file
 if [[ -f deploy/systemd/mpquic@.service ]]; then
