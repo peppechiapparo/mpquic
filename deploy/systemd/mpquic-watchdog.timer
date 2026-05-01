@@ -1,10 +1,10 @@
 [Unit]
-Description=Run MPQUIC tunnel watchdog every minute
+Description=Run MPQUIC tunnel watchdog every 15 seconds
 
 [Timer]
-OnBootSec=30s
-OnUnitActiveSec=60s
-AccuracySec=5s
+OnBootSec=10s
+OnUnitActiveSec=15s
+AccuracySec=1s
 Unit=mpquic-watchdog.service
 
 [Install]

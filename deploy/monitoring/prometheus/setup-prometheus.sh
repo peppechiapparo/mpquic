@@ -135,6 +135,17 @@ systemctl daemon-reload
 systemctl enable prometheus
 systemctl start prometheus
 
+# ── 7. Networking hardening (no ICMP redirect hijack) ───
+# In ambienti con gateway multipli sulla stessa LAN, gli ICMP redirect
+# possono deviare alcuni target 10.200.x verso next-hop errati e far
+# risultare DOWN endpoint che in realtà sono UP.
+cat > /etc/sysctl.d/90-mpquic-prometheus-routing.conf << 'SYSCTL'
+net.ipv4.conf.all.accept_redirects=0
+net.ipv4.conf.default.accept_redirects=0
+net.ipv4.conf.eth0.accept_redirects=0
+SYSCTL
+sysctl --system >/dev/null || true
+
 echo ""
 echo "━━━ Prometheus installato e avviato ━━━━━━━━━━━━━━━━━━━━━"
 echo ""

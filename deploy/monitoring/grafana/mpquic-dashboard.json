@@ -98,6 +98,7 @@
       "targets": [
         {
           "expr": "max by (wan) (up{job=\"mpquic-client\", wan!=\"\"})",
+          "instant": true,
           "legendFormat": "{{wan}}",
           "refId": "A"
         }
@@ -171,6 +172,7 @@
       "targets": [
         {
           "expr": "up{job=\"mpquic-client\", instance_name=~\"cr[456]\"}",
+          "instant": true,
           "legendFormat": "{{instance_name}}",
           "refId": "A"
         }
@@ -244,6 +246,7 @@
       "targets": [
         {
           "expr": "up{job=\"mpquic-client\", instance_name=~\"br[456]\"}",
+          "instant": true,
           "legendFormat": "{{instance_name}}",
           "refId": "A"
         }
@@ -317,6 +320,7 @@
       "targets": [
         {
           "expr": "up{job=\"mpquic-client\", instance_name=~\"df[456]\"}",
+          "instant": true,
           "legendFormat": "{{instance_name}}",
           "refId": "A"
         }
@@ -390,11 +394,13 @@
       "targets": [
         {
           "expr": "up{job=\"mpquic-client\", instance_name=~\"mpq[456]\"}",
+          "instant": true,
           "legendFormat": "{{instance_name}}",
           "refId": "A"
         },
         {
           "expr": "up{job=\"mpquic-client\", instance_name=\"mp1\"}",
+          "instant": true,
           "legendFormat": "{{instance_name}}",
           "refId": "B"
         }
@@ -468,6 +474,7 @@
       "targets": [
         {
           "expr": "up{job=\"mpquic-server\", instance_name=~\"mp1|mt[456]\"}",
+          "instant": true,
           "legendFormat": "{{instance_name}}",
           "refId": "A"
         }
