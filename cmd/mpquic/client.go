@@ -22,7 +22,7 @@ type multipathPathState struct {
 	transport        *quic.Transport
 	conn             quic.Connection
 	dc               datagramConn
-	stripeConn       *stripeClientConn   // non-nil for stripe transport paths
+	stripeConn       *stripeClientConn // non-nil for stripe transport paths
 	alive            bool
 	reconnecting     bool
 	consecutiveFails int
@@ -46,17 +46,17 @@ type multipathPathState struct {
 }
 
 type multipathConn struct {
-	mu      sync.RWMutex
-	paths   []*multipathPathState
-	recvCh  chan []byte
-	errCh   chan error
-	errOnce sync.Once
-	rr      int
-	logger  *Logger
-	cfg     *Config
+	mu        sync.RWMutex
+	paths     []*multipathPathState
+	recvCh    chan []byte
+	errCh     chan error
+	errOnce   sync.Once
+	rr        int
+	logger    *Logger
+	cfg       *Config
 	dataplane compiledDataplane
 	classTx   map[string]*trafficClassCounters
-	baseCtx context.Context
+	baseCtx   context.Context
 }
 
 func runClientLoop(ctx context.Context, cfg *Config, logger *Logger) error {
@@ -180,13 +180,13 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 	expandedPaths := expandMultipathPipes(cfg.MultipathPaths, cfg, logger)
 
 	mp := &multipathConn{
-		recvCh:  make(chan []byte, 512),
-		errCh:   make(chan error, 1),
-		logger:  logger,
-		cfg:     cfg,
+		recvCh:    make(chan []byte, 512),
+		errCh:     make(chan error, 1),
+		logger:    logger,
+		cfg:       cfg,
 		dataplane: dpRuntime,
-		classTx: make(map[string]*trafficClassCounters),
-		baseCtx: ctx,
+		classTx:   make(map[string]*trafficClassCounters),
+		baseCtx:   ctx,
 	}
 	registerMetricsClient(mp)
 
@@ -216,7 +216,7 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 				state.reconnecting = true
 				continue
 			}
-			sc, err := newStripeClientConn(ctx, cfg, p, keys, logger)
+			sc, err := newStripeClientConn(ctx, cfg, p, keys, &state.lastRxNs, logger)
 			if err != nil {
 				logger.Errorf("stripe init failed name=%s err=%v", p.Name, err)
 				state.reconnecting = true
@@ -228,10 +228,10 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 			state.reconnecting = false
 			state.lastUp = time.Now()
 			// Initialize liveness baseline so healthCheckLoop never sees
-			// a zero `lastRxNs` for a freshly-alive path; wire the stripe
-			// RX hook to mirror updates into multipathPathState atomically.
+			// a zero `lastRxNs` for a freshly-alive path. The stripe RX
+			// hook (lastRxNsPtr) was wired into the constructor before the
+			// recv goroutines were spawned (no race).
 			atomic.StoreInt64(&state.lastRxNs, time.Now().UnixNano())
-			sc.SetLastRxPtr(&state.lastRxNs)
 			aliveCount++
 			logger.Infof("stripe path up name=%s pipes=%d", p.Name, p.Pipes)
 			continue
@@ -713,7 +713,7 @@ func (m *multipathConn) recvLoop(ctx context.Context, idx int) {
 			continue
 		}
 		m.onPathSuccess(idx)
-			atomic.StoreInt64(&m.paths[idx].lastRxNs, time.Now().UnixNano())
+		atomic.StoreInt64(&m.paths[idx].lastRxNs, time.Now().UnixNano())
 		copyPkt := append([]byte(nil), pkt...)
 		select {
 		case <-ctx.Done():
@@ -837,7 +837,7 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 				}
 				continue
 			}
-			sc, err := newStripeClientConn(ctx, m.cfg, pcfg, keys, m.logger)
+			sc, err := newStripeClientConn(ctx, m.cfg, pcfg, keys, &m.paths[idx].lastRxNs, m.logger)
 			if err != nil {
 				if ctx.Err() != nil {
 					return
@@ -861,12 +861,18 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 				if p.consecutiveFails > 0 {
 					p.consecutiveFails--
 				}
-				// Re-baseline liveness and re-cable RX pointer: the new
-				// stripeClientConn lost the previous SetLastRxPtr binding.
+				// Re-baseline liveness; the stripe RX hook (lastRxNsPtr) was
+				// wired into the new constructor before recv goroutines spawned
+				// (no race). Accumulate any unflushed blackhole time before
+				// clearing the degraded marker so metrics stay accurate when
+				// recovery is driven by reconnect rather than healthCheckLoop.
+				if since := atomic.LoadInt64(&p.degradedSinceNs); since > 0 {
+					atomic.AddInt64(&p.blackholeNs, time.Now().UnixNano()-since)
+					atomic.AddUint64(&p.failbackTotal, 1)
+				}
 				atomic.StoreInt64(&p.lastRxNs, time.Now().UnixNano())
 				atomic.StoreUint32(&p.degraded, 0)
 				atomic.StoreInt64(&p.degradedSinceNs, 0)
-				sc.SetLastRxPtr(&p.lastRxNs)
 			}
 			m.mu.Unlock()
 			m.logger.Infof("stripe path recovered name=%s pipes=%d", pcfg.Name, pcfg.Pipes)
@@ -973,7 +979,14 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 			if p.consecutiveFails > 0 {
 				p.consecutiveFails--
 			}
-			// Re-baseline liveness for QUIC reconnect.
+			// Re-baseline liveness for QUIC reconnect. Accumulate any
+			// unflushed blackhole time before clearing the degraded marker
+			// so metrics stay accurate when recovery is driven by reconnect
+			// rather than healthCheckLoop.
+			if since := atomic.LoadInt64(&p.degradedSinceNs); since > 0 {
+				atomic.AddInt64(&p.blackholeNs, time.Now().UnixNano()-since)
+				atomic.AddUint64(&p.failbackTotal, 1)
+			}
 			atomic.StoreInt64(&p.lastRxNs, time.Now().UnixNano())
 			atomic.StoreUint32(&p.degraded, 0)
 			atomic.StoreInt64(&p.degradedSinceNs, 0)
@@ -1011,13 +1024,13 @@ func (m *multipathConn) telemetryLoop(ctx context.Context) {
 	}
 }
 
-// healthCheckLoop is the SINGLE WRITER of multipathPathState.degraded /
-// degradedSinceNs (combo A+E). It samples lastRxNs (mirrored by stripe RX
-// hook and by the QUIC recvLoop) and flips paths between healthy and
-// degraded based on silent-time thresholds. It does NOT mutate p.alive,
-// does NOT trigger reconnectLoop, and does NOT take m.mu — the loop only
-// reads len(m.paths) (paths slice is sized at init and never resized) and
-// uses atomic ops on the per-path counters.
+// healthCheckLoop is the only writer of degraded/degradedSinceNs while the path is alive.
+// reconnectLoop performs a handoff reset under m.mu before flipping alive back to true.
+// It samples lastRxNs (mirrored by stripe RX hook and by the QUIC recvLoop)
+// and flips paths between healthy and degraded based on silent-time thresholds.
+// It does NOT mutate p.alive, does NOT trigger reconnectLoop, and does NOT take
+// m.mu — the loop only reads len(m.paths) (paths slice is sized at init and
+// never resized) and uses atomic ops on the per-path counters.
 func (m *multipathConn) healthCheckLoop(ctx context.Context) {
 	interval := m.cfg.StripeHealthCheckInterval
 	if interval <= 0 {

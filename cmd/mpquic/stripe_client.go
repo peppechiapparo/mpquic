@@ -33,7 +33,7 @@ type stripeClientConn struct {
 	adaptiveM int32  // atomic: current TX parity M (0..parityM)
 
 	// XOR FEC (sliding-window, alternative to RS)
-	fecType string          // "rs" (default) or "xor"
+	fecType   string          // "rs" (default) or "xor"
 	xorTx     *xorFECSender   // XOR TX accumulator (nil if fecType != "xor")
 	xorRx     *xorFECReceiver // XOR RX recovery buffer (nil if fecType != "xor")
 	xorActive int32           // atomic: 1=emit XOR repairs, 0=skip (adaptive gate)
@@ -68,9 +68,9 @@ type stripeClientConn struct {
 	rxMu     sync.Mutex
 
 	// RX loss tracking (measures loss on data FROM server → used to tell server to adjust its TX M)
-	rxSeqHighest   uint64 // atomic: highest GroupSeq seen (M=0 loss detection)
-	rxDirectCount  uint64 // atomic: data shards delivered via deliverDataDirect
-	rxFECGroups    uint64 // atomic: total FEC groups completed (M>0)
+	rxSeqHighest  uint64 // atomic: highest GroupSeq seen (M=0 loss detection)
+	rxDirectCount uint64 // atomic: data shards delivered via deliverDataDirect
+	rxFECGroups   uint64 // atomic: total FEC groups completed (M>0)
 	// fecRecov is also used (existing field)
 
 	// Peer-reported loss (loss on data WE send, reported BY server → we adjust our TX M)
@@ -89,17 +89,17 @@ type stripeClientConn struct {
 	// Per-pipe accumulation: encrypted wire packets are buffered and flushed
 	// as one sendmsg with UDP_SEGMENT, reducing syscall overhead by N×.
 	gsoEnabled  bool
-	gsoDisabled uint32          // atomic: 1 = runtime fallback (NIC lacks TX csum)
-	gsoBufs     []gsoTxPipeBuf  // one per pipe
+	gsoDisabled uint32         // atomic: 1 = runtime fallback (NIC lacks TX csum)
+	gsoBufs     []gsoTxPipeBuf // one per pipe
 
 	// Kernel TX pacing (SO_TXTIME + sch_fq).
 	// Each pipe socket has SO_TXTIME enabled; per-sendmsg SCM_TXTIME cmsg
 	// carries an EDT (Earliest Departure Time) so sch_fq holds the packet
 	// until that instant.  Replaces the software stripePacer with nanosecond
 	// kernel-level precision.
-	txtimeEnabled bool               // SO_TXTIME probed OK on first pipe
-	txtimeEDT     []int64            // per-pipe next EDT (ns, CLOCK_MONOTONIC)
-	txtimeGapNs   int64              // inter-packet gap (ns) derived from pacing rate
+	txtimeEnabled bool    // SO_TXTIME probed OK on first pipe
+	txtimeEDT     []int64 // per-pipe next EDT (ns, CLOCK_MONOTONIC)
+	txtimeGapNs   int64   // inter-packet gap (ns) derived from pacing rate
 
 	// Stats (atomic)
 	txPkts   uint64
@@ -142,15 +142,6 @@ func (scc *stripeClientConn) SecurityStats() uint64 {
 	return atomic.LoadUint64(&scc.securityDecryptFail)
 }
 
-// SetLastRxPtr installs an external int64 to mirror lastRx updates into.
-// Used by multipathConn so its lock-free healthCheckLoop can detect silent
-// paths without touching scc internals. Safe to call once during wiring,
-// before recvPipeLoop is started.
-func (scc *stripeClientConn) SetLastRxPtr(ptr *int64) {
-	scc.lastRxNsPtr = ptr
-}
-
-
 // newStripeClientConn creates a stripe transport for a single multipath path.
 // It opens N UDP sockets on the specified interface, all pointed at the server's
 // stripe port. Each socket = one Starlink session = one ~80 Mbps allocation.
@@ -186,7 +177,7 @@ func bindPipeToDevice(conn *net.UDPConn, ifname string) error {
 	return sysErr
 }
 
-func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPathConfig, keys *stripeKeyMaterial, logger *Logger) (*stripeClientConn, error) {
+func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPathConfig, keys *stripeKeyMaterial, lastRxNsPtr *int64, logger *Logger) (*stripeClientConn, error) {
 	pipes := pathCfg.Pipes
 	if pipes <= 1 {
 		pipes = 4
@@ -308,6 +299,9 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		logger:     logger,
 		txCipher:   txCipher,
 		rxCipher:   rxCipher,
+		// lastRxNsPtr is wired here (before any recv goroutine is spawned)
+		// so healthCheckLoop sees a stable, race-free pointer.
+		lastRxNsPtr: lastRxNsPtr,
 	}
 	atomic.StoreInt32(&scc.adaptiveM, initialAdaptiveM)
 	atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
@@ -1082,9 +1076,10 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 
 			payload := raw[stripeHdrLen:]
 
-			atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
+			nowNs := time.Now().UnixNano()
+			atomic.StoreInt64(&scc.lastRx, nowNs)
 			if scc.lastRxNsPtr != nil {
-				atomic.StoreInt64(scc.lastRxNsPtr, time.Now().UnixNano())
+				atomic.StoreInt64(scc.lastRxNsPtr, nowNs)
 			}
 
 			switch hdr.Type {
@@ -1416,10 +1411,16 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 			scc.tuneXorRuntime()
 			scc.tuneRLCRuntime()
 
-			// ── Periodic re-register (every 30s) for self-healing ──
+			// ── Periodic re-register for self-healing ──
+			// Cadence is cfg-driven: stripeReregisterInterval / keepaliveInterval.
+			// With keepaliveInterval=1s and stripeReregisterInterval=30s → every 30 ticks.
 			// If the server lost pipe addresses (re-key race, GC, etc.),
 			// this ensures pipe mappings are refreshed without a full restart.
-			if tickCount%6 == 0 {
+			reregisterEvery := int(stripeReregisterInterval / scc.keepaliveInterval)
+			if reregisterEvery < 1 {
+				reregisterEvery = 1
+			}
+			if tickCount%reregisterEvery == 0 {
 				for i, pipe := range scc.pipes {
 					regPayload := make([]byte, 6)
 					binary.BigEndian.PutUint32(regPayload[0:4], scc.tunIPU32)
@@ -1486,14 +1487,14 @@ func (scc *stripeClientConn) computeRxLoss() uint8 {
 		return uint8(rate)
 	}
 
-	// XOR FEC Anti-Waste (Step 4.28): 
+	// XOR FEC Anti-Waste (Step 4.28):
 	// If burst loss prevents XOR from recovering anything, suspend it.
 	if scc.fecType == "xor" && scc.xorRx != nil {
 		xorRecov := atomic.LoadUint64(&scc.xorRx.recovered)
 		xorUnrecov := atomic.LoadUint64(&scc.xorRx.unrecoverable)
 		dXorRecov := xorRecov - scc.rxLossPrevXorRecov
 		dXorUnrecov := xorUnrecov - scc.rxLossPrevXorUnrecov
-		
+
 		scc.rxLossPrevXorRecov = xorRecov
 		scc.rxLossPrevXorUnrecov = xorUnrecov
 
@@ -1791,30 +1792,30 @@ func (scc *stripeClientConn) arqNackLoop(ctx context.Context) {
 // dynamicPacingLoop dynamically adjusts the pacing rate (txtimeGapNs) based on
 // current throughput and RTT to avoid queue buildup when bandwidth drops.
 func (scc *stripeClientConn) dynamicPacingLoop(ctx context.Context, baseRate int) {
-ticker := time.NewTicker(200 * time.Millisecond)
-defer ticker.Stop()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
 
-// Target base pacing converted to nanoseconds
-baseNs := int64(1000000000 / baseRate)
+	// Target base pacing converted to nanoseconds
+	baseNs := int64(1000000000 / baseRate)
 
-for {
-select {
-case <-ctx.Done():
-return
-case <-ticker.C:
-// Minimal dynamic pacing: 
-// In Phase 4d we scale pacing off RTT jitter & loss.
-// Currently this is a base implementation avoiding panic.
-// TODO: Add real scaling based on srtt and ewma bandwidth
-targetNs := baseNs
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Minimal dynamic pacing:
+			// In Phase 4d we scale pacing off RTT jitter & loss.
+			// Currently this is a base implementation avoiding panic.
+			// TODO: Add real scaling based on srtt and ewma bandwidth
+			targetNs := baseNs
 
-// Increase pacing gap slightly if loss is high
-loss := atomic.LoadUint32(&scc.peerLossRate)
-if loss > 0 && loss < 255 {
-targetNs += targetNs * int64(loss) / 100 // up to 2x slower
-}
+			// Increase pacing gap slightly if loss is high
+			loss := atomic.LoadUint32(&scc.peerLossRate)
+			if loss > 0 && loss < 255 {
+				targetNs += targetNs * int64(loss) / 100 // up to 2x slower
+			}
 
-atomic.StoreInt64(&scc.txtimeGapNs, targetNs)
-}
-}
+			atomic.StoreInt64(&scc.txtimeGapNs, targetNs)
+		}
+	}
 }

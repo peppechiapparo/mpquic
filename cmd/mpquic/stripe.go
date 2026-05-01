@@ -56,14 +56,14 @@ const (
 	stripeVersion uint8  = 1
 
 	// Packet types
-	stripeDATA      uint8 = 0x01
-	stripePARITY    uint8 = 0x02
-	stripeREGISTER  uint8 = 0x03
-	stripeKEEPALIVE uint8 = 0x04
-	stripeNACK        uint8 = 0x05
-	stripeXOR_REPAIR    uint8 = 0x06
-	stripeRLC_REPAIR    uint8 = 0x07
-	stripeRS_IL_PARITY  uint8 = 0x08 // RS interleaved parity shard
+	stripeDATA         uint8 = 0x01
+	stripePARITY       uint8 = 0x02
+	stripeREGISTER     uint8 = 0x03
+	stripeKEEPALIVE    uint8 = 0x04
+	stripeNACK         uint8 = 0x05
+	stripeXOR_REPAIR   uint8 = 0x06
+	stripeRLC_REPAIR   uint8 = 0x07
+	stripeRS_IL_PARITY uint8 = 0x08 // RS interleaved parity shard
 
 	// Header: magic(2) + ver(1) + type(1) + session(4) + groupSeq(4) + shardIdx(1) + groupDataN(1) + dataLen(2) = 16
 	stripeHdrLen = 16
@@ -74,8 +74,9 @@ const (
 	stripeMaxPayload          = 1500
 	stripeFlushInterval       = 5 * time.Millisecond
 	stripeKeepaliveInterval   = 1 * time.Second
+	stripeReregisterInterval  = 30 * time.Second // periodic REGISTER refresh in keepaliveLoop
 	stripeSessionTimeout      = 30 * time.Second
-	stripeBatchSize           = 8 // recvmmsg batch size (matches quic-go)
+	stripeBatchSize           = 8       // recvmmsg batch size (matches quic-go)
 	stripeSocketBufSize       = 7 << 20 // 7 MB per socket (matches quic-go)
 	stripeGCInterval          = 10 * time.Second
 	stripeRegisterRetries     = 3
@@ -88,7 +89,7 @@ const (
 	stripeHealthCheckInterval   = 500 * time.Millisecond
 
 	// Adaptive FEC: loss threshold to enable/disable parity
-	adaptiveFECLossThreshold uint8 = 2   // enable parity when peer loss > 2%
+	adaptiveFECLossThreshold uint8 = 2                // enable parity when peer loss > 2%
 	adaptiveFECCooldown            = 15 * time.Second // stay at M>0 for at least this long after peer loss
 )
 
@@ -208,13 +209,13 @@ func decodeStripeHdr(buf []byte) (stripeHdr, bool) {
 // ─── FEC Group ────────────────────────────────────────────────────────────
 
 type fecGroup struct {
-	dataK    int
-	parityM  int
-	shards   [][]byte // [dataK + parityM] — nil = not received
-	present  []bool
-	received int
-	maxLen   int
-	created  time.Time
+	dataK     int
+	parityM   int
+	shards    [][]byte // [dataK + parityM] — nil = not received
+	present   []bool
+	received  int
+	maxLen    int
+	created   time.Time
 	delivered bool
 }
 
@@ -244,4 +245,3 @@ func (g *fecGroup) addShard(idx int, data []byte) bool {
 	}
 	return g.received >= g.dataK
 }
-
