@@ -264,6 +264,11 @@ systemctl restart mpquic-watchdog.timer
 systemctl restart mpquic-watchdog.service
 ```
 
+Copertura attuale watchdog client:
+- single-path: `1..6`
+- multipath: `mp1`
+- multi-class VLAN: `cr4..6`, `br4..6`, `df4..6`
+
 ## 3.5 Su VPS i tunnel restano down
 
 Check:
@@ -271,7 +276,7 @@ Check:
 systemctl is-active mpquic-server-watchdog.timer
 systemctl status mpquic-server-watchdog.timer --no-pager
 journalctl -u mpquic-server-watchdog.service -n 50 --no-pager
-for i in 1 2 3 4 5 6; do
+for i in 1 2 3 4 5 6 mp1 mt1 mt4 mt5 mt6; do
   printf "@%s=" "$i"
   systemctl is-active mpquic@$i.service || true
 done
@@ -282,11 +287,33 @@ Se il processo è attivo ma il tunnel è rotto (es. `write tun: input/output err
 
 Recovery:
 ```bash
-for i in 1 2 3 4 5 6; do systemctl restart mpquic@$i.service; done
+for i in 1 2 3 4 5 6 mp1 mt1 mt4 mt5 mt6; do systemctl restart mpquic@$i.service; done
 systemctl restart mpquic-vps-routes.service
 systemctl restart mpquic-server-watchdog.timer
 systemctl restart mpquic-server-watchdog.service
 ```
+
+## 3.6 Tunnel cr/br/df in stato down
+
+Check rapido su VM MPQUIC:
+```bash
+for s in cr4 cr5 cr6 br4 br5 br6 df4 df5 df6; do
+  printf "%s: enabled=%s active=%s\n" \
+    "$s" \
+    "$(systemctl is-enabled mpquic@$s.service 2>/dev/null || echo no)" \
+    "$(systemctl is-active mpquic@$s.service 2>/dev/null || echo down)"
+done
+```
+
+Restart mirato:
+```bash
+for s in cr4 cr5 cr6 br4 br5 br6 df4 df5 df6; do
+  systemctl restart mpquic@$s.service
+done
+```
+
+Nota: per la demo, i tunnel cr/br/df possono essere lasciati intenzionalmente spenti.
+In quel caso un alert Grafana su queste istanze va marcato come expected/maintenance.
 
 ## 4) TLS debug
 
@@ -318,7 +345,7 @@ Client:
 ```bash
 date
 hostname
-for i in 1 2 3 4 5 6; do systemctl is-active mpquic@$i.service || true; done
+for i in 1 2 3 4 5 6 mp1 cr4 cr5 cr6 br4 br5 br6 df4 df5 df6; do systemctl is-active mpquic@$i.service || true; done
 ip -br a | egrep '^enp7s[3-8]|^mpq[1-6]'
 ip rule show | egrep '100[1-6]'
 ip route show table 100
@@ -334,7 +361,7 @@ VPS:
 ```bash
 date
 hostname
-for i in 1 2 3 4 5 6; do systemctl is-active mpquic@$i.service || true; done
+for i in 1 2 3 4 5 6 mp1 mt1 mt4 mt5 mt6; do systemctl is-active mpquic@$i.service || true; done
 ip -br a | egrep '^mpq[1-6]|^eth0'
 ip route show | egrep '172\.16\.[1-6]\.0/30|10\.200\.'
 nft list ruleset | sed -n '1,220p'

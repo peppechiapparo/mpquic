@@ -31,13 +31,27 @@ find_go() {
 }
 
 # Discover all enabled mpquic@ instances from systemd
+list_enabled_instances() {
+  local wants_dir="/etc/systemd/system/multi-user.target.wants"
+  if [[ ! -d "$wants_dir" ]]; then
+    return 0
+  fi
+
+  find "$wants_dir" -maxdepth 1 -type l -name 'mpquic@*.service' -printf '%f\n' 2>/dev/null \
+    | sed -nE 's/^mpquic@([a-zA-Z0-9_-]+)\.service$/\1/p'
+}
+
 list_instances() {
   # Clean up any phantom failed units (e.g. mpquic@●) before discovery
   systemctl reset-failed 'mpquic@*' 2>/dev/null || true
-  # Only match valid instance names: alphanumeric, hyphen, underscore
-  systemctl list-units --type=service --all --no-legend 'mpquic@*' \
-    | grep -oP 'mpquic@\K[a-zA-Z0-9_-]+(?=\.service)' \
-    | sort
+  # Merge two sources:
+  # 1) units known by systemd (active/inactive/failed)
+  # 2) explicit enabled symlinks in multi-user.target.wants
+  {
+    systemctl list-units --type=service --all --no-legend 'mpquic@*' \
+      | grep -oP 'mpquic@\K[a-zA-Z0-9_-]+(?=\.service)' || true
+    list_enabled_instances || true
+  } | sort -u
 }
 
 # ── Pre-flight checks ─────────────────────────────────────────────────────

@@ -108,6 +108,11 @@ watch -n2 '{
 
 Fase 3 completata: il recovery di `mp1` è ora automatico tramite watchdog esteso.
 
+Aggiornamento operativo (2026-05-01):
+- Estesa copertura watchdog client anche ai tunnel VLAN `cr4..6`, `br4..6`, `df4..6`.
+- I tunnel VLAN possono restare intenzionalmente spenti in fase demo: in quel caso lo stato down non e' incidente.
+- Lato VPS, `mt1/mt4/mt5/mt6` sono gestiti da `systemd` con `Restart=always` e devono essere verificati durante ogni update.
+
 Comando di restart manuale (mitigazione di emergenza se watchdog non converge):
 
 ```bash

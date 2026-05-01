@@ -3,6 +3,13 @@ set -euo pipefail
 
 WAN_DEVS=("enp7s3" "enp7s4" "enp7s5" "enp7s6" "enp7s7" "enp7s8")
 INSTANCES=("1" "2" "3" "4" "5" "6")
+# L2 multi-tunnel per classi (WAN4-6): cr/br/df
+CLASS_WAN_DEVS=(
+  "enp7s6" "enp7s6" "enp7s6"
+  "enp7s7" "enp7s7" "enp7s7"
+  "enp7s8" "enp7s8" "enp7s8"
+)
+CLASS_INSTANCES=("cr4" "br4" "df4" "cr5" "br5" "df5" "cr6" "br6" "df6")
 PEER_FAIL_DIR="/run/mpquic/watchdog-peer-fail"
 PEER_FAIL_THRESHOLD=2
 
@@ -122,12 +129,11 @@ inc_peer_fail() {
   echo "$val"
 }
 
-changed=0
-
-for idx in "${!WAN_DEVS[@]}"; do
-  dev="${WAN_DEVS[$idx]}"
-  inst="${INSTANCES[$idx]}"
-  svc="mpquic@${inst}.service"
+manage_instance() {
+  local dev="$1"
+  local inst="$2"
+  local stop_when_wan_down="${3:-1}"
+  local svc="mpquic@${inst}.service"
 
   if wan_usable "$dev"; then
     if ! systemctl is-active --quiet "$svc"; then
@@ -149,12 +155,27 @@ for idx in "${!WAN_DEVS[@]}"; do
       fi
     fi
   else
-    if systemctl is-active --quiet "$svc"; then
+    if [[ "$stop_when_wan_down" == "1" ]] && systemctl is-active --quiet "$svc"; then
       systemctl stop "$svc" || true
       changed=1
     fi
     reset_peer_fail "$inst"
   fi
+}
+
+changed=0
+
+for idx in "${!WAN_DEVS[@]}"; do
+  dev="${WAN_DEVS[$idx]}"
+  inst="${INSTANCES[$idx]}"
+  manage_instance "$dev" "$inst" 1
+done
+
+# --- L2 class tunnels: cr/br/df su WAN4-6 ---
+for idx in "${!CLASS_WAN_DEVS[@]}"; do
+  dev="${CLASS_WAN_DEVS[$idx]}"
+  inst="${CLASS_INSTANCES[$idx]}"
+  manage_instance "$dev" "$inst" 1
 done
 
 # --- mp1: multipath stripe (wan5=enp7s7 + wan6=enp7s8) ---
