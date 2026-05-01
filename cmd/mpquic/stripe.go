@@ -73,13 +73,19 @@ const (
 	stripeDefaultParityShards = 2
 	stripeMaxPayload          = 1500
 	stripeFlushInterval       = 5 * time.Millisecond
-	stripeKeepaliveInterval   = 5 * time.Second
+	stripeKeepaliveInterval   = 1 * time.Second
 	stripeSessionTimeout      = 30 * time.Second
 	stripeBatchSize           = 8 // recvmmsg batch size (matches quic-go)
 	stripeSocketBufSize       = 7 << 20 // 7 MB per socket (matches quic-go)
 	stripeGCInterval          = 10 * time.Second
 	stripeRegisterRetries     = 3
 	stripeRegisterDelay       = 500 * time.Millisecond
+
+	// Fast failover health-check (Group A combo A+E).
+	// Detection blackhole ≤ 3.5s, single-writer healthCheckLoop on client.
+	stripePathDegradedThreshold = 3 * time.Second
+	stripePathDegradedRecovery  = 1 * time.Second
+	stripeHealthCheckInterval   = 500 * time.Millisecond
 
 	// Adaptive FEC: loss threshold to enable/disable parity
 	adaptiveFECLossThreshold uint8 = 2   // enable parity when peer loss > 2%

@@ -1677,6 +1677,15 @@ func (ss *stripeServer) handleKeepalive(hdr stripeHdr, payload []byte, from *net
 	}
 	sess.lastActivity = time.Now()
 
+	// Refresh dispatch path liveness for this stripe session: keepalives
+	// arrive at ~1Hz (Group A), so the server-side dispatch table sees a
+	// liveness signal even when no return-path traffic is flowing. Same
+	// pattern as tunWriter; touchPath has its own internal 500ms rate-limit
+	// to avoid write-lock contention.
+	if ss.ct != nil {
+		ss.ct.touchPath(sess.peerIP, fmt.Sprintf("stripe:%08x", sess.sessionID))
+	}
+
 	// Update pipe address if the client included a pipe index byte.
 	// This handles CGNAT rebind: the client's public IP:port changed,
 	// so we update sess.pipes and addrToSess to the new source address.

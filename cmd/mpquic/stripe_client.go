@@ -109,9 +109,18 @@ type stripeClientConn struct {
 	fecRecov uint64
 	lastRx   int64 // unix-nano timestamp of last received packet (atomic)
 
+	// lastRxNsPtr is an optional external mirror updated on every successful
+	// RX (zero-lock, atomic-only). Wired by multipathConn so its
+	// healthCheckLoop can detect silent paths without grabbing any lock.
+	lastRxNsPtr *int64
+
 	closeCh   chan struct{}
 	closeOnce sync.Once
 	logger    *Logger
+
+	// keepaliveInterval mirrors cfg.StripeFastKeepaliveInterval at construction
+	// time; default = stripeKeepaliveInterval (1s after combo A+E).
+	keepaliveInterval time.Duration
 
 	txCipher *stripeCipher // client→server encryption
 	rxCipher *stripeCipher // server→client decryption
@@ -131,6 +140,14 @@ type gsoTxPipeBuf struct {
 // SecurityStats returns the decrypt failure counter.
 func (scc *stripeClientConn) SecurityStats() uint64 {
 	return atomic.LoadUint64(&scc.securityDecryptFail)
+}
+
+// SetLastRxPtr installs an external int64 to mirror lastRx updates into.
+// Used by multipathConn so its lock-free healthCheckLoop can detect silent
+// paths without touching scc internals. Safe to call once during wiring,
+// before recvPipeLoop is started.
+func (scc *stripeClientConn) SetLastRxPtr(ptr *int64) {
+	scc.lastRxNsPtr = ptr
 }
 
 
@@ -295,6 +312,11 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	atomic.StoreInt32(&scc.adaptiveM, initialAdaptiveM)
 	atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
 	scc.pacer = newStripePacer(cfg.StripePacingRate)
+	if cfg.StripeFastKeepaliveInterval > 0 {
+		scc.keepaliveInterval = cfg.StripeFastKeepaliveInterval
+	} else {
+		scc.keepaliveInterval = stripeKeepaliveInterval
+	}
 
 	// Sliding-window FEC: create sender/receiver when fec_type=xor|rlc and not off
 	if fecType == "xor" && fecMode != "off" {
@@ -1061,6 +1083,9 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 			payload := raw[stripeHdrLen:]
 
 			atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
+			if scc.lastRxNsPtr != nil {
+				atomic.StoreInt64(scc.lastRxNsPtr, time.Now().UnixNano())
+			}
 
 			switch hdr.Type {
 			case stripeDATA:
@@ -1358,7 +1383,11 @@ func (scc *stripeClientConn) handleRSILParity(hdr stripeHdr, payload []byte) {
 // ─── Client keepalive ─────────────────────────────────────────────────────
 
 func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
-	ticker := time.NewTicker(stripeKeepaliveInterval)
+	interval := scc.keepaliveInterval
+	if interval <= 0 {
+		interval = stripeKeepaliveInterval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	var tickCount int
 	for {

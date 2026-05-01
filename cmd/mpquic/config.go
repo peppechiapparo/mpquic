@@ -4,11 +4,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -52,6 +54,12 @@ type Config struct {
 	StripeFECInterleave   int                   `yaml:"stripe_fec_interleave"` // RS interleave depth (0=block RS, >0=interleaved, default 4)
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
 	MetricsListen         string                `yaml:"metrics_listen"` // e.g. "10.200.17.254:9090" — bind to tunnel IP only
+
+	// Fast failover health-check (combo A+E). Defaults applied in loadConfig.
+	StripeFastKeepaliveInterval time.Duration `yaml:"stripe_fast_keepalive_interval"`
+	StripePathDegradedThreshold time.Duration `yaml:"stripe_path_degraded_threshold"`
+	StripePathDegradedRecovery  time.Duration `yaml:"stripe_path_degraded_recovery"`
+	StripeHealthCheckInterval   time.Duration `yaml:"stripe_health_check_interval"`
 }
 
 type MultipathPathConfig struct {
@@ -187,7 +195,42 @@ func loadConfig(path string) (*Config, error) {
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "info"
 	}
+	applyFastFailoverDefaults(cfg)
 	return cfg, nil
+}
+
+// applyFastFailoverDefaults fills the four fast-failover health-check tunables
+// with their default values when zero, and clamps inconsistent operator
+// overrides back to defaults with a log warning. Single source of truth for
+// the combo A+E defaults declared in stripe.go.
+func applyFastFailoverDefaults(cfg *Config) {
+	if cfg.StripeFastKeepaliveInterval <= 0 {
+		cfg.StripeFastKeepaliveInterval = stripeKeepaliveInterval
+	}
+	if cfg.StripePathDegradedThreshold <= 0 {
+		cfg.StripePathDegradedThreshold = stripePathDegradedThreshold
+	}
+	if cfg.StripePathDegradedRecovery <= 0 {
+		cfg.StripePathDegradedRecovery = stripePathDegradedRecovery
+	}
+	if cfg.StripeHealthCheckInterval <= 0 {
+		cfg.StripeHealthCheckInterval = stripeHealthCheckInterval
+	}
+
+	// Validation: recovery must be strictly less than degraded threshold,
+	// and the health-check tick must be ≤ recovery (otherwise we may miss
+	// the recovery window). On violation, log a warning and reset to defaults.
+	if !(cfg.StripePathDegradedRecovery < cfg.StripePathDegradedThreshold) {
+		log.Printf("WARN: stripe_path_degraded_recovery (%v) must be < stripe_path_degraded_threshold (%v); resetting both to defaults",
+			cfg.StripePathDegradedRecovery, cfg.StripePathDegradedThreshold)
+		cfg.StripePathDegradedRecovery = stripePathDegradedRecovery
+		cfg.StripePathDegradedThreshold = stripePathDegradedThreshold
+	}
+	if !(cfg.StripeHealthCheckInterval <= cfg.StripePathDegradedRecovery) {
+		log.Printf("WARN: stripe_health_check_interval (%v) must be ≤ stripe_path_degraded_recovery (%v); resetting health-check to default",
+			cfg.StripeHealthCheckInterval, cfg.StripePathDegradedRecovery)
+		cfg.StripeHealthCheckInterval = stripeHealthCheckInterval
+	}
 }
 
 func loadAndValidateDataplaneConfig(configPath string, cfg *Config) error {

@@ -205,6 +205,15 @@ type PathStats struct {
 	BindIP    string `json:"bind_ip"`
 	Alive     bool   `json:"alive"`
 
+	// Fast failover health-check (combo A+E).
+	Degraded             bool    `json:"degraded"`
+	LastRxMs             int64   `json:"last_rx_ms,omitempty"`
+	DegradedSinceMs      int64   `json:"degraded_since_ms,omitempty"`
+	DegradedTotal        uint64  `json:"degraded_total"`
+	BlackholeSecondsTotal float64 `json:"blackhole_seconds_total"`
+	FailoverTotal        uint64  `json:"failover_total"`
+	FailbackTotal        uint64  `json:"failback_total"`
+
 	TxBytes uint64 `json:"tx_bytes"`
 	TxPkts  uint64 `json:"tx_pkts"`
 	RxBytes uint64 `json:"rx_bytes"`
@@ -369,6 +378,18 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 			TxPkts:    atomic.LoadUint64(&p.txPackets),
 			RxPkts:    atomic.LoadUint64(&p.rxPackets),
 		}
+		// Combo A+E health-check fields (atomic-only reads).
+		ps.Degraded = atomic.LoadUint32(&p.degraded) == 1
+		if lastRx := atomic.LoadInt64(&p.lastRxNs); lastRx > 0 {
+			ps.LastRxMs = (time.Now().UnixNano() - lastRx) / int64(time.Millisecond)
+		}
+		if since := atomic.LoadInt64(&p.degradedSinceNs); since > 0 {
+			ps.DegradedSinceMs = (time.Now().UnixNano() - since) / int64(time.Millisecond)
+		}
+		ps.DegradedTotal = atomic.LoadUint64(&p.degradedTotal)
+		ps.BlackholeSecondsTotal = float64(atomic.LoadInt64(&p.blackholeNs)) / float64(time.Second)
+		ps.FailoverTotal = atomic.LoadUint64(&p.failoverTotal)
+		ps.FailbackTotal = atomic.LoadUint64(&p.failbackTotal)
 		if p.stripeConn != nil {
 			ps.StripeTxBytes = atomic.LoadUint64(&p.stripeConn.txBytes)
 			ps.StripeTxPkts = atomic.LoadUint64(&p.stripeConn.txPkts)
@@ -845,6 +866,53 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_path_rx_packets counter\n")
 		for _, p := range gs.Paths {
 			fmt.Fprintf(w, "mpquic_path_rx_packets{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.RxPkts)
+		}
+
+		// Combo A+E fast-failover health-check metrics.
+		fmt.Fprintf(w, "\n# HELP mpquic_path_degraded Path is degraded (1) or healthy (0) per healthCheckLoop.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_degraded gauge\n")
+		for _, p := range gs.Paths {
+			v := 0
+			if p.Degraded {
+				v = 1
+			}
+			fmt.Fprintf(w, "mpquic_path_degraded{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, v)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_last_rx_seconds Seconds since last RX seen on the path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_last_rx_seconds gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_last_rx_seconds{path=\"%s\",bind=\"%s\"} %.3f\n", p.Name, p.BindIP, float64(p.LastRxMs)/1000.0)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_degraded_since_seconds Seconds since alive→degraded transition (0 if healthy).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_degraded_since_seconds gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_degraded_since_seconds{path=\"%s\",bind=\"%s\"} %.3f\n", p.Name, p.BindIP, float64(p.DegradedSinceMs)/1000.0)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_degraded_total Total alive→degraded transitions.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_degraded_total counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_degraded_total{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.DegradedTotal)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_blackhole_seconds_total Cumulative seconds spent in degraded state.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_blackhole_seconds_total counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_blackhole_seconds_total{path=\"%s\",bind=\"%s\"} %.6f\n", p.Name, p.BindIP, p.BlackholeSecondsTotal)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_failover_total Total scheduling failovers triggered by degraded path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_failover_total counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_failover_total{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.FailoverTotal)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_failback_total Total degraded→healthy transitions.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_failback_total counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_failback_total{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.FailbackTotal)
 		}
 
 		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_tx_bytes Stripe bytes transmitted per path.\n")

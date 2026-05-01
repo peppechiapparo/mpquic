@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -32,6 +33,16 @@ type multipathPathState struct {
 	rxErrors         uint64
 	lastUp           time.Time
 	lastDown         time.Time
+
+	// atomic-only fields (no lock) — used by healthCheckLoop (single writer
+	// for `degraded`/`degradedSinceNs`) and by RX hooks that bump lastRxNs.
+	lastRxNs        int64  // UnixNano of last RX seen on this path
+	degraded        uint32 // single-writer (healthCheckLoop): 1 = silent > threshold
+	degradedSinceNs int64  // UnixNano of alive→degraded transition (0 when sane)
+	degradedTotal   uint64 // counter alive→degraded transitions
+	failoverTotal   uint64 // counter (mirrors degradedTotal for now)
+	failbackTotal   uint64 // counter degraded→healthy transitions
+	blackholeNs     int64  // cumulative ns spent in degraded state
 }
 
 type multipathConn struct {
@@ -216,6 +227,11 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 			state.alive = true
 			state.reconnecting = false
 			state.lastUp = time.Now()
+			// Initialize liveness baseline so healthCheckLoop never sees
+			// a zero `lastRxNs` for a freshly-alive path; wire the stripe
+			// RX hook to mirror updates into multipathPathState atomically.
+			atomic.StoreInt64(&state.lastRxNs, time.Now().UnixNano())
+			sc.SetLastRxPtr(&state.lastRxNs)
 			aliveCount++
 			logger.Infof("stripe path up name=%s pipes=%d", p.Name, p.Pipes)
 			continue
@@ -286,6 +302,9 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 		state.alive = true
 		state.reconnecting = false
 		state.lastUp = time.Now()
+		// Initialize liveness baseline for QUIC paths too: recvLoop bumps
+		// state.lastRxNs on every successful datagram.
+		atomic.StoreInt64(&state.lastRxNs, time.Now().UnixNano())
 		aliveCount++
 		logger.Infof("path up name=%s local=%s remote=%s", p.Name, udpConn.LocalAddr(), remoteUDP.String())
 	}
@@ -328,6 +347,7 @@ func newMultipathConn(ctx context.Context, cfg *Config, logger *Logger) (*multip
 	}
 
 	go mp.telemetryLoop(ctx)
+	go mp.healthCheckLoop(ctx)
 
 	return mp, nil
 }
@@ -468,6 +488,13 @@ func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip ma
 			if !p.alive || p.dc == nil {
 				continue
 			}
+			// Skip degraded paths in the regular pass; healthCheckLoop
+			// is the single writer of `degraded` and never mutates `alive`,
+			// so this is a pure scheduling hint. Best-of-bad fallback below
+			// picks the freshest degraded path if no healthy one is found.
+			if atomic.LoadUint32(&p.degraded) == 1 {
+				continue
+			}
 			if now.Before(p.cooldownUntil) {
 				continue
 			}
@@ -487,7 +514,41 @@ func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip ma
 	}
 
 	if bestIdx < 0 {
-		return -1, nil
+		// Best-of-bad fallback: every healthy path was excluded by the
+		// degraded filter (combo A+E). Pick the alive path with the most
+		// recent RX to minimize blackhole during recovery; tiebreak on
+		// fewer consecutiveFails. We do not loosen excluded/cooldown to
+		// preserve operator policy semantics.
+		var bestRx int64
+		for i := 0; i < len(m.paths); i++ {
+			idx := (start + i) % len(m.paths)
+			if skip != nil {
+				if _, blocked := skip[idx]; blocked {
+					continue
+				}
+			}
+			p := m.paths[idx]
+			if _, blocked := excluded[p.cfg.Name]; blocked {
+				continue
+			}
+			if p.cfg.BasePath != "" {
+				if _, blocked := excluded[p.cfg.BasePath]; blocked {
+					continue
+				}
+			}
+			if !p.alive || p.dc == nil {
+				continue
+			}
+			rx := atomic.LoadInt64(&p.lastRxNs)
+			if bestIdx < 0 || rx > bestRx ||
+				(rx == bestRx && p.consecutiveFails < m.paths[bestIdx].consecutiveFails) {
+				bestIdx = idx
+				bestRx = rx
+			}
+		}
+		if bestIdx < 0 {
+			return -1, nil
+		}
 	}
 
 	m.rr = (bestIdx + 1) % len(m.paths)
@@ -652,7 +713,7 @@ func (m *multipathConn) recvLoop(ctx context.Context, idx int) {
 			continue
 		}
 		m.onPathSuccess(idx)
-
+			atomic.StoreInt64(&m.paths[idx].lastRxNs, time.Now().UnixNano())
 		copyPkt := append([]byte(nil), pkt...)
 		select {
 		case <-ctx.Done():
@@ -800,6 +861,12 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 				if p.consecutiveFails > 0 {
 					p.consecutiveFails--
 				}
+				// Re-baseline liveness and re-cable RX pointer: the new
+				// stripeClientConn lost the previous SetLastRxPtr binding.
+				atomic.StoreInt64(&p.lastRxNs, time.Now().UnixNano())
+				atomic.StoreUint32(&p.degraded, 0)
+				atomic.StoreInt64(&p.degradedSinceNs, 0)
+				sc.SetLastRxPtr(&p.lastRxNs)
 			}
 			m.mu.Unlock()
 			m.logger.Infof("stripe path recovered name=%s pipes=%d", pcfg.Name, pcfg.Pipes)
@@ -906,6 +973,10 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 			if p.consecutiveFails > 0 {
 				p.consecutiveFails--
 			}
+			// Re-baseline liveness for QUIC reconnect.
+			atomic.StoreInt64(&p.lastRxNs, time.Now().UnixNano())
+			atomic.StoreUint32(&p.degraded, 0)
+			atomic.StoreInt64(&p.degradedSinceNs, 0)
 		}
 		m.mu.Unlock()
 
@@ -936,6 +1007,89 @@ func (m *multipathConn) telemetryLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.logTelemetrySnapshot()
+		}
+	}
+}
+
+// healthCheckLoop is the SINGLE WRITER of multipathPathState.degraded /
+// degradedSinceNs (combo A+E). It samples lastRxNs (mirrored by stripe RX
+// hook and by the QUIC recvLoop) and flips paths between healthy and
+// degraded based on silent-time thresholds. It does NOT mutate p.alive,
+// does NOT trigger reconnectLoop, and does NOT take m.mu — the loop only
+// reads len(m.paths) (paths slice is sized at init and never resized) and
+// uses atomic ops on the per-path counters.
+func (m *multipathConn) healthCheckLoop(ctx context.Context) {
+	interval := m.cfg.StripeHealthCheckInterval
+	if interval <= 0 {
+		interval = stripeHealthCheckInterval
+	}
+	threshold := m.cfg.StripePathDegradedThreshold
+	if threshold <= 0 {
+		threshold = stripePathDegradedThreshold
+	}
+	recovery := m.cfg.StripePathDegradedRecovery
+	if recovery <= 0 {
+		recovery = stripePathDegradedRecovery
+	}
+	thresholdNs := threshold.Nanoseconds()
+	recoveryNs := recovery.Nanoseconds()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		nowNs := time.Now().UnixNano()
+		// Snapshot path slice header under RLock to be safe vs future
+		// growth, but do not hold the lock during atomic ops below.
+		m.mu.RLock()
+		paths := m.paths
+		m.mu.RUnlock()
+
+		for _, p := range paths {
+			if p == nil {
+				continue
+			}
+			// alive is guarded by m.mu in writers, but a stale read
+			// here is acceptable: at worst we skip a tick on a path
+			// that just came up or down.
+			if !p.alive {
+				continue
+			}
+			lastRx := atomic.LoadInt64(&p.lastRxNs)
+			if lastRx == 0 {
+				continue
+			}
+			silentNs := nowNs - lastRx
+			if atomic.LoadUint32(&p.degraded) == 0 {
+				if silentNs > thresholdNs {
+					atomic.StoreUint32(&p.degraded, 1)
+					atomic.StoreInt64(&p.degradedSinceNs, nowNs)
+					atomic.AddUint64(&p.degradedTotal, 1)
+					atomic.AddUint64(&p.failoverTotal, 1)
+					m.logger.Errorf("path degraded name=%s silent=%v",
+						p.cfg.Name, time.Duration(silentNs))
+				}
+			} else {
+				if silentNs < recoveryNs {
+					since := atomic.LoadInt64(&p.degradedSinceNs)
+					var bh int64
+					if since > 0 {
+						bh = nowNs - since
+						atomic.AddInt64(&p.blackholeNs, bh)
+					}
+					atomic.AddUint64(&p.failbackTotal, 1)
+					atomic.StoreUint32(&p.degraded, 0)
+					atomic.StoreInt64(&p.degradedSinceNs, 0)
+					m.logger.Infof("path recovered name=%s blackhole=%v",
+						p.cfg.Name, time.Duration(bh))
+				}
+			}
 		}
 	}
 }

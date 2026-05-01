@@ -19,6 +19,11 @@ stripe_fec_mode: adaptive
 stripe_fec_type: rs
 stripe_fec_window: 10
 stripe_arq: true
+# ── Fast failover health-check (default mostrati, opzionali) ──
+# stripe_fast_keepalive_interval: 1s
+# stripe_path_degraded_threshold: 3s
+# stripe_path_degraded_recovery: 1s
+# stripe_health_check_interval: 500ms
 multipath_paths:
 - name: wan5
   bind_ip: if:enp7s7
