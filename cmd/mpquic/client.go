@@ -866,13 +866,9 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 				// (no race). Accumulate any unflushed blackhole time before
 				// clearing the degraded marker so metrics stay accurate when
 				// recovery is driven by reconnect rather than healthCheckLoop.
-				if since := atomic.LoadInt64(&p.degradedSinceNs); since > 0 {
-					atomic.AddInt64(&p.blackholeNs, time.Now().UnixNano()-since)
-					atomic.AddUint64(&p.failbackTotal, 1)
-				}
-				atomic.StoreInt64(&p.lastRxNs, time.Now().UnixNano())
-				atomic.StoreUint32(&p.degraded, 0)
-				atomic.StoreInt64(&p.degradedSinceNs, 0)
+				nowNs := time.Now().UnixNano()
+				flushDegradedOnReset(p, nowNs)
+				atomic.StoreInt64(&p.lastRxNs, nowNs)
 			}
 			m.mu.Unlock()
 			m.logger.Infof("stripe path recovered name=%s pipes=%d", pcfg.Name, pcfg.Pipes)
@@ -983,13 +979,9 @@ func (m *multipathConn) reconnectLoop(ctx context.Context, idx int) {
 			// unflushed blackhole time before clearing the degraded marker
 			// so metrics stay accurate when recovery is driven by reconnect
 			// rather than healthCheckLoop.
-			if since := atomic.LoadInt64(&p.degradedSinceNs); since > 0 {
-				atomic.AddInt64(&p.blackholeNs, time.Now().UnixNano()-since)
-				atomic.AddUint64(&p.failbackTotal, 1)
-			}
-			atomic.StoreInt64(&p.lastRxNs, time.Now().UnixNano())
-			atomic.StoreUint32(&p.degraded, 0)
-			atomic.StoreInt64(&p.degradedSinceNs, 0)
+			nowNs := time.Now().UnixNano()
+			flushDegradedOnReset(p, nowNs)
+			atomic.StoreInt64(&p.lastRxNs, nowNs)
 		}
 		m.mu.Unlock()
 
@@ -1022,6 +1014,69 @@ func (m *multipathConn) telemetryLoop(ctx context.Context) {
 			m.logTelemetrySnapshot()
 		}
 	}
+}
+
+// healthCheckTickPath applies one health-check tick on a single path.
+// It is the per-path body of healthCheckLoop, factored out for testability.
+// Uses atomic ops only; safe to call without holding m.mu as long as the
+// caller is the single writer of degraded/degradedSinceNs (healthCheckLoop
+// at runtime, the test goroutine in unit tests).
+func healthCheckTickPath(p *multipathPathState, nowNs, thresholdNs, recoveryNs int64, logger *Logger) {
+	if p == nil {
+		return
+	}
+	if !p.alive {
+		return
+	}
+	lastRx := atomic.LoadInt64(&p.lastRxNs)
+	if lastRx == 0 {
+		return
+	}
+	silentNs := nowNs - lastRx
+	if atomic.LoadUint32(&p.degraded) == 0 {
+		if silentNs > thresholdNs {
+			atomic.StoreUint32(&p.degraded, 1)
+			atomic.StoreInt64(&p.degradedSinceNs, nowNs)
+			atomic.AddUint64(&p.degradedTotal, 1)
+			atomic.AddUint64(&p.failoverTotal, 1)
+			if logger != nil {
+				logger.Errorf("path degraded name=%s silent=%v",
+					p.cfg.Name, time.Duration(silentNs))
+			}
+		}
+		return
+	}
+	if silentNs < recoveryNs {
+		since := atomic.LoadInt64(&p.degradedSinceNs)
+		var bh int64
+		if since > 0 {
+			bh = nowNs - since
+			atomic.AddInt64(&p.blackholeNs, bh)
+		}
+		atomic.AddUint64(&p.failbackTotal, 1)
+		atomic.StoreUint32(&p.degraded, 0)
+		atomic.StoreInt64(&p.degradedSinceNs, 0)
+		if logger != nil {
+			logger.Infof("path recovered name=%s blackhole=%v",
+				p.cfg.Name, time.Duration(bh))
+		}
+	}
+}
+
+// flushDegradedOnReset accumulates any pending blackhole time and clears the
+// degraded marker on a path that is being brought back up by reconnectLoop.
+// Returns the blackhole delta added (0 if path was not degraded). Does NOT
+// touch lastRxNs; the caller re-baselines it with its own time source.
+func flushDegradedOnReset(p *multipathPathState, nowNs int64) int64 {
+	var bh int64
+	if since := atomic.LoadInt64(&p.degradedSinceNs); since > 0 {
+		bh = nowNs - since
+		atomic.AddInt64(&p.blackholeNs, bh)
+		atomic.AddUint64(&p.failbackTotal, 1)
+	}
+	atomic.StoreUint32(&p.degraded, 0)
+	atomic.StoreInt64(&p.degradedSinceNs, 0)
+	return bh
 }
 
 // healthCheckLoop is the only writer of degraded/degradedSinceNs while the path is alive.
@@ -1065,44 +1120,10 @@ func (m *multipathConn) healthCheckLoop(ctx context.Context) {
 		m.mu.RUnlock()
 
 		for _, p := range paths {
-			if p == nil {
-				continue
-			}
 			// alive is guarded by m.mu in writers, but a stale read
 			// here is acceptable: at worst we skip a tick on a path
 			// that just came up or down.
-			if !p.alive {
-				continue
-			}
-			lastRx := atomic.LoadInt64(&p.lastRxNs)
-			if lastRx == 0 {
-				continue
-			}
-			silentNs := nowNs - lastRx
-			if atomic.LoadUint32(&p.degraded) == 0 {
-				if silentNs > thresholdNs {
-					atomic.StoreUint32(&p.degraded, 1)
-					atomic.StoreInt64(&p.degradedSinceNs, nowNs)
-					atomic.AddUint64(&p.degradedTotal, 1)
-					atomic.AddUint64(&p.failoverTotal, 1)
-					m.logger.Errorf("path degraded name=%s silent=%v",
-						p.cfg.Name, time.Duration(silentNs))
-				}
-			} else {
-				if silentNs < recoveryNs {
-					since := atomic.LoadInt64(&p.degradedSinceNs)
-					var bh int64
-					if since > 0 {
-						bh = nowNs - since
-						atomic.AddInt64(&p.blackholeNs, bh)
-					}
-					atomic.AddUint64(&p.failbackTotal, 1)
-					atomic.StoreUint32(&p.degraded, 0)
-					atomic.StoreInt64(&p.degradedSinceNs, 0)
-					m.logger.Infof("path recovered name=%s blackhole=%v",
-						p.cfg.Name, time.Duration(bh))
-				}
-			}
+			healthCheckTickPath(p, nowNs, thresholdNs, recoveryNs, m.logger)
 		}
 	}
 }

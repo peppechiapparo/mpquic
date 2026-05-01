@@ -378,3 +378,107 @@ Verifica:
 systemctl is-active mpquic-server-watchdog.timer
 journalctl -u mpquic-server-watchdog.service -n 50 --no-pager
 ```
+
+---
+
+## Test chaos mp1 fast failover A+E
+
+> Combo A+E (commit `4e36d0e` + fixup `e18dd08`): keepalive 1s, healthCheckLoop
+> 500 ms, soglia degraded 3 s, recovery 1 s. Obiettivo: blackhole ≤ 3.5 s su
+> failover stripe mp1 (Starlink wan5+wan6) anche se carrier resta UP ma il
+> backhaul è morto.
+
+Le ricette seguenti vanno eseguite **in produzione dal tech-lead** durante una
+run iperf3 (o ping ad alta cadenza) attraverso `mp1`. Tutti i comandi
+distruttivi includono il cleanup; eseguire sempre il cleanup anche in caso di
+errore nel test.
+
+### Recipe 1 — `nft` drop UDP su una WAN (carrier rimane UP)
+
+Esegui sull'OpenWrt CPE, mentre un iperf3 su `mp1` è in corso lato server:
+
+```bash
+# Setup chaos: blocca il traffico UDP della pipe 0 su wan6 (sport 6201).
+# Adatta sport al pipe configurato (vedi cmd/mpquic/stripe.go: stripeBaseSport).
+sudo nft add table inet chaos
+sudo nft 'add chain inet chaos out { type filter hook output priority 0; }'
+sudo nft 'add rule inet chaos out oifname "wan6" udp sport 6201 drop'
+
+# ... lascia girare 60 s e raccogli metriche (vedi Recipe 4) ...
+
+# Cleanup OBBLIGATORIO
+sudo nft delete table inet chaos
+```
+
+### Recipe 2 — `tc netem` con loss 100 % su una pipe
+
+Equivalente più aggressivo: disabilita interamente il device per il flusso UDP.
+
+```bash
+sudo tc qdisc add dev wan6 root netem loss 100%
+# ... 60 s di test ...
+sudo tc qdisc del dev wan6 root
+```
+
+> Nota: `tc netem` impatta anche eventuali flow non-stripe sul device. Preferire
+> `nft` (Recipe 1) quando la WAN è condivisa.
+
+### Recipe 3 — Acceptance criteria
+
+| Metrica | Soglia | Sorgente |
+|---|---|---|
+| Detection blackhole `mp1` | ≤ 3.5 s | `mpquic_path_degraded_since_seconds` ≥ 3 (poi ricovero) |
+| Loss totale finestra 60 s, policy `balanced`, 1 path su 2 down | ≤ 5 % | `iperf3 -u` o `ping` |
+| Tempo di fail-back dopo cleanup | ≤ 2 s | `mpquic_path_failback_total` += 1 |
+| Restart del servizio durante chaos | nessuno | `systemctl show mpquic@mp1 -p NRestarts` invariato |
+| Deadlock / panic | nessuno | `journalctl -u mpquic@mp1 --since "5 min ago" \| grep -E "panic\|fatal"` |
+| Throughput iperf3 (recovery dopo chaos) | ≥ 80 % nominal entro 5 s | `iperf3 -i 1` |
+
+### Recipe 4 — Lettura metriche live durante il test
+
+```bash
+watch -n 1 'curl -s http://10.10.11.100:9090/metrics \
+  | grep -E "mpquic_path_(alive|degraded|last_rx|blackhole|failover|failback)" \
+  | head -40'
+```
+
+Snapshot sincronizzato con il chaos (eseguire in parallelo a Recipe 1/2):
+
+```bash
+for i in $(seq 1 60); do
+  ts=$(date -u +%H:%M:%S)
+  echo "=== T+${i}s ${ts} ==="
+  curl -s http://10.10.11.100:9090/metrics \
+    | grep -E "^mpquic_path_(alive|degraded|degraded_since_seconds|blackhole_seconds_total|failover_total|failback_total)\{path=\"mp1\"" 
+  sleep 1
+done | tee /tmp/chaos_mp1_metrics.log
+```
+
+Esempio di output atteso al momento del flap:
+
+```
+mpquic_path_alive{path="mp1",bind="if:enp7s8"} 1
+mpquic_path_degraded{path="mp1",bind="if:enp7s8"} 1
+mpquic_path_degraded_since_seconds{path="mp1",bind="if:enp7s8"} 3.215
+mpquic_path_failover_total{path="mp1",bind="if:enp7s8"} 1
+mpquic_path_failback_total{path="mp1",bind="if:enp7s8"} 0
+```
+
+Dopo il cleanup (entro ≤ 2 s):
+
+```
+mpquic_path_degraded{path="mp1",bind="if:enp7s8"} 0
+mpquic_path_degraded_since_seconds{path="mp1",bind="if:enp7s8"} 0
+mpquic_path_failback_total{path="mp1",bind="if:enp7s8"} 1
+mpquic_path_blackhole_seconds_total{path="mp1",bind="if:enp7s8"} 3.215
+```
+
+### Note operative
+
+- Il `mpquic-tunnel-watchdog` ha la sua soglia di restart (vedi
+  `/etc/default/mpquic-watchdog`); verificare che non scatti un restart durante
+  i 60 s di chaos. Se scatta, il test è invalidato (rumore esterno).
+- Lo stesso test va ripetuto contro `wan5` (mirror simmetrico) per validare
+  entrambi i path.
+- I valori `mpquic_path_blackhole_seconds_total` sono cumulativi: confrontare il
+  delta pre/post chaos, non il valore assoluto.
