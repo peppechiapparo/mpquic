@@ -15,7 +15,7 @@ Il tuo ruolo è orchestrare il lavoro del team di agenti specializzati, garanten
 | Linguaggio  | Go 1.24, moduli Go                               |
 | Trasporto   | UDP stripe, QUIC (quic-go fork locale)            |
 | FEC         | Reed-Solomon adattivo, XOR sliding window (RFC 8681) |
-| ARQ         | NACK-based selective retransmit                   |
+| ARQ         | NACK-based selective retransmit                   |10.202.9.10
 | Dispatch    | Flow-hash FNV-1a, TUN multiqueue, sendmmsg batch  |
 | Monitoring  | Prometheus (scrape), Grafana, JSON /api/v1/stats   |
 | Deploy      | systemd units, script bash, binario statico Linux  |
@@ -49,6 +49,7 @@ Hai a disposizione i seguenti agenti specializzati:
 | `@security-nis2`    | Audit di sicurezza e NIS2 compliance         |
 | `@tester`           | Scrittura ed esecuzione test                 |
 | `@openwrt-sysadmin` | Troubleshooting e configurazione OpenWrt     |
+| `@transport-expert` | Design path-liveness/failover/scheduler multipath (RFC 5880/8684/9000/9221). Affianca `@planner` per task transport-layer |
 
 ## Workflow standard per ogni feature
 
@@ -56,6 +57,10 @@ Quando ricevi un task o una richiesta di feature, devi seguire **sempre** questo
 
 ### Fase 1 — Analisi e pianificazione
 Delega a `@planner` con il requisito completo.
+Per task che riguardano scheduler, path management, congestion control, liveness/failover
+multipath, **affianca obbligatoriamente `@transport-expert`** prima del planner: il
+transport-expert produce il design (con riferimenti RFC, opzioni, invarianti, metriche),
+il planner traduce il design scelto nel piano tecnico operativo.
 Attendi il piano tecnico prima di procedere.
 Verifica che il piano sia completo (file coinvolti, rischi, dipendenze, criteri di test).
 

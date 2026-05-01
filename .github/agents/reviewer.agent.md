@@ -35,6 +35,20 @@ Quando analizzi il codice devi verificare **tutti** i seguenti aspetti:
 - Il lock ordering è rispettato (ct.mu → grp.mu)?
 - I canali non rischiano deadlock o starvation?
 
+### Multipath path-management (anti-blackhole)
+- Ogni path multipath ha un meccanismo di liveness **sub-RTT indipendente dal kernel
+  carrier state**? (Su Starlink/cellular il carrier resta UP anche con backhaul morto.)
+- La rilevazione path-down avviene in ≤ 3s?
+- `lastRecv` (o equivalente freshness counter) viene aggiornato sia su DATA sia su
+  KEEPALIVE/CONTROL? (Altrimenti durante quiescenza anche path sani sembrano morti.)
+- Lo scheduler esclude path degradati senza chiudere la sessione (no restart storm)?
+- Esiste isteresi up/down per evitare flapping su microtagli?
+- Esiste un fallback "best of bad" quando tutti i path sono degradati (no nil)?
+- Per ogni nuova feature path-management è presente un test di chaos/link-flap nel
+  `@tester`?
+- Sono esposte metriche per path liveness (es. `mpquic_path_blackhole_seconds`,
+  `mpquic_path_degraded_total`)?
+
 ### Coerenza architetturale
 - Il codice rispetta i pattern del progetto (atomic counters, canali buffered, zero-alloc)?
 - I file sono nella directory corretta?

@@ -108,6 +108,57 @@ iperf3 -c 10.200.17.254 -R -P 30 -t 30
 curl -s http://10.200.17.254:9090/metrics | grep mpquic_dispatch_hit_total
 ```
 
+### Test di chaos / link-flap (multipath)
+
+Per ogni modifica che tocca scheduler, path management o liveness detection devi
+eseguire una batteria di test che simulano la perdita di un path nel modo più
+fedele possibile alla patologia reale (Starlink: carrier=1 ma backhaul morto).
+
+**Simulazione del path-down senza staccare cavi fisici**:
+
+```bash
+# Drop totale del traffico UDP stripe in uscita su una WAN (carrier resta UP)
+sudo nft add table inet chaos
+sudo nft add chain inet chaos out '{ type filter hook output priority 0; }'
+sudo nft add rule inet chaos out oifname "enp7s8" udp dport 46017 drop
+# ... esegui il test ...
+sudo nft delete table inet chaos    # ripristino
+```
+
+oppure con `tc netem`:
+
+```bash
+sudo tc qdisc add dev enp7s8 root netem loss 100%
+# ... test ...
+sudo tc qdisc del dev enp7s8 root
+```
+
+**Estrazione automatica metriche durante il chaos** (parallel a un ping/iperf):
+
+```bash
+for i in $(seq 1 60); do
+  echo "=== T+${i}s ==="; date +%H:%M:%S.%N
+  curl -s http://127.0.0.1:9090/api/v1/stats | jq '.paths[] | {name, alive, last_rx_ms, tx_pkts, rx_pkts, degraded}'
+  sleep 1
+done > /tmp/chaos_metrics.log &
+ping -I mp1 -W 1 -i 0.2 -c 300 10.200.17.254 > /tmp/chaos_ping.log
+```
+
+**Criteri di accettazione (MULTIPATH chaos test)**:
+
+| Metrica | Soglia |
+|---|---|
+| Blackhole massimo (no rx) | ≤ 3s |
+| Packet loss su finestra 60s con flap singolo path su 2 (policy balanced) | ≤ 5% |
+| Packet loss su finestra 60s con flap singolo path su 2 (policy failover) | ≤ 1% |
+| Tempo di fail-back dopo ripristino path | ≤ 2s |
+| Nessun restart del servizio durante il flap | NRestarts invariato |
+| Throughput iperf3 con flap a metà run | recupera >80% del nominale entro 5s |
+
+Questi test vanno eseguiti **prima** di qualsiasi deploy in produzione di codice che
+tocchi `client.go`, `stripe_client.go`, `stripe_server.go`, `connection_table.go`,
+`stripe.go`.
+
 ## Regole operative
 
 1. **Non modificare la logica applicativa** se non strettamente necessario per il testing.
