@@ -74,7 +74,11 @@
         },
         "showPercentChange": false,
         "textMode": "value_and_name",
-        "wideLayout": true
+        "wideLayout": true,
+        "text": {
+          "titleSize": 18,
+          "valueSize": 28
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -186,7 +190,11 @@
         },
         "showPercentChange": false,
         "textMode": "value_and_name",
-        "wideLayout": true
+        "wideLayout": true,
+        "text": {
+          "titleSize": 18,
+          "valueSize": 28
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -298,7 +306,11 @@
         },
         "showPercentChange": false,
         "textMode": "value_and_name",
-        "wideLayout": true
+        "wideLayout": true,
+        "text": {
+          "titleSize": 18,
+          "valueSize": 28
+        }
       },
       "fieldConfig": {
         "defaults": {
