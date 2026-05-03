@@ -2,26 +2,36 @@
   "id": null,
   "uid": "mpquic-demo",
   "title": "MPQUIC DEMO Connectivity",
+  "description": "Demo dashboard per scenario failover: BOND (Starlink+OneWeb) → fallback LTE/KVHTS/Telesat. Il pannello 'Failover Story' racconta visivamente il comportamento del sistema.",
   "tags": [
     "mpquic",
-    "demo"
+    "demo",
+    "failover"
   ],
   "timezone": "browser",
   "schemaVersion": 38,
-  "version": 1,
-  "refresh": "10s",
+  "version": 2,
+  "refresh": "5s",
   "time": {
-    "from": "now-1h",
+    "from": "now-15m",
     "to": "now"
   },
-  "timepicker": {},
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m"
+    ]
+  },
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "panels": [
     {
       "id": 1,
       "type": "row",
-      "title": "Stato Connettività live",
+      "title": "🟢 Stato Connettività Live",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -38,22 +48,23 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "Connettività reali",
+      "title": "Connettività",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Stato fisico delle connettività e del bonding aggregato.",
       "gridPos": {
         "x": 0,
         "y": 1,
         "w": 8,
-        "h": 8
+        "h": 5
       },
       "options": {
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto",
-        "orientation": "vertical",
+        "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -63,7 +74,7 @@
         },
         "showPercentChange": false,
         "textMode": "value_and_name",
-        "wideLayout": false
+        "wideLayout": true
       },
       "fieldConfig": {
         "defaults": {
@@ -105,7 +116,7 @@
       "targets": [
         {
           "expr": "up{job=\"mpquic-client\", instance_name=\"mp1\"}",
-          "legendFormat": "BONDING  (Starlink+OneWeb)",
+          "legendFormat": "BOND (Starlink+OneWeb)",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -114,7 +125,7 @@
           "instant": true
         },
         {
-          "expr": "max(up{job=\"mpquic-client\", wan=\"WAN6\"})",
+          "expr": "max(mpquic_path_alive{job=\"mpquic-client\", instance_name=\"mp1\", path=\"wan6\"})",
           "legendFormat": "Starlink LEO",
           "refId": "B",
           "datasource": {
@@ -124,7 +135,7 @@
           "instant": true
         },
         {
-          "expr": "max(up{job=\"mpquic-client\", wan=\"WAN5\"})",
+          "expr": "max(mpquic_path_alive{job=\"mpquic-client\", instance_name=\"mp1\", path=\"wan5\"})",
           "legendFormat": "OneWeb LEO",
           "refId": "C",
           "datasource": {
@@ -134,29 +145,9 @@
           "instant": true
         },
         {
-          "expr": "max(up{job=\"mpquic-client\", wan=\"WAN4\"})",
+          "expr": "max(up{job=\"mpquic-client\", wan=\"wan4\"})",
           "legendFormat": "LTE Mobile",
           "refId": "D",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "instant": true
-        },
-        {
-          "expr": "max(up{job=\"mpquic-client\", wan=\"WAN3\"})",
-          "legendFormat": "KVHTS GEO",
-          "refId": "E",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "instant": true
-        },
-        {
-          "expr": "max(up{job=\"mpquic-client\", wan=\"WAN2\"})",
-          "legendFormat": "Telesat LIGHTSPEED GEO",
-          "refId": "F",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -169,22 +160,23 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "MPQUIC",
+      "title": "Tunnel MPQUIC client",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Stato dei tunnel MPQUIC lato client (VM mpquic).",
       "gridPos": {
         "x": 8,
         "y": 1,
         "w": 8,
-        "h": 8
+        "h": 5
       },
       "options": {
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto",
-        "orientation": "vertical",
+        "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -194,7 +186,7 @@
         },
         "showPercentChange": false,
         "textMode": "value_and_name",
-        "wideLayout": false
+        "wideLayout": true
       },
       "fieldConfig": {
         "defaults": {
@@ -235,8 +227,8 @@
       },
       "targets": [
         {
-          "expr": "up{job=\"mpquic-client\", instance_name=\"mpq2\"}",
-          "legendFormat": "mpq2 — MPQUIC Channel 2",
+          "expr": "up{job=\"mpquic-client\", instance_name=\"mp1\"}",
+          "legendFormat": "mp1  — Stripe BOND1",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -245,8 +237,8 @@
           "instant": true
         },
         {
-          "expr": "up{job=\"mpquic-client\", instance_name=\"mpq3\"}",
-          "legendFormat": "mpq3 — MPQUIC Channel 3",
+          "expr": "up{job=\"mpquic-client\", instance_name=\"mpq6\"}",
+          "legendFormat": "mpq6 — Channel Starlink",
           "refId": "B",
           "datasource": {
             "type": "prometheus",
@@ -255,8 +247,8 @@
           "instant": true
         },
         {
-          "expr": "up{job=\"mpquic-client\", instance_name=\"mpq4\"}",
-          "legendFormat": "mpq4 — MPQUIC Channel 4",
+          "expr": "up{job=\"mpquic-client\", instance_name=\"mpq5\"}",
+          "legendFormat": "mpq5 — Channel OneWeb",
           "refId": "C",
           "datasource": {
             "type": "prometheus",
@@ -265,29 +257,9 @@
           "instant": true
         },
         {
-          "expr": "up{job=\"mpquic-client\", instance_name=\"mpq5\"}",
-          "legendFormat": "mpq5 — MPQUIC Channel 5",
+          "expr": "up{job=\"mpquic-client\", instance_name=\"mpq4\"}",
+          "legendFormat": "mpq4 — Channel LTE",
           "refId": "D",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "instant": true
-        },
-        {
-          "expr": "up{job=\"mpquic-client\", instance_name=\"mpq6\"}",
-          "legendFormat": "mpq6 — MPQUIC Channel 6",
-          "refId": "E",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "instant": true
-        },
-        {
-          "expr": "up{job=\"mpquic-client\", instance_name=\"mp1\"}",
-          "legendFormat": "mp1 — MPQUIC Stripe BOND1",
-          "refId": "F",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -300,22 +272,23 @@
     {
       "id": 4,
       "type": "stat",
-      "title": "Server",
+      "title": "Tunnel MPQUIC server",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Stato dei tunnel MPQUIC lato server (VPS).",
       "gridPos": {
         "x": 16,
         "y": 1,
         "w": 8,
-        "h": 8
+        "h": 5
       },
       "options": {
         "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto",
-        "orientation": "vertical",
+        "orientation": "horizontal",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -325,7 +298,7 @@
         },
         "showPercentChange": false,
         "textMode": "value_and_name",
-        "wideLayout": false
+        "wideLayout": true
       },
       "fieldConfig": {
         "defaults": {
@@ -366,8 +339,8 @@
       },
       "targets": [
         {
-          "expr": "up{job=\"mpquic-server\", instance_name=\"mt2\"}",
-          "legendFormat": "mt2 — Server MPQUIC Ch.2",
+          "expr": "up{job=\"mpquic-server\", instance_name=\"mp1\"}",
+          "legendFormat": "mp1 — Server BOND1",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -376,8 +349,8 @@
           "instant": true
         },
         {
-          "expr": "up{job=\"mpquic-server\", instance_name=\"mt3\"}",
-          "legendFormat": "mt3 — Server MPQUIC Ch.3",
+          "expr": "up{job=\"mpquic-server\", instance_name=\"mt6\"}",
+          "legendFormat": "mt6 — Server Starlink",
           "refId": "B",
           "datasource": {
             "type": "prometheus",
@@ -386,8 +359,8 @@
           "instant": true
         },
         {
-          "expr": "up{job=\"mpquic-server\", instance_name=\"mt4\"}",
-          "legendFormat": "mt4 — Server MPQUIC Ch.4",
+          "expr": "up{job=\"mpquic-server\", instance_name=\"mt5\"}",
+          "legendFormat": "mt5 — Server OneWeb",
           "refId": "C",
           "datasource": {
             "type": "prometheus",
@@ -396,29 +369,9 @@
           "instant": true
         },
         {
-          "expr": "up{job=\"mpquic-server\", instance_name=\"mt5\"}",
-          "legendFormat": "mt5 — Server MPQUIC Ch.5",
+          "expr": "up{job=\"mpquic-server\", instance_name=\"mt4\"}",
+          "legendFormat": "mt4 — Server LTE",
           "refId": "D",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "instant": true
-        },
-        {
-          "expr": "up{job=\"mpquic-server\", instance_name=\"mt6\"}",
-          "legendFormat": "mt6 — Server MPQUIC Ch.6",
-          "refId": "E",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "instant": true
-        },
-        {
-          "expr": "up{job=\"mpquic-server\", instance_name=\"mp1\"}",
-          "legendFormat": "mp1 — Server BOND1",
-          "refId": "F",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -431,11 +384,11 @@
     {
       "id": 5,
       "type": "row",
-      "title": "Sintesi Operativa",
+      "title": "🎯 Failover Story — Distribuzione del traffico in tempo reale",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 9,
+        "y": 6,
         "w": 24,
         "h": 1
       },
@@ -447,38 +400,52 @@
     },
     {
       "id": 6,
-      "type": "stat",
-      "title": "Uptime tunnel",
+      "type": "timeseries",
+      "title": "TX aggregato — BOND (Starlink + OneWeb) e fallback WAN",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Storia visiva del failover. La somma rimane stabile: quando stacchi Starlink, OneWeb assorbe il traffico; quando stacchi anche OneWeb, il traffico va su LTE/KVHTS/Telesat in priorità.",
       "gridPos": {
         "x": 0,
-        "y": 10,
-        "w": 8,
-        "h": 5
+        "y": 7,
+        "w": 24,
+        "h": 10
       },
       "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "vertical",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         },
-        "showPercentChange": false,
-        "textMode": "value_and_name",
-        "wideLayout": false
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
-          "mappings": [],
+          "unit": "bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 70,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "connectNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": true
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -489,16 +456,128 @@
             ]
           },
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "BOND · Starlink LEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF8C00"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "BOND · OneWeb LEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#4A90E2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fallback · LTE Mobile"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#F1C40F"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fallback · KVHTS GEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#E74C3C"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fallback · Telesat LIGHTSPEED GEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#9B59B6"
+                }
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
-          "expr": "mpquic_uptime_seconds{job=\"mpquic-client\", instance_name=~\"mp1|mpq[2-6]\"}",
-          "legendFormat": "{{instance_name}}",
+          "expr": "irate(mpquic_path_stripe_tx_bytes{job=\"mpquic-client\", instance_name=\"mp1\", path=\"wan6\"}[1m]) * 8",
+          "legendFormat": "BOND · Starlink LEO",
           "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "irate(mpquic_path_stripe_tx_bytes{job=\"mpquic-client\", instance_name=\"mp1\", path=\"wan5\"}[1m]) * 8",
+          "legendFormat": "BOND · OneWeb LEO",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan4\"}[$__rate_interval])) * 8",
+          "legendFormat": "Fallback · LTE Mobile",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan3\"}[$__rate_interval])) * 8",
+          "legendFormat": "Fallback · KVHTS GEO",
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan2\"}[$__rate_interval])) * 8",
+          "legendFormat": "Fallback · Telesat LIGHTSPEED GEO",
+          "refId": "E",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -509,38 +588,52 @@
     },
     {
       "id": 7,
-      "type": "stat",
-      "title": "Sessioni attive",
+      "type": "timeseries",
+      "title": "RX aggregato — BOND (Starlink + OneWeb) e fallback WAN",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Lato ricezione, mostra come il traffico ritorna distribuito sui path attivi.",
       "gridPos": {
-        "x": 8,
-        "y": 10,
-        "w": 4,
-        "h": 5
+        "x": 0,
+        "y": 17,
+        "w": 24,
+        "h": 10
       },
       "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
         },
-        "showPercentChange": false,
-        "textMode": "value_and_name",
-        "wideLayout": false
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "mappings": [],
+          "unit": "bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 70,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "connectNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": true
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -551,222 +644,144 @@
             ]
           },
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "BOND · Starlink LEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF8C00"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "BOND · OneWeb LEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#4A90E2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fallback · LTE Mobile"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#F1C40F"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fallback · KVHTS GEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#E74C3C"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fallback · Telesat LIGHTSPEED GEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#9B59B6"
+                }
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
-          "expr": "count(mpquic_session_pipes{job=\"mpquic-server\", instance_name=~\"mp1|mt[2-6]\"})",
-          "legendFormat": "sessioni",
+          "expr": "irate(mpquic_path_stripe_rx_bytes{job=\"mpquic-client\", instance_name=\"mp1\", path=\"wan6\"}[1m]) * 8",
+          "legendFormat": "BOND · Starlink LEO",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          },
-          "instant": true
+          }
+        },
+        {
+          "expr": "irate(mpquic_path_stripe_rx_bytes{job=\"mpquic-client\", instance_name=\"mp1\", path=\"wan5\"}[1m]) * 8",
+          "legendFormat": "BOND · OneWeb LEO",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan4\"}[$__rate_interval])) * 8",
+          "legendFormat": "Fallback · LTE Mobile",
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan3\"}[$__rate_interval])) * 8",
+          "legendFormat": "Fallback · KVHTS GEO",
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan2\"}[$__rate_interval])) * 8",
+          "legendFormat": "Fallback · Telesat LIGHTSPEED GEO",
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
         }
       ],
       "pluginVersion": "12.4.1"
     },
     {
       "id": 8,
-      "type": "stat",
-      "title": "Path attivi",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 10,
-        "w": 4,
-        "h": 5
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "value_and_name",
-        "wideLayout": false
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "sum(mpquic_path_alive{job=\"mpquic-client\", instance_name=~\"mp1|mpq[2-6]\"})",
-          "legendFormat": "path",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "instant": true
-        }
-      ],
-      "pluginVersion": "12.4.1"
-    },
-    {
-      "id": 9,
-      "type": "stat",
-      "title": "TX totale",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 10,
-        "w": 4,
-        "h": 5
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "value_and_name",
-        "wideLayout": false
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "sum(mpquic_tx_bytes_total{job=\"mpquic-client\"})",
-          "legendFormat": "TX totale",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "instant": true
-        }
-      ],
-      "pluginVersion": "12.4.1"
-    },
-    {
-      "id": 10,
-      "type": "stat",
-      "title": "RX totale",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 20,
-        "y": 10,
-        "w": 4,
-        "h": 5
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "value_and_name",
-        "wideLayout": false
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "sum(mpquic_rx_bytes_total{job=\"mpquic-client\"})",
-          "legendFormat": "RX totale",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "instant": true
-        }
-      ],
-      "pluginVersion": "12.4.1"
-    },
-    {
-      "id": 11,
       "type": "row",
-      "title": "BOND1 — mp1 (Starlink LEO + OneWeb LEO)",
+      "title": "📡 BOND1 — Dettaglio Multipath (mp1: Starlink + OneWeb)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 15,
+        "y": 27,
         "w": 24,
         "h": 1
       },
@@ -777,17 +792,18 @@
       }
     },
     {
-      "id": 12,
+      "id": 9,
       "type": "stat",
-      "title": "Path status (mp1)",
+      "title": "Path Status BOND1",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Stato dei singoli path che compongono il BOND.",
       "gridPos": {
         "x": 0,
-        "y": 16,
-        "w": 6,
+        "y": 28,
+        "w": 8,
         "h": 4
       },
       "options": {
@@ -804,7 +820,7 @@
         },
         "showPercentChange": false,
         "textMode": "value_and_name",
-        "wideLayout": false
+        "wideLayout": true
       },
       "fieldConfig": {
         "defaults": {
@@ -845,36 +861,48 @@
       },
       "targets": [
         {
-          "expr": "mpquic_path_alive{job=\"mpquic-client\", instance_name=\"mp1\"}",
-          "legendFormat": "{{path}}",
+          "expr": "mpquic_path_alive{job=\"mpquic-client\", instance_name=\"mp1\", path=\"wan6\"}",
+          "legendFormat": "Starlink LEO (wan6)",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "instant": true
+        },
+        {
+          "expr": "mpquic_path_alive{job=\"mpquic-client\", instance_name=\"mp1\", path=\"wan5\"}",
+          "legendFormat": "OneWeb LEO  (wan5)",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true
         }
       ],
       "pluginVersion": "12.4.1"
     },
     {
-      "id": 13,
+      "id": 10,
       "type": "stat",
-      "title": "Pipe per sessione",
+      "title": "Sessioni BOND",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "",
       "gridPos": {
-        "x": 6,
-        "y": 16,
-        "w": 6,
+        "x": 8,
+        "y": 28,
+        "w": 4,
         "h": 4
       },
       "options": {
         "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "auto",
-        "orientation": "horizontal",
+        "orientation": "auto",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -884,7 +912,75 @@
         },
         "showPercentChange": false,
         "textMode": "value_and_name",
-        "wideLayout": false
+        "wideLayout": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "count(mpquic_session_pipes{job=\"mpquic-server\", instance_name=\"mp1\"})",
+          "legendFormat": "sessioni",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "instant": true
+        }
+      ],
+      "pluginVersion": "12.4.1"
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Adaptive FEC M",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "",
+      "gridPos": {
+        "x": 12,
+        "y": 28,
+        "w": 4,
+        "h": 4
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "value_and_name",
+        "wideLayout": true
       },
       "fieldConfig": {
         "defaults": {
@@ -907,29 +1003,31 @@
       },
       "targets": [
         {
-          "expr": "mpquic_session_pipes{job=\"mpquic-server\", instance_name=\"mp1\"}",
-          "legendFormat": "sess {{session}}",
+          "expr": "avg(mpquic_session_adaptive_m{job=\"mpquic-server\", instance_name=\"mp1\"})",
+          "legendFormat": "M",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "instant": true
         }
       ],
       "pluginVersion": "12.4.1"
     },
     {
-      "id": 14,
+      "id": 12,
       "type": "stat",
       "title": "Session uptime",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "",
       "gridPos": {
-        "x": 12,
-        "y": 16,
-        "w": 6,
+        "x": 16,
+        "y": 28,
+        "w": 8,
         "h": 4
       },
       "options": {
@@ -946,7 +1044,7 @@
         },
         "showPercentChange": false,
         "textMode": "value_and_name",
-        "wideLayout": false
+        "wideLayout": true
       },
       "fieldConfig": {
         "defaults": {
@@ -981,78 +1079,17 @@
       "pluginVersion": "12.4.1"
     },
     {
-      "id": 15,
-      "type": "stat",
-      "title": "Adaptive FEC M",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 18,
-        "y": 16,
-        "w": 6,
-        "h": 4
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "value_and_name",
-        "wideLayout": false
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "mpquic_session_adaptive_m{job=\"mpquic-server\", instance_name=\"mp1\"}",
-          "legendFormat": "sess {{session}}",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          }
-        }
-      ],
-      "pluginVersion": "12.4.1"
-    },
-    {
-      "id": 16,
+      "id": 13,
       "type": "timeseries",
-      "title": "TX rate per path — stripe (mp1)",
+      "title": "TX per path BOND — Starlink vs OneWeb",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Mostra come il bonding distribuisce il traffico TX tra i due path LEO.",
       "gridPos": {
         "x": 0,
-        "y": 20,
+        "y": 32,
         "w": 12,
         "h": 8
       },
@@ -1074,14 +1111,20 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bps",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
+            "fillOpacity": 25,
+            "gradientMode": "opacity",
             "showPoints": "never",
-            "connectNulls": true
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
           },
           "thresholds": {
             "mode": "absolute",
@@ -1096,12 +1139,277 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Starlink LEO (wan6)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF8C00"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "OneWeb LEO (wan5)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#4A90E2"
+                }
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
-          "expr": "irate(mpquic_path_stripe_tx_bytes{job=\"mpquic-client\", instance_name=\"mp1\"}[1m]) * 8",
-          "legendFormat": "{{path}}",
+          "expr": "irate(mpquic_path_stripe_tx_bytes{job=\"mpquic-client\", instance_name=\"mp1\", path=\"wan6\"}[1m]) * 8",
+          "legendFormat": "Starlink LEO (wan6)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "irate(mpquic_path_stripe_tx_bytes{job=\"mpquic-client\", instance_name=\"mp1\", path=\"wan5\"}[1m]) * 8",
+          "legendFormat": "OneWeb LEO (wan5)",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "pluginVersion": "12.4.1"
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "RX per path BOND — Starlink vs OneWeb",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Distribuzione RX tra i path del bonding.",
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 25,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Starlink LEO (wan6)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF8C00"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "OneWeb LEO (wan5)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#4A90E2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "irate(mpquic_path_stripe_rx_bytes{job=\"mpquic-client\", instance_name=\"mp1\", path=\"wan6\"}[1m]) * 8",
+          "legendFormat": "Starlink LEO (wan6)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "expr": "irate(mpquic_path_stripe_rx_bytes{job=\"mpquic-client\", instance_name=\"mp1\", path=\"wan5\"}[1m]) * 8",
+          "legendFormat": "OneWeb LEO (wan5)",
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "pluginVersion": "12.4.1"
+    },
+    {
+      "id": 15,
+      "type": "row",
+      "title": "📊 Traffico Client per WAN (drill-down)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [],
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "TX — Starlink LEO",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Traffico TX su Starlink LEO (wan6). Somma di tutti i tunnel client che la usano.",
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 12,
+        "h": 7
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Starlink LEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF8C00"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan6\"}[$__rate_interval])) * 8",
+          "legendFormat": "Starlink LEO",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1114,16 +1422,17 @@
     {
       "id": 17,
       "type": "timeseries",
-      "title": "RX rate per path — stripe (mp1)",
+      "title": "RX — Starlink LEO",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Traffico RX su Starlink LEO (wan6).",
       "gridPos": {
         "x": 12,
-        "y": 20,
+        "y": 41,
         "w": 12,
-        "h": 8
+        "h": 7
       },
       "options": {
         "tooltip": {
@@ -1143,14 +1452,20 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bps",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
             "showPoints": "never",
-            "connectNulls": true
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
           },
           "thresholds": {
             "mode": "absolute",
@@ -1165,12 +1480,28 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Starlink LEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#FF8C00"
+                }
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
-          "expr": "irate(mpquic_path_stripe_rx_bytes{job=\"mpquic-client\", instance_name=\"mp1\"}[1m]) * 8",
-          "legendFormat": "{{path}}",
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan6\"}[$__rate_interval])) * 8",
+          "legendFormat": "Starlink LEO",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1183,16 +1514,17 @@
     {
       "id": 18,
       "type": "timeseries",
-      "title": "TX rate per sessione — server mp1",
+      "title": "TX — OneWeb LEO",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Traffico TX su OneWeb LEO (wan5). Somma di tutti i tunnel client che la usano.",
       "gridPos": {
         "x": 0,
-        "y": 28,
+        "y": 48,
         "w": 12,
-        "h": 8
+        "h": 7
       },
       "options": {
         "tooltip": {
@@ -1212,14 +1544,20 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bps",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
             "showPoints": "never",
-            "connectNulls": true
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
           },
           "thresholds": {
             "mode": "absolute",
@@ -1234,12 +1572,28 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "OneWeb LEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#4A90E2"
+                }
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
-          "expr": "irate(mpquic_session_tx_bytes{job=\"mpquic-server\", instance_name=\"mp1\"}[1m]) * 8",
-          "legendFormat": "sess {{session}}",
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan5\"}[$__rate_interval])) * 8",
+          "legendFormat": "OneWeb LEO",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1252,16 +1606,17 @@
     {
       "id": 19,
       "type": "timeseries",
-      "title": "RX rate per sessione — server mp1",
+      "title": "RX — OneWeb LEO",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Traffico RX su OneWeb LEO (wan5).",
       "gridPos": {
         "x": 12,
-        "y": 28,
+        "y": 48,
         "w": 12,
-        "h": 8
+        "h": 7
       },
       "options": {
         "tooltip": {
@@ -1281,14 +1636,20 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bps",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
             "showPoints": "never",
-            "connectNulls": true
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
           },
           "thresholds": {
             "mode": "absolute",
@@ -1303,12 +1664,28 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "OneWeb LEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#4A90E2"
+                }
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
-          "expr": "irate(mpquic_session_rx_bytes{job=\"mpquic-server\", instance_name=\"mp1\"}[1m]) * 8",
-          "legendFormat": "sess {{session}}",
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan5\"}[$__rate_interval])) * 8",
+          "legendFormat": "OneWeb LEO",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1320,34 +1697,18 @@
     },
     {
       "id": 20,
-      "type": "row",
-      "title": "Traffico client per WAN",
-      "collapsed": false,
-      "gridPos": {
-        "x": 0,
-        "y": 36,
-        "w": 24,
-        "h": 1
-      },
-      "panels": [],
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      }
-    },
-    {
-      "id": 21,
       "type": "timeseries",
-      "title": "TX — Starlink LEO",
+      "title": "TX — LTE Mobile",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Traffico TX su LTE Mobile (wan4). Somma di tutti i tunnel client che la usano.",
       "gridPos": {
         "x": 0,
-        "y": 37,
+        "y": 55,
         "w": 12,
-        "h": 8
+        "h": 7
       },
       "options": {
         "tooltip": {
@@ -1367,14 +1728,20 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bps",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
             "showPoints": "never",
-            "connectNulls": true
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
           },
           "thresholds": {
             "mode": "absolute",
@@ -1389,12 +1756,120 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "LTE Mobile"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#F1C40F"
+                }
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
-          "expr": "irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"WAN6\", instance_name=~\"mpq[2-6]|mp1\"}[$__rate_interval]) * 8",
-          "legendFormat": "{{instance_name}}",
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan4\"}[$__rate_interval])) * 8",
+          "legendFormat": "LTE Mobile",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "pluginVersion": "12.4.1"
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "RX — LTE Mobile",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Traffico RX su LTE Mobile (wan4).",
+      "gridPos": {
+        "x": 12,
+        "y": 55,
+        "w": 12,
+        "h": 7
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
+            "showPoints": "never",
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "LTE Mobile"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#F1C40F"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan4\"}[$__rate_interval])) * 8",
+          "legendFormat": "LTE Mobile",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1407,16 +1882,17 @@
     {
       "id": 22,
       "type": "timeseries",
-      "title": "RX — Starlink LEO",
+      "title": "TX — KVHTS GEO",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Traffico TX su KVHTS GEO (wan3). Somma di tutti i tunnel client che la usano.",
       "gridPos": {
-        "x": 12,
-        "y": 37,
+        "x": 0,
+        "y": 62,
         "w": 12,
-        "h": 8
+        "h": 7
       },
       "options": {
         "tooltip": {
@@ -1436,14 +1912,20 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bps",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
             "showPoints": "never",
-            "connectNulls": true
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
           },
           "thresholds": {
             "mode": "absolute",
@@ -1458,12 +1940,28 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "KVHTS GEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#E74C3C"
+                }
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
-          "expr": "irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"WAN6\", instance_name=~\"mpq[2-6]|mp1\"}[$__rate_interval]) * 8",
-          "legendFormat": "{{instance_name}}",
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan3\"}[$__rate_interval])) * 8",
+          "legendFormat": "KVHTS GEO",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1476,16 +1974,17 @@
     {
       "id": 23,
       "type": "timeseries",
-      "title": "TX — OneWeb LEO",
+      "title": "RX — KVHTS GEO",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Traffico RX su KVHTS GEO (wan3).",
       "gridPos": {
-        "x": 0,
-        "y": 45,
+        "x": 12,
+        "y": 62,
         "w": 12,
-        "h": 8
+        "h": 7
       },
       "options": {
         "tooltip": {
@@ -1505,14 +2004,20 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bps",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
             "showPoints": "never",
-            "connectNulls": true
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
           },
           "thresholds": {
             "mode": "absolute",
@@ -1527,12 +2032,28 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "KVHTS GEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#E74C3C"
+                }
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
-          "expr": "irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"WAN5\", instance_name=~\"mpq[2-6]|mp1\"}[$__rate_interval]) * 8",
-          "legendFormat": "{{instance_name}}",
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan3\"}[$__rate_interval])) * 8",
+          "legendFormat": "KVHTS GEO",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1545,16 +2066,17 @@
     {
       "id": 24,
       "type": "timeseries",
-      "title": "RX — OneWeb LEO",
+      "title": "TX — Telesat LIGHTSPEED GEO",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Traffico TX su Telesat LIGHTSPEED GEO (wan2). Somma di tutti i tunnel client che la usano.",
       "gridPos": {
-        "x": 12,
-        "y": 45,
+        "x": 0,
+        "y": 69,
         "w": 12,
-        "h": 8
+        "h": 7
       },
       "options": {
         "tooltip": {
@@ -1574,14 +2096,20 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bps",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
             "showPoints": "never",
-            "connectNulls": true
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
           },
           "thresholds": {
             "mode": "absolute",
@@ -1596,12 +2124,28 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Telesat LIGHTSPEED GEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#9B59B6"
+                }
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
-          "expr": "irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"WAN5\", instance_name=~\"mpq[2-6]|mp1\"}[$__rate_interval]) * 8",
-          "legendFormat": "{{instance_name}}",
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan2\"}[$__rate_interval])) * 8",
+          "legendFormat": "Telesat LIGHTSPEED GEO",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1614,16 +2158,17 @@
     {
       "id": 25,
       "type": "timeseries",
-      "title": "TX — LTE Mobile",
+      "title": "RX — Telesat LIGHTSPEED GEO",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Traffico RX su Telesat LIGHTSPEED GEO (wan2).",
       "gridPos": {
-        "x": 0,
-        "y": 53,
+        "x": 12,
+        "y": 69,
         "w": 12,
-        "h": 8
+        "h": 7
       },
       "options": {
         "tooltip": {
@@ -1643,14 +2188,20 @@
       "fieldConfig": {
         "defaults": {
           "unit": "bps",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
+            "fillOpacity": 30,
+            "gradientMode": "opacity",
             "showPoints": "never",
-            "connectNulls": true
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
           },
           "thresholds": {
             "mode": "absolute",
@@ -1665,12 +2216,28 @@
             "mode": "palette-classic"
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Telesat LIGHTSPEED GEO"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#9B59B6"
+                }
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
-          "expr": "irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"WAN4\", instance_name=~\"mpq[2-6]|mp1\"}[$__rate_interval]) * 8",
-          "legendFormat": "{{instance_name}}",
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan2\"}[$__rate_interval])) * 8",
+          "legendFormat": "Telesat LIGHTSPEED GEO",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -1682,357 +2249,12 @@
     },
     {
       "id": 26,
-      "type": "timeseries",
-      "title": "RX — LTE Mobile",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 53,
-        "w": 12,
-        "h": 8
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "mean",
-            "max",
-            "lastNotNull"
-          ]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bps",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "showPoints": "never",
-            "connectNulls": true
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"WAN4\", instance_name=~\"mpq[2-6]|mp1\"}[$__rate_interval]) * 8",
-          "legendFormat": "{{instance_name}}",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          }
-        }
-      ],
-      "pluginVersion": "12.4.1"
-    },
-    {
-      "id": 27,
-      "type": "timeseries",
-      "title": "TX — KVHTS GEO",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 61,
-        "w": 12,
-        "h": 8
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "mean",
-            "max",
-            "lastNotNull"
-          ]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bps",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "showPoints": "never",
-            "connectNulls": true
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"WAN3\", instance_name=~\"mpq[2-6]|mp1\"}[$__rate_interval]) * 8",
-          "legendFormat": "{{instance_name}}",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          }
-        }
-      ],
-      "pluginVersion": "12.4.1"
-    },
-    {
-      "id": 28,
-      "type": "timeseries",
-      "title": "RX — KVHTS GEO",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 61,
-        "w": 12,
-        "h": 8
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "mean",
-            "max",
-            "lastNotNull"
-          ]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bps",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "showPoints": "never",
-            "connectNulls": true
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"WAN3\", instance_name=~\"mpq[2-6]|mp1\"}[$__rate_interval]) * 8",
-          "legendFormat": "{{instance_name}}",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          }
-        }
-      ],
-      "pluginVersion": "12.4.1"
-    },
-    {
-      "id": 29,
-      "type": "timeseries",
-      "title": "TX — Telesat LIGHTSPEED GEO",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 69,
-        "w": 12,
-        "h": 8
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "mean",
-            "max",
-            "lastNotNull"
-          ]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bps",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "showPoints": "never",
-            "connectNulls": true
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"WAN2\", instance_name=~\"mpq[2-6]|mp1\"}[$__rate_interval]) * 8",
-          "legendFormat": "{{instance_name}}",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          }
-        }
-      ],
-      "pluginVersion": "12.4.1"
-    },
-    {
-      "id": 30,
-      "type": "timeseries",
-      "title": "RX — Telesat LIGHTSPEED GEO",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 69,
-        "w": 12,
-        "h": 8
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "mean",
-            "max",
-            "lastNotNull"
-          ]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bps",
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "showPoints": "never",
-            "connectNulls": true
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"WAN2\", instance_name=~\"mpq[2-6]|mp1\"}[$__rate_interval]) * 8",
-          "legendFormat": "{{instance_name}}",
-          "refId": "A",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          }
-        }
-      ],
-      "pluginVersion": "12.4.1"
-    },
-    {
-      "id": 31,
       "type": "row",
-      "title": "Qualità — FEC / ARQ / Loss (server mp1)",
+      "title": "🛡️ Qualità — FEC / ARQ / Loss (server mp1)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 77,
+        "y": 76,
         "w": 24,
         "h": 1
       },
@@ -2043,16 +2265,17 @@
       }
     },
     {
-      "id": 32,
+      "id": 27,
       "type": "timeseries",
-      "title": "Loss rate per session (%)",
+      "title": "Loss rate (%)",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Tasso di perdita pacchetti per sessione (lato server).",
       "gridPos": {
         "x": 0,
-        "y": 78,
+        "y": 77,
         "w": 8,
         "h": 8
       },
@@ -2074,14 +2297,20 @@
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
+            "fillOpacity": 20,
+            "gradientMode": "opacity",
             "showPoints": "never",
-            "connectNulls": true
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
           },
           "thresholds": {
             "mode": "absolute",
@@ -2112,16 +2341,17 @@
       "pluginVersion": "12.4.1"
     },
     {
-      "id": 33,
+      "id": 28,
       "type": "timeseries",
       "title": "FEC recovery rate",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Pacchetti recuperati grazie a Forward Error Correction.",
       "gridPos": {
         "x": 8,
-        "y": 78,
+        "y": 77,
         "w": 8,
         "h": 8
       },
@@ -2143,14 +2373,20 @@
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
+            "fillOpacity": 20,
+            "gradientMode": "opacity",
             "showPoints": "never",
-            "connectNulls": true
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
           },
           "thresholds": {
             "mode": "absolute",
@@ -2181,16 +2417,17 @@
       "pluginVersion": "12.4.1"
     },
     {
-      "id": 34,
+      "id": 29,
       "type": "timeseries",
-      "title": "ARQ — NACK / Retransmit / Dup",
+      "title": "ARQ — NACK / Retransmit / Duplicati",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
+      "description": "Attività ARQ: NACK inviati, ritrasmissioni ricevute, duplicati filtrati.",
       "gridPos": {
         "x": 16,
-        "y": 78,
+        "y": 77,
         "w": 8,
         "h": 8
       },
@@ -2212,14 +2449,20 @@
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
+          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "smooth",
             "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "none",
+            "fillOpacity": 20,
+            "gradientMode": "opacity",
             "showPoints": "never",
-            "connectNulls": true
+            "connectNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": true
           },
           "thresholds": {
             "mode": "absolute",
