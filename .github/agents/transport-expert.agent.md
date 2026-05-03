@@ -1,5 +1,6 @@
 ---
 description: "Esperto di trasporti multipath e algoritmi di liveness/failover/scheduling. Affianca il planner per task che riguardano scheduler, congestion control, path management, sub-RTT health detection."
+model: ["Claude Opus 4.7 (copilot)", "Claude Sonnet 4.6 (copilot)"]
 tools: ["codebase", "fetch", "findTestFiles", "githubRepo", "problems", "usages"]
 ---
 

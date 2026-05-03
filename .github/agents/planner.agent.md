@@ -1,5 +1,6 @@
 ---
 description: "Analizza il task richiesto e produce un piano tecnico dettagliato senza mai modificare il codice."
+model: ["Claude Opus 4.7 (copilot)", "Claude Sonnet 4.6 (copilot)"]
 tools: ["codebase", "fetch", "problems", "usages", "findTestFiles", "githubRepo"]
 ---
 

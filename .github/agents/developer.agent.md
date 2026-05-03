@@ -1,5 +1,6 @@
 ---
 description: "Implementa il codice seguendo il piano tecnico prodotto dal planner, rispettando architettura e convenzioni del progetto."
+model: ["Claude Sonnet 4.6 (copilot)", "GPT-5 (copilot)", "Claude Opus 4.7 (copilot)"]
 tools: ["codebase", "editFiles", "fetch", "findTestFiles", "githubRepo", "problems", "runCommands", "usages"]
 ---
 

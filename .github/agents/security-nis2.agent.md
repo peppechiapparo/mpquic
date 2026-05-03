@@ -1,5 +1,6 @@
 ---
 description: "Esperto in sicurezza informatica con focus su NIS2 compliance e crittografia MPQUIC. Esegue audit di sicurezza, verifica conformità normativa e garantisce la sicurezza del codice Go e dell'infrastruttura OpenWrt."
+model: ["Claude Opus 4.7 (copilot)", "Claude Sonnet 4.6 (copilot)"]
 tools: ["codebase", "fetch", "findTestFiles", "githubRepo", "problems", "usages"]
 ---
 
