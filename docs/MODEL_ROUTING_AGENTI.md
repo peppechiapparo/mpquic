@@ -48,19 +48,48 @@ tools: [...]
 | Deploy, restart, scp      | GPT-4.1 / Haiku           | Banale, output strutturato |
 | Conversazione/orchestrazione | Sonnet                 | Coordina ma non scrive codice |
 
-## 3. Workaround per task-routing dentro lo stesso agente
+## 3. Delega programmatica con il tool `agent` (runSubagent)
 
-VS Code non permette switch di modello a metà conversazione. Soluzione: **crea subagent dedicati** per task ripetitivi e leggeri, e istruisci il parent a delegarli.
+VS Code supporta delega **programmatica** tra agenti tramite il tool `agent/runSubagent`.
+Quando un orchestratore lo chiama, VS Code apre una sotto-conversazione isolata con il
+subagent scelto, che gira sul **suo** modello (quello del suo frontmatter, non del padre).
+Il padre riceve solo il **summary finale** — il contesto operativo del subagent non scala
+sul modello costoso dell'orchestratore. Questo è il risparmio token più concreto.
 
-Esempio in questo repo:
-- `.github/agents/git-ops.agent.md` — usa `GPT-4.1`, gestisce solo git
-- `.github/agents/deploy-ops.agent.md` — usa `GPT-4.1`, gestisce solo scp/restart
+### Prerequisito fondamentale
 
-Nel `tech-lead.agent.md` (parent) c'è la regola:
+Il tool `agent/runSubagent` **deve essere presente nella lista `tools:` del padre**.
+Senza di esso, la delega programmatica non funziona — il padre può solo menzionare
+`@git-ops` nel testo, ma non invocarlo come subagent isolato.
 
-> Per operazioni git → delega a `@git-ops`. Per scp/restart → delega a `@deploy-ops`.
+```yaml
+# Frontmatter dell'orchestratore — "agent" abilita la delega
+tools: ["agent", "codebase", "editFiles", ...]
+```
 
-Quando il parent delega, VS Code crea una sotto-conversazione con il modello del subagent. Il parent riceve solo il summary finale, risparmiando token.
+### Chi ha il tool `agent` in questo repo
+
+| Agente              | Ha `agent` in tools? | Perché |
+|---------------------|----------------------|--------|
+| `tech-lead`         | ✅ Sì               | Orchestratore principale |
+| `developer`         | ✅ Sì               | Delega git dopo implementazione |
+| `python-developer`  | ✅ Sì               | Delega git/deploy dopo modifiche Python |
+| `git-ops`           | ❌ No               | Foglia — non orchestra nessuno |
+| `deploy-ops`        | ❌ No               | Foglia — non orchestra nessuno |
+| `planner`           | ❌ No               | Foglia — produce piani, non delega |
+| `reviewer`          | ❌ No               | Foglia |
+| `tester`            | ❌ No               | Foglia |
+| `security-nis2`     | ❌ No               | Foglia |
+| `openwrt-sysadmin`  | ❌ No               | Foglia |
+| `transport-expert`  | ❌ No               | Foglia |
+
+**Regola**: solo gli orchestratori che devono invocare subagent hanno `"agent"` in tools.
+I subagent foglie **non** lo devono avere — evita catene di deleghe infinite.
+
+### Subagent disponibili
+
+- `.github/agents/git-ops.agent.md` — GPT-4.1, solo operazioni git
+- `.github/agents/deploy-ops.agent.md` — GPT-4.1, solo scp/restart/journalctl
 
 ## 4. Replicare su altri progetti
 
