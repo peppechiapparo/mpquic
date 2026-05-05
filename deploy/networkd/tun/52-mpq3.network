@@ -1,0 +1,14 @@
+# TUN mpq3 — route persistente in table wan3 (102)
+# Ripristina automaticamente "default dev mpq3 scope link table 102"
+# ogni volta che mpquic@3 ricrea il device TUN con un nuovo ifindex.
+[Match]
+Name=mpq3
+
+[Network]
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[Route]
+Destination=0.0.0.0/0
+Table=102
+Scope=link

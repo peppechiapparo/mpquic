@@ -197,6 +197,129 @@ Decommentare le righe desiderate in `/etc/systemd/system/wan-watchdog.service`:
 
 Per applicare le modifiche: `sudo systemctl daemon-reload && sudo systemctl restart wan-watchdog`
 
+## 4.2) Persistenza route tunnel TUN (systemd-networkd)
+
+### Problema
+
+Ogni volta che `mpquic@N.service` si avvia o riconnette, `ensure_tun.sh` (in `ExecStartPre`)
+ricrea il device TUN con un nuovo ifindex kernel. Il kernel elimina automaticamente tutte le
+route legate al vecchio ifindex. La route `default dev mpqN table wanN` sparisce e il traffico
+dei tunnel singolo-link esce dalla routing table main invece di usare la WAN corretta, causando
+intermittente perdita di connettività su tutti i link gestiti dai tunnel `mpq1–mpq6`.
+
+### Soluzione
+
+Creare file `.network` in `/etc/systemd/network/` per ogni device TUN `mpqN`.
+`systemd-networkd` monitora lo stato dei device e ripristina automaticamente la route
+dichiarata ogni volta che il device appare o acquisisce carrier — senza modificare alcun
+service file esistente.
+
+Questo replica il pattern già usato da `mp1` / `BOND1` tramite `27-bd1.network`.
+
+### Mapping TUN → tabella di routing
+
+| File | Device | Tabella (`/etc/iproute2/rt_tables`) |
+|------|--------|--------------------------------------|
+| `50-mpq1.network` | mpq1 | 100 (wan1) |
+| `51-mpq2.network` | mpq2 | 101 (wan2) |
+| `52-mpq3.network` | mpq3 | 102 (wan3) |
+| `53-mpq4.network` | mpq4 | 103 (wan4) |
+| `54-mpq5.network` | mpq5 | 104 (wan5) |
+| `55-mpq6.network` | mpq6 | 105 (wan6) |
+
+### 4.2.1) Installazione
+
+I file sono in `deploy/networkd/tun/`:
+
+```bash
+# Installa i file .network per i device TUN
+sudo cp deploy/networkd/tun/5*.network /etc/systemd/network/
+
+# Ricarica networkd — NON fare restart, preserva lo stato delle altre interfacce
+sudo networkctl reload
+```
+
+### 4.2.2) Struttura dei file
+
+Esempio (`53-mpq4.network`):
+
+```ini
+[Match]
+Name=mpq4
+
+[Network]
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[Route]
+Destination=0.0.0.0/0
+Table=103
+Scope=link
+```
+
+Opzioni chiave:
+- **`LinkLocalAddressing=no`** — nessun indirizzo link-local sui TUN (non necessario)
+- **`IPv6AcceptRA=no`** — nessun IPv6 RA sui TUN
+- **`Scope=link`** — route di livello link, next-hop implicito è il device stesso
+
+### 4.2.3) Verifica post-installazione
+
+```bash
+# Ogni TUN attivo deve mostrare il proprio Network File
+for n in 1 2 3 4 5 6; do
+  echo -n "mpq$n: "
+  networkctl status mpq$n 2>/dev/null | grep "Network File" || echo "non gestito (servizio inattivo)"
+done
+
+# Verifica route nelle tabelle WAN (solo per i servizi attivi)
+for t in wan1 wan2 wan3 wan4 wan5 wan6; do
+  echo -n "$t: "
+  ip route show table $t | grep "^default" || echo "MANCANTE (servizio inattivo)"
+done
+```
+
+Output atteso (esempio con mpq4/5/6 attivi):
+```
+mpq4: Network File: /etc/systemd/network/53-mpq4.network
+mpq5: Network File: /etc/systemd/network/54-mpq5.network
+mpq6: Network File: /etc/systemd/network/55-mpq6.network
+wan4: default dev mpq4 scope link
+wan5: default dev mpq5 scope link
+wan6: default dev mpq6 scope link
+```
+
+### 4.2.4) Test di resilienza (obbligatorio post-install)
+
+Simula la ricreazione del TUN come avviene su ogni reconnect QUIC:
+
+```bash
+# Verifica stato iniziale
+ip route show table wan6 | grep "^default" && echo "OK: route presente" || echo "MANCANTE"
+
+# Riavvia il servizio (ensure_tun.sh ricrea il TUN con nuovo ifindex)
+sudo systemctl restart mpquic@6.service
+
+# Attendi ~10s (reconnect QUIC + carrier detection networkd)
+sleep 10
+
+# La route deve essere stata ripristinata automaticamente da networkd
+ip route show table wan6 | grep "^default" && echo "OK: route ripristinata automaticamente" || echo "ERRORE: fix non attivo"
+```
+
+Tempo di ripristino atteso: **~5 secondi** dal momento in cui mpquic stabilisce la connessione
+QUIC (evento `Gained carrier` nel log di networkd).
+
+### 4.2.5) Nota su route duplicate
+
+Nelle tabelle WAN possono comparire **due voci** `default dev mpqN`:
+- una aggiunta da `mpquic-policy-routing.sh` (senza attributo `proto`)
+- una da systemd-networkd (con `proto static`)
+
+È un comportamento cosmético, non funzionale: il kernel le tratta come equivalenti.
+Cleanup futuro possibile: rimuovere il loop `mpqN` da `mpquic-policy-routing.sh` dopo
+aver confermato la stabilità dei file `.network` su più cicli di reboot.
+**Non effettuare questo cleanup prima di un reboot test completo.**
+
 ## 5) Parametrizzazione endpoint
 ### Client
 Imposta IP pubblico VPS una sola volta (vale per tutte le istanze):

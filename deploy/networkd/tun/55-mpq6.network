@@ -1,0 +1,14 @@
+# TUN mpq6 — route persistente in table wan6 (105)
+# Ripristina automaticamente "default dev mpq6 scope link table 105"
+# ogni volta che mpquic@6 ricrea il device TUN con un nuovo ifindex.
+[Match]
+Name=mpq6
+
+[Network]
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[Route]
+Destination=0.0.0.0/0
+Table=105
+Scope=link
