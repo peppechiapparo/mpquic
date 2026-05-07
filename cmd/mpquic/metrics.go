@@ -108,6 +108,11 @@ func registerMetricsClient(mc *multipathConn) {
 // startMetricsServer launches a dedicated HTTP server for /metrics and
 // /api/v1/stats on the given address (typically a tunnel IP like
 // 10.200.17.254:9090). Returns a stop function.
+//
+// The bind address is the tunnel IP, which may not exist yet when the process
+// starts (the TUN interface is created later by runClientLoop/runTunnel).
+// To handle this race, the goroutine retries with exponential backoff until
+// the bind succeeds or the context is cancelled.
 func startMetricsServer(ctx context.Context, addr string, logger *Logger) func() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", handlePrometheus)
@@ -126,9 +131,26 @@ func startMetricsServer(ctx context.Context, addr string, logger *Logger) func()
 	}()
 
 	go func() {
-		logger.Infof("metrics server listening on %s", addr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Errorf("metrics server: %v", err)
+		const maxBackoff = 10 * time.Second
+		backoff := 500 * time.Millisecond
+		for {
+			logger.Infof("metrics server listening on %s", addr)
+			err := server.ListenAndServe()
+			if err == nil || err == http.ErrServerClosed {
+				return
+			}
+			logger.Errorf("metrics server: %v (retry in %s)", err, backoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < maxBackoff {
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
 		}
 	}()
 

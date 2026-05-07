@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
 	"sync"
 	"time"
 
+	quic "github.com/quic-go/quic-go"
 	"github.com/songgao/water"
 )
 
@@ -58,6 +60,15 @@ func runTunnelWithTUN(ctx context.Context, conn datagramConn, tun *water.Interfa
 			if err := conn.SendDatagram(pkt); err != nil {
 				if ctx.Err() != nil {
 					return
+				}
+				// Drop oversized datagrams gracefully: a DatagramTooLargeError means
+				// the QUIC path MTU (after PMTU discovery) is smaller than the TUN
+				// MTU. Crashing the tunnel here would cause a reconnect loop. Instead,
+				// drop this packet and log a warning so the TUN MTU can be adjusted.
+				var tooLarge *quic.DatagramTooLargeError
+				if errors.As(err, &tooLarge) {
+					logger.Errorf("TX dropped: datagram too large (%d bytes, path max %d) — consider lowering tun_mtu", len(pkt), tooLarge.MaxDatagramPayloadSize)
+					continue
 				}
 				errCh <- err
 				return

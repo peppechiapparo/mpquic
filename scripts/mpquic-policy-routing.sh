@@ -119,12 +119,23 @@ safe_ip() { "$@" 2>/dev/null || true; }
 
 sleep "$WAIT_SECS"
 
+# ── ip rules: delete stale, re-add current ───────────────────────────────
+# Rules are deleted and re-added to pick up any source IP changes from DHCP.
+# The brief window where a rule is absent only affects new connections from
+# LAN subnets, not active tunnel sockets.
 for idx in $(seq 0 5); do
   safe_ip ip rule del from "${LAN_SUBNETS[$idx]}" priority "${RULE_PRIOS[$idx]}"
   safe_ip ip rule del priority "${SRC_RULE_PRIOS[$idx]}"
   safe_ip ip rule del priority "${REMOTE_RULE_PRIOS[$idx]}"
 done
 
+# ── Route tables: use "replace" instead of "flush + add" ─────────────────
+# "ip route replace" atomically updates or inserts a route without creating
+# a blackout window.  The old "flush + add" pattern would briefly remove all
+# routes from the table, causing active QUIC sockets to get EPERM on sendmsg
+# (kernel rejects the send because the route/interface index changed under
+# the socket), which triggered a cascade of tunnel restarts → routing reload
+# → more restarts.
 for idx in $(seq 0 5); do
   table="${WAN_TABLES[$idx]}"
   dev="${WAN_DEVS[$idx]}"
@@ -134,25 +145,31 @@ for idx in $(seq 0 5); do
   src_prio="${SRC_RULE_PRIOS[$idx]}"
   remote_prio="${REMOTE_RULE_PRIOS[$idx]}"
 
-  safe_ip ip route flush table "$table"
-
   rip="$(remote_ip_for_idx "$idx")"
   src_ip="$(ipv4_for_dev "$dev")"
 
-  safe_ip ip route add "${MGMT_NETS[0]}" dev "${MGMT_DEVS[0]}" table "$table"
-  safe_ip ip route add "${MGMT_NETS[1]}" dev "${MGMT_DEVS[1]}" table "$table"
-  safe_ip ip route add "$TRANSIT_SUPERNET" dev "$TRANSIT_DEV" table "$table"
+  # Management and transit routes: always present, replace is idempotent
+  safe_ip ip route replace "${MGMT_NETS[0]}" dev "${MGMT_DEVS[0]}" table "$table"
+  safe_ip ip route replace "${MGMT_NETS[1]}" dev "${MGMT_DEVS[1]}" table "$table"
+  safe_ip ip route replace "$TRANSIT_SUPERNET" dev "$TRANSIT_DEV" table "$table"
 
   if wan_usable "$dev" && have_tun_up "$tun"; then
     gw="$(gw_for_dev "$dev")"
 
     if [ -n "$gw" ] && is_ipv4_lit "$rip"; then
-      safe_ip ip route add "${rip}/32" via "$gw" dev "$dev" table "$table"
+      # Atomically replaces any stale VPS host route (e.g. after DHCP gateway change)
+      safe_ip ip route replace "${rip}/32" via "$gw" dev "$dev" table "$table"
     fi
 
-    safe_ip ip route add default dev "$tun" table "$table"
+    # Atomically replaces blackhole default (if present) with tunnel default
+    safe_ip ip route replace default dev "$tun" table "$table"
   else
-    safe_ip ip route add blackhole default table "$table"
+    # WAN or TUN is down: replace default with blackhole (atomic)
+    safe_ip ip route replace blackhole default table "$table"
+    # Remove stale VPS host route if present
+    if is_ipv4_lit "$rip"; then
+      safe_ip ip route del "${rip}/32" table "$table"
+    fi
   fi
 
   safe_ip ip rule add from "$subnet" lookup "$table" priority "$prio"
