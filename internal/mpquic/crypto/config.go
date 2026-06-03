@@ -8,6 +8,7 @@ type CryptoConfig struct {
 	Profile        CryptoProfile         `yaml:"profile"`
 	Rekey          RekeyConfig           `yaml:"rekey"`
 	CustomProvider *CustomProviderConfig `yaml:"custom_provider,omitempty"`
+	AADVersion     uint8                 `yaml:"aad_version"` // 1 = legacy (default), 2 = extended
 }
 
 type RekeyConfig struct {
@@ -58,13 +59,21 @@ func (c *CryptoConfig) Validate() error {
 		return fmt.Errorf("%w: rekey enabled but all thresholds are zero", ErrInvalidConfig)
 	}
 
+	if c.AADVersion == 0 {
+		c.AADVersion = 1 // default silenzioso per retrocompatibilità
+	}
+	if c.AADVersion != 1 && c.AADVersion != 2 {
+		return fmt.Errorf("%w: aad_version must be 1 or 2, got %d", ErrInvalidConfig, c.AADVersion)
+	}
+
 	return nil
 }
 
 func DefaultCryptoConfig() *CryptoConfig {
 	return &CryptoConfig{
-		Enabled: true,
-		Profile: ProfilePerformance,
+		Enabled:    true,
+		Profile:    ProfilePerformance,
+		AADVersion: 1,
 		Rekey: RekeyConfig{
 			Enabled:             true,
 			IntervalSeconds:     3600,

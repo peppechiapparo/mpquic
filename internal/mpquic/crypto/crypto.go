@@ -2,8 +2,19 @@ package crypto
 
 import (
 	"fmt"
+	"runtime"
 	"sync/atomic"
 )
+
+// zeroize azzera tutti i byte di b in memoria.
+// runtime.KeepAlive(b) impedisce al GC di ottimizzare l'azzeramento.
+// SEC-002: usare questa funzione ovunque venga azzerato materiale crittografico.
+func zeroize(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+	runtime.KeepAlive(b)
+}
 
 // CryptoSession rappresenta lo stato crittografico runtime di una sessione STRIPES.
 // È il punto unico di accesso del data plane al sottosistema crypto.
@@ -45,20 +56,12 @@ func (s *CryptoSession) Close() error {
 	if s.closed.Swap(true) {
 		return ErrSessionClosed
 	}
-	// Azzerare le chiavi in memoria
+	// Azzerare le chiavi in memoria (SEC-002)
 	if s.keys != nil {
-		for i := range s.keys.ClientKey {
-			s.keys.ClientKey[i] = 0
-		}
-		for i := range s.keys.ServerKey {
-			s.keys.ServerKey[i] = 0
-		}
-		for i := range s.keys.ClientIV {
-			s.keys.ClientIV[i] = 0
-		}
-		for i := range s.keys.ServerIV {
-			s.keys.ServerIV[i] = 0
-		}
+		zeroize(s.keys.ClientKey)
+		zeroize(s.keys.ServerKey)
+		zeroize(s.keys.ClientIV)
+		zeroize(s.keys.ServerIV)
 	}
 	return nil
 }
