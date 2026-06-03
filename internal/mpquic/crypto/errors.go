@@ -10,6 +10,8 @@ var (
 	ErrInvalidConfig    = errors.New("crypto: invalid crypto configuration")
 	ErrSessionClosed    = errors.New("crypto: crypto session is closed")
 	ErrKeyMaterial      = errors.New("crypto: invalid or insufficient key material")
+	ErrInvalidKeySize   = errors.New("crypto: invalid key size")
+	ErrEmptySessionID   = errors.New("crypto: sessionID must not be empty")
 	ErrMissingProvider  = errors.New("crypto: required provider is nil")
 )
 

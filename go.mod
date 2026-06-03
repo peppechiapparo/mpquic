@@ -1,6 +1,6 @@
 module mpquic
 
-go 1.22
+go 1.24
 
 require (
 	github.com/klauspost/reedsolomon v1.12.1

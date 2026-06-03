@@ -42,9 +42,14 @@ func NewCryptoSession(cfg *CryptoConfig) (*CryptoSession, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("crypto: %w", err)
 	}
-	// TODO(fase-B): selezionare AEADProvider in base a cfg.Profile
-	// TODO(fase-D): selezionare KeyExchangeProvider in base a cfg.Profile
-	// TODO(fase-C): inizializzare NonceManager
+	// Fase D: inizializzazione KEX provider (wiring completo in Fase G)
+	kex, err := NewKeyExchangeProvider(cfg.Profile)
+	if err != nil {
+		return nil, fmt.Errorf("crypto: kex init: %w", err)
+	}
+	// TODO(fase-G): costruire CryptoSession completo con AEAD, NonceManager e KEX
+	// Per ora la sessione non è ancora operativa.
+	_ = kex
 	return nil, ErrInvalidProfile
 }
 
