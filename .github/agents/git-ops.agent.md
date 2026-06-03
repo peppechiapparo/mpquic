@@ -1,6 +1,6 @@
 ---
 description: "Esegue operazioni git procedurali: stage, commit, push, branch, tag, status, diff, log. USA QUESTO AGENT per qualsiasi operazione git invece di farla nel contesto principale: risparmia token usando un modello leggero."
-model: ["GPT-4.1 (copilot)", "GPT-5 mini (copilot)", "Claude Haiku 4 (copilot)"]
+model: ["GPT-5 mini (copilot)", "GPT-4.1 (copilot)"]
 tools: ["runCommands", "codebase"]
 user-invocable: true
 ---

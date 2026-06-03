@@ -28,25 +28,55 @@ tools: [...]
 - Array fallback: `model: ["Claude Sonnet 4.6 (copilot)", "GPT-5 (copilot)"]` — VS Code prova in ordine e usa il primo disponibile per l'utente.
 
 **Nomi modelli**: usa esattamente il nome che vedi nel model picker di VS Code Copilot, es:
+- `GPT-5 mini (copilot)` — incluso (free fino a quota)
+- `GPT-4.1 (copilot)` — incluso (free fino a quota)
+- `Claude Haiku 4.5 (copilot)`
+- `GPT-5.2 (copilot)`
 - `Claude Sonnet 4.6 (copilot)`
-- `Claude Opus 4.7 (copilot)`
-- `GPT-5 (copilot)`
-- `GPT-4.1 (copilot)`
-- `GPT-5 mini (copilot)`
-- `Claude Haiku 4 (copilot)`
+- `Gemini 2.5 Pro (copilot)`
+- `Claude Opus 4.8 (copilot)`
 
-## 2. Strategia di assegnazione consigliata
+## 2. Pricing GitHub Models (giugno 2026)
 
-| Tipo di lavoro            | Modello consigliato       | Perché |
-|---------------------------|---------------------------|--------|
-| Design / architettura     | Claude Opus 4.7           | Una sola volta per feature, ma critico |
-| Security audit            | Claude Opus 4.7           | Non si compromette sulla sicurezza |
-| Implementazione codice    | Claude Sonnet 4.6         | Bilanciato qualità/costo |
-| Code review               | Claude Sonnet 4.6         | Review logica, basso rischio |
-| Scrittura test            | Claude Sonnet 4.6 / GPT-5 | Procedurale |
-| Comandi git procedurali   | GPT-4.1 / Haiku           | Banale, ~10 token in/out |
-| Deploy, restart, scp      | GPT-4.1 / Haiku           | Banale, output strutturato |
-| Conversazione/orchestrazione | Sonnet                 | Coordina ma non scrive codice |
+| Modello | Input $/1M | Output $/1M | Tier |
+|---------|-----------|------------|------|
+| GPT-5 mini | $0.25 | $2.00 | **INCLUSO** |
+| GPT-4.1 | $2.00 | $8.00 | **INCLUSO** |
+| Claude Haiku 4.5 | $1.00 | $5.00 | light |
+| GPT-5.2 | $1.75 | $14.00 | versatile |
+| Claude Sonnet 4.6 | $3.00 | $15.00 | versatile+ |
+| Gemini 2.5 Pro | $1.25 | $10.00 | powerful (75% < Opus) |
+| Claude Opus 4.8 | $5.00 | $25.00 | powerful non-negoziabile |
+
+> ⚠️ **GPT-5.5** ($5/$30 output) — rimosso da tutti i fallback: peggior costo per output.
+
+## 3. Strategia di assegnazione per tier
+
+| Tier | Tipo di lavoro | Modello primario | Fallback |
+|------|----------------|-----------------|----------|
+| **ultra-light** | git, deploy, shell procedure | GPT-5 mini | GPT-4.1 |
+| **light** | test su template, docs strutturati | Claude Haiku 4.5 | GPT-5.2 |
+| **versatile** | implementazione codice, system config | GPT-5.2 | Claude Haiku 4.5, Claude Sonnet 4.6 |
+| **versatile+** | code review, orchestrazione, docs ECSS | Claude Sonnet 4.6 | GPT-5.2 |
+| **powerful** | architettura, RFC analysis, piano tecnico | Gemini 2.5 Pro | Claude Opus 4.8 |
+| **powerful non-neg.** | security audit, report critici NIS2 | Claude Opus 4.8 | Gemini 2.5 Pro |
+
+### Assegnazione corrente agenti MPQUIC
+
+| Agente | Tier | Primario | Fallback |
+|--------|------|---------|----------|
+| `@git-ops` | ultra-light | GPT-5 mini | GPT-4.1 |
+| `@deploy-ops` | ultra-light | GPT-5 mini | GPT-4.1 |
+| `@tester` | light | Claude Haiku 4.5 | GPT-5.2 |
+| `@developer` | versatile | GPT-5.2 | Claude Haiku 4.5, Claude Sonnet 4.6 |
+| `@python-developer` | versatile | GPT-5.2 | Claude Haiku 4.5, Claude Sonnet 4.6 |
+| `@openwrt-sysadmin` | versatile | GPT-5.2 | Claude Sonnet 4.6 |
+| `@reviewer` | versatile+ | Claude Sonnet 4.6 | GPT-5.2 |
+| `@tech-lead` | versatile+ | Claude Sonnet 4.6 | GPT-5.2 |
+| `@ecss-guardian` | versatile+ | Claude Sonnet 4.6 | GPT-5.2 |
+| `@planner` | powerful | Gemini 2.5 Pro | Claude Opus 4.8 |
+| `@transport-expert` | powerful | Gemini 2.5 Pro | Claude Opus 4.8 |
+| `@security-nis2` | powerful non-neg. | Claude Opus 4.8 | Gemini 2.5 Pro |
 
 ## 3. Delega programmatica con il tool `agent` (runSubagent)
 
@@ -88,8 +118,8 @@ I subagent foglie **non** lo devono avere — evita catene di deleghe infinite.
 
 ### Subagent disponibili
 
-- `.github/agents/git-ops.agent.md` — GPT-4.1, solo operazioni git
-- `.github/agents/deploy-ops.agent.md` — GPT-4.1, solo scp/restart/journalctl
+- `.github/agents/git-ops.agent.md` — GPT-5 mini (incluso), solo operazioni git
+- `.github/agents/deploy-ops.agent.md` — GPT-5 mini (incluso), solo scp/restart/journalctl
 
 ## 4. Replicare su altri progetti
 

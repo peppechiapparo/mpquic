@@ -1375,4 +1375,193 @@ La VM fornita sarà accettata quando:
 
 ---
 
+## 18. VM di Test Predisposta — Note di Consegna e Accesso
+
+Telespazio ha predisposto una macchina virtuale (VM) pronta all'uso da impiegare come ambiente di sviluppo e test per l'implementazione dei tunnel richiesti dal presente documento.
+La VM è operativa e configurata in conformità con i requisiti architetturali descritti nelle sezioni precedenti (OS, rete, routing, NAT, sysctl). Il fornitore non dovrà eseguire alcuna installazione di base: il punto di partenza è una VM già operativa, sulla quale installerà esclusivamente il proprio software tunnel.
+
+### 18.1 Caratteristiche della VM
+
+| Parametro       | Valore                                     |
+|-----------------|--------------------------------------------|
+| Sistema operativo | Debian 12 (Bookworm) x86_64              |
+| vCPU            | 2                                          |
+| RAM             | 4 GB                                       |
+| Disco           | 20 GB                                      |
+| Init system     | systemd                                    |
+| Network manager | systemd-networkd                           |
+| Firewall        | nftables                                   |
+| Kernel          | ≥ 6.1, `CONFIG_TUN=m`, `CONFIG_NF_TABLES=y` |
+| Utente          | `satcom` (membro del gruppo `sudo`)        |
+
+### 18.2 Configurazione di rete già presente
+
+La VM è configurata con systemd-networkd. Tutti i file si trovano in `/etc/systemd/network/`.
+
+#### Interfacce MGMT (statiche)
+
+| File                  | Interfaccia | IP             | Scopo                  |
+|-----------------------|-------------|----------------|------------------------|
+| `01-mgmt1.network`    | `enp6s18`   | `10.10.11.100/24` | Gestione primaria (SSH) |
+| `02-mgmt2.network`    | `enp6s19`   | `10.10.10.100/24` | Gestione secondaria    |
+
+#### Interfacce WAN (DHCP)
+
+| File               | Interfaccia | WAN  |
+|--------------------|-------------|------|
+| `10-wan1.network`  | `enp7s3`    | WAN1 |
+| `11-wan2.network`  | `enp7s4`    | WAN2 |
+| `12-wan3.network`  | `enp7s5`    | WAN3 |
+| `13-wan4.network`  | `enp7s6`    | WAN4 |
+| `14-wan5.network`  | `enp7s7`    | WAN5 |
+| `15-wan6.network`  | `enp7s8`    | WAN6 |
+
+#### Interfacce LAN (statiche point-to-point)
+
+| File               | Interfaccia | IP VM          |
+|--------------------|-------------|----------------|
+| `20-lan1.network`  | `enp6s20`   | `172.16.1.1/30` |
+| `21-lan2.network`  | `enp6s21`   | `172.16.2.1/30` |
+| `22-lan3.network`  | `enp6s22`   | `172.16.3.1/30` |
+| `23-lan4.network`  | `enp6s23`   | `172.16.4.1/30` |
+| `24-lan5.network`  | `enp7s1`    | `172.16.5.1/30` |
+| `25-lan6.network`  | `enp7s2`    | `172.16.6.1/30` |
+
+#### VLAN e bonding
+
+Le sotto-interfacce VLAN (§ 5) e il dispositivo di bonding `bd1` (VLAN 17 su `enp6s20`) sono definiti
+nei corrispondenti file `.netdev` e `.network` già presenti in `/etc/systemd/network/`.
+
+#### Policy routing
+
+Le tabelle di routing personalizzate sono già definite in `/etc/iproute2/rt_tables`:
+
+```
+100 wan1   101 wan2   102 wan3   103 wan4   104 wan5   105 wan6
+120 mt_cr4  121 mt_br4  122 mt_df4
+123 mt_cr5  124 mt_br5  125 mt_df5
+126 mt_cr6  127 mt_br6  128 mt_df6
+200 bd1
+```
+
+#### NAT e IP forwarding
+
+Il file `/etc/nftables.conf` contiene le regole `masquerade` per tutte le interfacce WAN e TUN
+(comprese `mpq1`–`mpq6`, `mp1`, `tun-cr/br/df4–6`) secondo quanto descritto in § 8.
+
+Il forwarding IPv4 è abilitato persistentemente via `/etc/sysctl.d/99-sysctl.conf`:
+
+```
+net.ipv4.ip_forward = 1
+```
+
+I buffer socket sono dimensionati per link satellitari ad alta latenza in `/etc/sysctl.d/99-socket-buffers.conf`:
+
+```
+net.core.rmem_max = 7340032
+net.core.wmem_max = 7340032
+```
+
+### 18.3 Accesso alla VM — Fase iniziale (rete locale)
+
+Nella fase iniziale di configurazione, la VM è raggiungibile via SSH sulla rete di gestione primaria:
+
+```
+Host: 10.10.11.100
+Porta: 22
+Utente: satcom
+```
+
+L'accesso è garantito via rete locale o tramite VPN di laboratorio. La password sarà comunicata
+separatamente da Telespazio.
+
+### 18.4 Accesso remoto tramite ZeroTier
+
+Per l'accesso remoto alla VM al di fuori della rete di laboratorio, Telespazio utilizza
+**ZeroTier** — una rete overlay L2/L3 cifrata che emula una LAN virtuale tra tutti i nodi.
+
+Il fornitore dovrà installare il client ZeroTier sulla VM e fare il join alla rete TRINA
+il cui **Network ID** sarà comunicato da Telespazio.
+
+#### Installazione ZeroTier su Debian/Ubuntu
+
+```bash
+# 1. Installa ZeroTier (script ufficiale, verifica sempre l'hash prima di eseguire)
+curl -s https://install.zerotier.com | sudo bash
+
+# In alternativa, via repository apt (metodo raccomandato per ambienti di produzione):
+curl -fsSL https://raw.githubusercontent.com/zerotier/ZeroTierOne/main/doc/contact%40zerotier.com.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/zerotier.gpg
+echo "deb [signed-by=/usr/share/keyrings/zerotier.gpg] https://download.zerotier.com/debian/bookworm bookworm main" \
+  | sudo tee /etc/apt/sources.list.d/zerotier.list
+sudo apt update && sudo apt install -y zerotier-one
+
+# 2. Abilita e avvia il servizio
+sudo systemctl enable --now zerotier-one
+
+# 3. Verifica che il nodo sia online e annota il Node ID
+sudo zerotier-cli info
+# Output atteso: 200 info <NODE_ID> <versione> ONLINE
+```
+
+#### Join alla rete TRINA
+
+```bash
+# Sostituire <ZEROTIER_NETWORK_ID> con il valore comunicato da Telespazio
+sudo zerotier-cli join <ZEROTIER_NETWORK_ID>
+
+# Verifica stato join
+sudo zerotier-cli listnetworks
+# Output atteso: <NETWORK_ID>  trina  <IP_ASSEGNATO>/16  OK  PRIVATE  ether
+```
+
+> **Nota**: la rete TRINA è di tipo **PRIVATE**. Il join non è automatico: un amministratore
+> Telespazio deve autorizzare il Node ID del fornitore dal pannello di controllo ZeroTier
+> Central. Comunicare il proprio Node ID (output di `zerotier-cli info`) a Telespazio
+> per procedere con l'autorizzazione.
+
+#### Verifica connettività
+
+Dopo l'autorizzazione, l'interfaccia `ztXXXXXXXXXX` (nome generato automaticamente) apparirà
+tra le interfacce di rete con un IP nella subnet `10.202.0.0/16`:
+
+```bash
+ip addr show | grep zt
+# oppure
+sudo zerotier-cli listnetworks
+
+# Test ping verso un nodo della rete TRINA (indirizzo comunicato da Telespazio)
+ping 10.202.x.x
+```
+
+#### Accesso SSH via ZeroTier
+
+Una volta che la VM è membro autorizzato della rete TRINA, sarà raggiungibile via SSH
+all'indirizzo ZeroTier assegnatole (nella subnet `10.202.0.0/16`):
+
+```bash
+ssh satcom@10.202.X.X
+```
+
+L'indirizzo IP ZeroTier assegnato alla VM verrà comunicato da Telespazio dopo l'autorizzazione,
+oppure è visibile con `sudo zerotier-cli listnetworks`.
+
+#### Persistenza al riavvio
+
+Il servizio `zerotier-one` è abilitato tramite systemd e si avvia automaticamente al boot.
+Il join alla rete è persistente: non è necessario rieseguire `zerotier-cli join` dopo il riavvio.
+
+### 18.5 Riepilogo credenziali e riferimenti
+
+| Informazione              | Valore / Fonte                              |
+|---------------------------|---------------------------------------------|
+| IP MGMT VM                | `10.10.11.100` (rete locale laboratorio)    |
+| Utente SSH                | `satcom`                                    |
+| Password SSH              | Comunicata separatamente da Telespazio      |
+| ZeroTier Network ID       | Comunicato separatamente da Telespazio      |
+| Subnet ZeroTier           | `10.202.0.0/16`                             |
+| Autorizzazione ZeroTier   | Richiesta — inviare il proprio Node ID a Telespazio |
+
+---
+
 *Fine del documento.*

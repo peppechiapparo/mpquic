@@ -149,7 +149,7 @@
           "instant": true
         },
         {
-          "expr": "max(up{job=\"mpquic-client\", wan=\"wan4\"})",
+          "expr": "max(up{job=\"mpquic-client\", wan=\"LTE\"})",
           "legendFormat": "LTE Mobile",
           "refId": "D",
           "datasource": {
@@ -569,7 +569,7 @@
           }
         },
         {
-          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan4\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"LTE\"}[$__rate_interval])) * 8",
           "legendFormat": "Fallback · LTE Mobile",
           "refId": "C",
           "datasource": {
@@ -578,7 +578,7 @@
           }
         },
         {
-          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan3\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"KVHTS\"}[$__rate_interval])) * 8",
           "legendFormat": "Fallback · KVHTS GEO",
           "refId": "D",
           "datasource": {
@@ -587,7 +587,7 @@
           }
         },
         {
-          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan2\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"TELESAT\"}[$__rate_interval])) * 8",
           "legendFormat": "Fallback · Telesat LIGHTSPEED GEO",
           "refId": "E",
           "datasource": {
@@ -757,7 +757,7 @@
           }
         },
         {
-          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan4\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"LTE\"}[$__rate_interval])) * 8",
           "legendFormat": "Fallback · LTE Mobile",
           "refId": "C",
           "datasource": {
@@ -766,7 +766,7 @@
           }
         },
         {
-          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan3\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"KVHTS\"}[$__rate_interval])) * 8",
           "legendFormat": "Fallback · KVHTS GEO",
           "refId": "D",
           "datasource": {
@@ -775,7 +775,7 @@
           }
         },
         {
-          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan2\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"TELESAT\"}[$__rate_interval])) * 8",
           "legendFormat": "Fallback · Telesat LIGHTSPEED GEO",
           "refId": "E",
           "datasource": {
@@ -1420,7 +1420,7 @@
       },
       "targets": [
         {
-          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan6\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"STARLINK\"}[$__rate_interval])) * 8",
           "legendFormat": "Starlink LEO",
           "refId": "A",
           "datasource": {
@@ -1512,7 +1512,7 @@
       },
       "targets": [
         {
-          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan6\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"STARLINK\"}[$__rate_interval])) * 8",
           "legendFormat": "Starlink LEO",
           "refId": "A",
           "datasource": {
@@ -1604,7 +1604,7 @@
       },
       "targets": [
         {
-          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan5\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"ONEWEB\"}[$__rate_interval])) * 8",
           "legendFormat": "OneWeb LEO",
           "refId": "A",
           "datasource": {
@@ -1696,7 +1696,7 @@
       },
       "targets": [
         {
-          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan5\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"ONEWEB\"}[$__rate_interval])) * 8",
           "legendFormat": "OneWeb LEO",
           "refId": "A",
           "datasource": {
@@ -1788,7 +1788,7 @@
       },
       "targets": [
         {
-          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan4\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"LTE\"}[$__rate_interval])) * 8",
           "legendFormat": "LTE Mobile",
           "refId": "A",
           "datasource": {
@@ -1880,7 +1880,7 @@
       },
       "targets": [
         {
-          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan4\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"LTE\"}[$__rate_interval])) * 8",
           "legendFormat": "LTE Mobile",
           "refId": "A",
           "datasource": {
@@ -1972,7 +1972,7 @@
       },
       "targets": [
         {
-          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan3\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"KVHTS\"}[$__rate_interval])) * 8",
           "legendFormat": "KVHTS GEO",
           "refId": "A",
           "datasource": {
@@ -2064,7 +2064,7 @@
       },
       "targets": [
         {
-          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan3\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"KVHTS\"}[$__rate_interval])) * 8",
           "legendFormat": "KVHTS GEO",
           "refId": "A",
           "datasource": {
@@ -2156,7 +2156,7 @@
       },
       "targets": [
         {
-          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"wan2\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_tx_bytes_total{job=\"mpquic-client\", wan=\"TELESAT\"}[$__rate_interval])) * 8",
           "legendFormat": "Telesat LIGHTSPEED GEO",
           "refId": "A",
           "datasource": {
@@ -2248,7 +2248,7 @@
       },
       "targets": [
         {
-          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"wan2\"}[$__rate_interval])) * 8",
+          "expr": "sum(irate(mpquic_rx_bytes_total{job=\"mpquic-client\", wan=\"TELESAT\"}[$__rate_interval])) * 8",
           "legendFormat": "Telesat LIGHTSPEED GEO",
           "refId": "A",
           "datasource": {

@@ -1,0 +1,1083 @@
+# TPZ-MPQUIC-TDD-001 — Technical Design Document
+## MPQUIC/STRIPES Multipath Tunnel System
+
+---
+
+## Document Information
+
+| Campo | Valore |
+|-------|--------|
+| Document ID | TPZ-MPQUIC-TDD-001 |
+| Issue | 1 |
+| Revision | 0 |
+| Status | Draft |
+| Author | Telespazio Engineering Team |
+| Reviewed by | Tech Lead |
+| Approved by | — |
+| Date | 2026-05-14 |
+| Classification | Internal |
+| Applicable standards | ECSS-E-ST-40C, ECSS-Q-ST-80C |
+
+---
+
+## Table of Contents
+
+1. [Introduction](#1-introduction)
+   - 1.1 [Scope](#11-scope)
+   - 1.2 [Applicable Documents](#12-applicable-documents)
+   - 1.3 [Reference Documents](#13-reference-documents)
+   - 1.4 [Acronyms and Abbreviations](#14-acronyms-and-abbreviations)
+2. [System Overview](#2-system-overview)
+   - 2.1 [Context](#21-context)
+   - 2.2 [System Boundaries](#22-system-boundaries)
+   - 2.3 [Operational Scenarios](#23-operational-scenarios)
+3. [Requirements](#3-requirements)
+   - 3.1 [Functional Requirements](#31-functional-requirements)
+   - 3.2 [Security Requirements](#32-security-requirements)
+   - 3.3 [Networking Requirements](#33-networking-requirements)
+   - 3.4 [Performance Requirements](#34-performance-requirements)
+   - 3.5 [Configuration Requirements](#35-configuration-requirements)
+   - 3.6 [Operational Requirements](#36-operational-requirements)
+   - 3.7 [API and Metrics Requirements](#37-api-and-metrics-requirements)
+4. [Architecture Design](#4-architecture-design)
+   - 4.1 [Component Overview](#41-component-overview)
+   - 4.2 [Component Descriptions](#42-component-descriptions)
+   - 4.3 [Data Flow](#43-data-flow)
+5. [Interface Design](#5-interface-design)
+   - 5.1 [YAML Instance Configuration](#51-yaml-instance-configuration)
+   - 5.2 [Systemd Service Interface](#52-systemd-service-interface)
+   - 5.3 [REST Metrics API](#53-rest-metrics-api)
+   - 5.4 [Control API](#54-control-api)
+   - 5.5 [Prometheus Metrics Interface](#55-prometheus-metrics-interface)
+6. [Verification and Validation](#6-verification-and-validation)
+   - 6.1 [Test Approach](#61-test-approach)
+   - 6.2 [Test Cases](#62-test-cases)
+7. [Requirements Traceability Matrix (RTM)](#7-requirements-traceability-matrix-rtm)
+8. [Change Log](#8-change-log)
+
+---
+
+## 1. Introduction
+
+### 1.1 Scope
+
+This document provides the Technical Design for the **MPQUIC/STRIPES** system developed by Telespazio Engineering.
+
+MPQUIC/STRIPES is a multipath IP-over-QUIC/UDP tunnelling system designed for hybrid satellite connectivity in maritime and vehicular SATCOM platforms. The system creates encrypted IP tunnels over multiple simultaneous WAN links (LEO satellite, GEO satellite, LTE), providing bonding, failover, and quality-of-service capabilities classified as critical infrastructure under EU NIS2 Directive (EU) 2022/2555.
+
+This document covers:
+- Software architecture and design of the `mpquic` binary (client and server roles)
+- STRIPES transport layer (UDP stripe, FEC Reed-Solomon, Hybrid ARQ)
+- Management REST API (`mpquic-mgmt`)
+- Systemd-based deployment model on Linux (Debian 12 / Ubuntu 24.04)
+- Prometheus/Grafana observability integration
+
+This document does **not** cover: OpenWrt mwan3 configuration, nftables firewall policy design, Grafana dashboard configuration, or Zabbix template details.
+
+### 1.2 Applicable Documents
+
+| ID | Document | Version |
+|----|----------|---------|
+| AD-01 | ECSS-E-ST-40C — Software Engineering | Rev 1, 6 March 2009 |
+| AD-02 | ECSS-Q-ST-80C — Software Product Assurance | Rev 1, 6 March 2009 |
+| AD-03 | ECSS-M-ST-40C — Configuration Management | Rev 1, 6 March 2009 |
+| AD-04 | EU NIS2 Directive (EU) 2022/2555 | 2022 |
+
+### 1.3 Reference Documents
+
+| ID | Document | Path |
+|----|----------|------|
+| RD-01 | MPQUIC Architecture & Design (consolidated) | `docs/ARCHITETTURA.md` |
+| RD-02 | MPQUIC Security Posture | `docs/SECURITY.md` |
+| RD-03 | MPQUIC Requirements for ROMARS | `docs/MPQUIC_REQUIREMENTS_ROMARS.md` |
+| RD-04 | MPQUIC Working Instructions | `docs/WORKING_INSTRUCTIONS.md` |
+| RD-05 | MPQUIC Nota Tecnica | `docs/NOTA_TECNICA_MPQUIC.md` |
+| RD-06 | MPQUIC main.go (entry point) | `cmd/mpquic/main.go` |
+| RD-07 | STRIPES transport (stripe.go) | `cmd/mpquic/stripe.go` |
+| RD-08 | AES-256-GCM crypto module | `cmd/mpquic/stripe_crypto.go` |
+| RD-09 | Hybrid ARQ module | `cmd/mpquic/stripe_arq.go` |
+| RD-10 | Systemd service template | `deploy/systemd/mpquic@.service` |
+
+### 1.4 Acronyms and Abbreviations
+
+| Term | Definition |
+|------|------------|
+| ARQ | Automatic Repeat reQuest |
+| AES-GCM | Advanced Encryption Standard — Galois/Counter Mode |
+| BBR | Bottleneck Bandwidth and RTT (congestion control algorithm) |
+| CC | Congestion Control |
+| ECSS | European Cooperation for Space Standardization |
+| FEC | Forward Error Correction |
+| GEO | Geostationary Earth Orbit |
+| GSO | Generic Segmentation Offload |
+| ICD | Interface Control Document |
+| LEO | Low Earth Orbit |
+| LTE | Long-Term Evolution (mobile broadband) |
+| MPQUIC | Multipath QUIC (project name; also refers to the binary) |
+| NACK | Negative Acknowledgement |
+| NIS2 | Network and Information Security Directive 2 (EU 2022/2555) |
+| PFS | Perfect Forward Secrecy |
+| QUIC | QUIC transport protocol (RFC 9000) |
+| RTM | Requirements Traceability Matrix |
+| SATCOM | Satellite Communications |
+| STRIPES | UDP Stripe transport layer within MPQUIC |
+| TDD | Technical Design Document |
+| TLS | Transport Layer Security |
+| TUN | Linux TUN (network tunnel) virtual interface |
+| UDP | User Datagram Protocol |
+| VPS | Virtual Private Server |
+| WAN | Wide Area Network |
+
+---
+
+## 2. System Overview
+
+### 2.1 Context
+
+The MPQUIC/STRIPES system is deployed on maritime vessels and vehicular platforms equipped with multiple satellite terminals and LTE modems. The objective is to aggregate bandwidth across heterogeneous WAN links and provide resilient, encrypted IP connectivity to the onboard LAN.
+
+The system operates in a client–server topology:
+- **Client node**: a Debian 12 VM (running on Proxmox) co-located with the vessel's routing infrastructure. Up to 6 WAN interfaces are bound to individual tunnel instances (WAN1–WAN6).
+- **Server node**: an Ubuntu 24.04 VPS in a neutral data centre that terminates the tunnels and provides a stable gateway IP to the internet.
+
+The OpenWrt router upstream of the client VM performs multi-WAN policy routing (mwan3) and DSCP-based traffic classification. The MPQUIC system sits transparently above this layer, providing a set of encrypted TUN interfaces which the router treats as additional WAN paths.
+
+### 2.2 System Boundaries
+
+#### In scope
+
+| Component | Host | Description |
+|-----------|------|-------------|
+| `mpquic` binary (client role) | VM MPQUIC (10.10.11.100) | Reads/writes TUN; opens UDP stripe sockets per WAN |
+| `mpquic` binary (server role) | VPS (172.238.232.223) | Terminates UDP stripe; writes/reads TUN |
+| `mpquic-mgmt` REST daemon | VM MPQUIC | Management API for tunnel lifecycle |
+| `mpquic-watchdog` | VM MPQUIC | Health check and auto-recovery |
+| `mpquic@*.service` | VM MPQUIC + VPS | systemd service units |
+| TUN interfaces (`mpq1–6`, `mp1`, etc.) | VM MPQUIC + VPS | Virtual L3 tunnel endpoints |
+| STRIPES transport engine | Both | FEC, ARQ, AES-256-GCM, batch I/O |
+| Prometheus metrics endpoint | Both | HTTP `:9090` on tunnel IP |
+
+#### Out of scope
+
+| Component | Reason |
+|-----------|--------|
+| OpenWrt mwan3 | External policy router; not modified by MPQUIC |
+| nftables firewall (VPS + OpenWrt) | Managed separately; firewall rules are a deployment concern |
+| Grafana / Prometheus server | Third-party monitoring infrastructure |
+| LuCI app (`luci-app-mpquic`) | UI layer on OpenWrt; separate deployment unit |
+| Proxmox hypervisor | Infrastructure host; not part of the software system |
+
+#### Host inventory
+
+| Host | IP | OS | Role |
+|------|----|----|------|
+| VM MPQUIC | 10.10.11.100 | Debian 12 | Tunnel client, all service daemons |
+| VPS | 172.238.232.223 | Ubuntu 24.04 | Tunnel server |
+| OpenWrt | 10.10.11.254 | OpenWrt 24.10 x86_64 | Multi-WAN router (out of scope) |
+| Prometheus LXC | 10.10.11.201 | Debian 12 LXC | Metrics scraping |
+| Grafana LXC | 10.10.11.202 | Debian 12 LXC | Dashboards |
+
+### 2.3 Operational Scenarios
+
+#### Scenario 1 — Nominal: all WAN links active
+
+All 6 WAN interfaces have valid IPv4 addresses. The multipath instance `mp1` uses WAN5 and WAN6 with 12 UDP pipes per path (24 pipes total). Single-path instances `mpquic@1..6` operate independently on their respective WANs. Aggregate throughput target: ≥ 300 Mbps.
+
+FEC is in adaptive mode: `effective_M = 0` when loss = 0%; parity shards are added only when peer-reported loss exceeds the configured threshold (default: 2%).
+
+#### Scenario 2 — Degraded: one or more WAN links down
+
+One or more WAN paths report no IPv4 (DHCP lost) or no packet received for 30 seconds. The multipath scheduler marks affected paths `down` and applies cooldown with progressive back-off. Remaining active paths continue to carry traffic. FEC adaptive mode may increase M to compensate for elevated loss on surviving links.
+
+Recovery: when the link recovers and the REGISTER + keepalive cycle succeeds, the path re-enters the active pool without service interruption.
+
+#### Scenario 3 — Failover: all multipath paths lost, fallback to single-path
+
+If all multipath paths fail simultaneously, single-path instances `mpquic@1..6` continue operating independently, providing uninterrupted connectivity on each individual WAN.
+
+#### Scenario 4 — Security event: decrypt failure detected
+
+The AES-256-GCM decryption fails for one or more received packets (tampered payload or replay attack). The packet is silently dropped. The counter `mpquic_session_decrypt_fail` is incremented. Prometheus/Zabbix alerting fires for `increase(mpquic_session_decrypt_fail[5m]) > 0`.
+
+#### Scenario 5 — Controlled update
+
+Operator runs `mpquic-update.sh`. The script performs: git pull, binary rebuild, controlled systemd stop/start. Configuration files are preserved. Service downtime is bounded by `RestartSec=2`.
+
+---
+
+## 3. Requirements
+
+### 3.1 Functional Requirements
+
+**[REQ-MPQUIC-SW-001]** The `mpquic` binary shall operate in either `client` or `server` role as specified by the `role` field in the instance YAML configuration file, using the same binary executable for both roles.
+
+**[REQ-MPQUIC-SW-002]** In client role, the system shall read IP packets from the designated TUN interface and forward them to the remote server via the configured transport (QUIC datagram or UDP stripe).
+
+**[REQ-MPQUIC-SW-003]** In server role, the system shall receive IP packets from the transport layer and write them to the designated TUN interface.
+
+**[REQ-MPQUIC-SW-004]** The system shall support up to 6 simultaneously active, independent tunnel instances, each managed by a dedicated `mpquic@<instance>.service` systemd unit.
+
+**[REQ-MPQUIC-SW-005]** The stripe transport engine shall bind each UDP pipe socket to the designated WAN network interface using `SO_BINDTODEVICE`, ensuring that outgoing packets are transmitted exclusively via the specified interface.
+
+**[REQ-MPQUIC-SW-006]** The stripe transport engine shall open N parallel UDP sockets (pipes) per configured WAN path, where N is defined by the `stripe_pipes` YAML parameter.
+
+**[REQ-MPQUIC-SW-007]** The stripe transport engine shall distribute TX packets across active pipes using round-robin scheduling, with a pre-computed `txActivePipes` cache that is rebuilt only on REGISTER or keepalive events to achieve zero per-packet heap allocation.
+
+**[REQ-MPQUIC-SW-008]** The FEC encoder shall apply Reed-Solomon coding with K = 10 data shards and M ≤ 2 parity shards per group; both K and M shall be configurable via YAML parameters `stripe_fec_data_shards` and `stripe_fec_parity_shards`.
+
+**[REQ-MPQUIC-SW-009]** The FEC decoder shall reconstruct up to M missing shards per FEC group without requesting retransmission, provided no more than M shards are absent from the group.
+
+**[REQ-MPQUIC-SW-010]** In adaptive FEC mode (`stripe_fec_mode: adaptive`), the effective parity count `M` shall start at 0 (no parity overhead), shall increase to the configured maximum M when the peer-reported packet loss rate exceeds 2%, and shall not decrease below M for at least 15 seconds after a loss event.
+
+**[REQ-MPQUIC-SW-011]** The Hybrid ARQ TX subsystem shall buffer up to 4096 plaintext shards in a ring buffer for selective retransmission upon receipt of a NACK packet.
+
+**[REQ-MPQUIC-SW-012]** The Hybrid ARQ RX subsystem shall track received sequence numbers using a circular bitmap of 8192 bits and shall detect gaps up to 64 consecutive missing sequences via the NACK bitmap field.
+
+**[REQ-MPQUIC-SW-013]** The Hybrid ARQ subsystem shall transmit NACK packets at intervals of at most 5 ms when gaps are detected, subject to a per-block rate limit of at most one NACK packet per 30 ms and a gap threshold of 96 sequence numbers.
+
+**[REQ-MPQUIC-SW-014]** The server shall maintain a `connectionTable` that maps each client TUN peer IP to the corresponding QUIC connection or stripe session, enabling correct routing of return-path packets including traffic from LAN hosts behind the client.
+
+**[REQ-MPQUIC-SW-015]** The stripe RX subsystem shall deduplicate received packets by checking the sequence number against the RX bitmap before delivering any packet to the TUN write path; duplicate packets shall be silently discarded.
+
+**[REQ-MPQUIC-SW-016]** When `multipath_enabled: true`, the client shall concurrently maintain N path connections (one per entry in `multipath_paths`), each with independent socket binding, reconnection state, and cooldown management.
+
+**[REQ-MPQUIC-SW-017]** The multipath scheduler shall select the TX path based on a composite score derived from the path `priority`, cumulative `consecutiveFails` penalty, and `weight` bonus; lower scores shall be preferred.
+
+**[REQ-MPQUIC-SW-018]** When a path TX or RX error is detected, the system shall mark that path `down`, apply a cooldown period with progressive back-off, and initiate a reconnection loop in the background; if reconnection succeeds, the path shall re-enter the active pool without operator intervention.
+
+**[REQ-MPQUIC-SW-019]** The server shall use FNV-1a hash on the 5-tuple (srcIP, dstIP, protocol, srcPort, dstPort) to assign each TCP/UDP flow to a single stripe session, ensuring that packets belonging to the same flow are consistently dispatched via the same WAN path to prevent TCP reordering.
+
+**[REQ-MPQUIC-SW-020]** The system shall support a token-bucket rate limiter (`stripePacer`) per stripe session to spread TX writes over time and prevent burst-induced retransmissions; the pacer shall be disabled when `stripe_rate_mbps` is not configured.
+
+### 3.2 Security Requirements
+
+**[REQ-MPQUIC-SEC-001]** The QUIC transport shall use TLS 1.3 for all connections; the TLS handshake shall provide mutual peer authentication and session key establishment for all tunnel instances.
+
+**[REQ-MPQUIC-SEC-002]** The client shall verify the server X.509 certificate against the configured CA file (`tls_ca_file`) and shall validate the server common name against `tls_server_name`; certificate validation failures shall terminate the connection with a logged error.
+
+**[REQ-MPQUIC-SEC-003]** The `tls_insecure_skip_verify` parameter shall be set to `false` in all production deployments; deployments with `tls_insecure_skip_verify: true` shall be rejected by the health check script with a WARNING log entry.
+
+**[REQ-MPQUIC-SEC-004]** The stripe transport engine shall encrypt every UDP shard payload using AES-256-GCM before transmission, providing both confidentiality and authenticated integrity for all stripe-transported packets.
+
+**[REQ-MPQUIC-SEC-005]** Stripe session encryption keys shall be derived from TLS 1.3 Exporter Material (RFC 5705) after the QUIC handshake completes, producing independent directional keys; no manual key configuration shall be required.
+
+**[REQ-MPQUIC-SEC-006]** The stripe engine shall maintain a monotonically increasing nonce counter per direction; any received packet whose nonce does not strictly exceed the last accepted nonce for that session shall be rejected and the `mpquic_session_decrypt_fail` counter shall be incremented.
+
+**[REQ-MPQUIC-SEC-007]** The pprof HTTP debug server, when enabled via `--pprof`, shall bind exclusively to `127.0.0.1` and shall never be configured on a network-reachable address.
+
+**[REQ-MPQUIC-SEC-008]** The Control API (`control_api_listen`) shall bind exclusively to `127.0.0.1:<port>` and shall require a valid Bearer token in the `Authorization` header for all state-modifying requests when `control_api_auth_token` is set.
+
+**[REQ-MPQUIC-SEC-009]** The Prometheus metrics HTTP server shall bind to the tunnel IP address (e.g., `10.200.x.y:9090`) and shall not be accessible from WAN interfaces or public IP addresses; the nftables firewall on the VPS server shall not expose port 9090 externally.
+
+**[REQ-MPQUIC-SEC-010]** The systemd service unit shall set `NoNewPrivileges=true` and shall restrict the process capability set to the minimum required: `CAP_NET_ADMIN`, `CAP_NET_RAW`, and `CAP_NET_BIND_SERVICE`.
+
+### 3.3 Networking Requirements
+
+**[REQ-MPQUIC-NET-001]** The `ensure_tun.sh` script, executed as `ExecStartPre` by the systemd service, shall create the TUN interface if absent and shall configure the IP address and MTU idempotently, without failing if the interface already exists and is correctly configured.
+
+**[REQ-MPQUIC-NET-002]** Each client UDP pipe socket shall be bound to a source IP address and, when the `bind_ip` value uses the `if:<ifname>` syntax, to the kernel-level interface via `SO_BINDTODEVICE`, ensuring correct egress on multi-homed hosts.
+
+**[REQ-MPQUIC-NET-003]** The system shall support a 1:1 mapping between WAN physical interfaces and single-path tunnel instances, with instances 1–6 mapping to `enp7s3`–`enp7s8` respectively as specified in the deployment configuration.
+
+**[REQ-MPQUIC-NET-004]** The multipath client shall support at least 1 and at most an operator-defined number of simultaneous WAN paths, limited only by available host UDP port and socket resources.
+
+**[REQ-MPQUIC-NET-005]** The server shall accept connections from multiple simultaneous clients on the same UDP listener port and shall demultiplex sessions by session ID (`ipToUint32(tunIP) XOR fnv32a(pathName)`).
+
+**[REQ-MPQUIC-NET-006]** The `mpquic-lan-routing-check.sh` script shall validate and optionally repair policy routing entries for LAN-to-tunnel traffic for instances 1 through 6 or for a single specified instance.
+
+### 3.4 Performance Requirements
+
+**[REQ-MPQUIC-PERF-001]** The stripe transport engine shall sustain an aggregate bidirectional throughput of at least 300 Mbps when operating with 3 active WAN paths and 12 UDP pipes per path, as validated on the production hardware configuration (dual Starlink WAN5+WAN6, 24 total pipes, measured result: 303 Mbps).
+
+**[REQ-MPQUIC-PERF-002]** Each UDP socket (client and server) shall have its receive and transmit kernel buffers set to at least 7 MB (7,340,032 bytes) to absorb bursts of up to 100 ms at 500 Mbps; the host sysctl parameters `net.core.rmem_max` and `net.core.wmem_max` shall be set to at least 7 MB.
+
+**[REQ-MPQUIC-PERF-003]** The RX batch receive loop shall read up to 8 UDP datagrams per `recvmmsg` system call on both client and server, reducing per-packet syscall overhead at high packet rates.
+
+**[REQ-MPQUIC-PERF-004]** The client TX subsystem shall use UDP Generic Segmentation Offload (`UDP_SEGMENT` / `sendmsg` with `UDP_SEGMENT` cmsg) to coalesce multiple shards destined for the same pipe into a single system call; a software fallback shall be activated automatically on kernel `EIO` error.
+
+**[REQ-MPQUIC-PERF-005]** The server TX subsystem shall use `sendmmsg` batch transmission to deliver N datagrams to different client pipe destinations in a single system call, reducing per-packet syscall overhead on the server egress path.
+
+**[REQ-MPQUIC-PERF-006]** All dataplane byte and packet counters shall be implemented using `sync/atomic` operations; no heap allocation shall occur in the TX/RX hot path for counter updates.
+
+**[REQ-MPQUIC-PERF-007]** The stripe session timeout without received traffic shall be 30 seconds; the client-to-server keepalive interval shall be 1 second; the server shall respond to keepalives only for known sessions.
+
+### 3.5 Configuration Requirements
+
+**[REQ-MPQUIC-CONF-001]** Each tunnel instance shall be configured by a dedicated YAML file, the path to which is passed via the `--config` CLI flag at process start; absence of the `--config` flag shall cause the process to terminate with a fatal error.
+
+**[REQ-MPQUIC-CONF-002]** The YAML instance configuration shall include at minimum the following fields: `role`, `tun_name`, `tun_cidr`, `remote_addr`, `remote_port`; absence of any mandatory field shall cause the process to log a fatal configuration error and exit with a non-zero status code.
+
+**[REQ-MPQUIC-CONF-003]** The `render_config.sh` script shall substitute environment variables (including `VPS_PUBLIC_IP`) in the YAML template file `<instance>.yaml.tpl`, writing the rendered output to `/run/mpquic/<instance>.yaml` before the main process starts.
+
+**[REQ-MPQUIC-CONF-004]** The dataplane QoS policy shall be configurable via either an inline `dataplane:` block within the instance YAML or a separate file referenced by `dataplane_config_file`; when both are present, the `dataplane_config_file` value shall take precedence.
+
+**[REQ-MPQUIC-CONF-005]** The metrics listen address shall be configurable via the `metrics_listen` YAML field; the value `auto` shall resolve to `<tun_local_ip>:9090`; omission of the field shall disable the metrics endpoint.
+
+**[REQ-MPQUIC-CONF-006]** The congestion algorithm shall default to `cubic` when the `congestion_algorithm` field is absent or empty; the accepted values are `cubic` and `bbr`.
+
+**[REQ-MPQUIC-CONF-007]** The transport mode shall default to `datagram` when the `transport_mode` field is absent or empty; the accepted values are `datagram`, `stream`, and `stripe`.
+
+### 3.6 Operational Requirements
+
+**[REQ-MPQUIC-OPS-001]** Each tunnel instance shall be managed by a systemd service unit instantiated from the `mpquic@.service` template, following the naming convention `mpquic@<instance>.service`.
+
+**[REQ-MPQUIC-OPS-002]** The systemd service unit shall set `Restart=always` with `RestartSec=2` so that any abnormal process termination causes an automatic restart within 2 seconds.
+
+**[REQ-MPQUIC-OPS-003]** The TUN interface shall be created and configured idempotently by `ensure_tun.sh` in the `ExecStartPre` phase; the script shall not fail if the interface is already present and correctly configured.
+
+**[REQ-MPQUIC-OPS-004]** The `mpquic-healthcheck.sh` script shall verify for each specified instance: (a) the systemd service is in `active` state, (b) the TUN interface exists and is in `UP` state, and (c) the expected IP address is assigned to the TUN interface; failures shall produce structured log output with the affected instance identifier.
+
+**[REQ-MPQUIC-OPS-005]** The `mpquic-update.sh` script shall perform the following steps in order: pull latest sources from the repository, rebuild the binary, stop the running service instances, install the new binary, and restart the service instances; the script shall re-execute itself if the binary changes during the update.
+
+**[REQ-MPQUIC-OPS-006]** The process shall enforce a hard shutdown deadline of 10 seconds after receiving `SIGTERM`; if the deadline is exceeded, the process shall call `os.Exit(1)` to prevent systemd from waiting indefinitely.
+
+**[REQ-MPQUIC-OPS-007]** The systemd service unit shall set `NoNewPrivileges=true`, `CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE`, and `AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE`; no other Linux capabilities shall be granted to the process.
+
+**[REQ-MPQUIC-OPS-008]** The `mpquic-update.sh` auto-update script shall set `LimitNOFILE=1048576` for the service to support up to 1,048,576 open file descriptors, required to sustain a large number of concurrent UDP sockets across all instances.
+
+### 3.7 API and Metrics Requirements
+
+**[REQ-MPQUIC-API-001]** The metrics HTTP server shall expose a Prometheus text-format endpoint at `GET /metrics`, returning all registered `mpquic_*` metrics in the Prometheus text exposition format (version 0.0.4).
+
+**[REQ-MPQUIC-API-002]** The metrics HTTP server shall expose a JSON statistics endpoint at `GET /api/v1/stats`, returning the fields `role`, `version`, `uptime_sec`, `total_tx_bytes`, `total_rx_bytes`, `total_tx_pkts`, `total_rx_pkts`, and either `sessions[]` (server) or `paths[]` (client).
+
+**[REQ-MPQUIC-API-003]** Server-side per-session Prometheus metrics shall use the labels `session` (hex session ID) and `peer` (source IP of the client); the following metrics shall be exposed per session: `mpquic_session_tx_bytes`, `mpquic_session_rx_bytes`, `mpquic_session_tx_packets`, `mpquic_session_rx_packets`, `mpquic_session_pipes`, `mpquic_session_fec_encoded`, `mpquic_session_fec_recovered`, `mpquic_session_arq_nack_sent`, `mpquic_session_arq_retx_recv`, `mpquic_session_arq_dup_filtered`, `mpquic_session_loss_rate_pct`, `mpquic_session_adaptive_m`, `mpquic_session_decrypt_fail`, `mpquic_session_uptime_seconds`.
+
+**[REQ-MPQUIC-API-004]** Client-side per-path Prometheus metrics shall use the labels `path` (path name from YAML) and `bind` (source bind IP); the following metrics shall be exposed per path: `mpquic_path_alive`, `mpquic_path_tx_packets`, `mpquic_path_rx_packets`, `mpquic_path_stripe_tx_bytes`, `mpquic_path_stripe_rx_bytes`, `mpquic_path_stripe_fec_recovered`.
+
+**[REQ-MPQUIC-API-005]** The Control API shall expose the following HTTP endpoints on `127.0.0.1:<control_api_listen_port>`: `GET /healthz`, `GET /dataplane`, `POST /dataplane/validate`, `POST /dataplane/apply`, `POST /dataplane/reload`; all state-modifying endpoints (`POST`) shall require a valid Bearer token when `control_api_auth_token` is configured.
+
+**[REQ-MPQUIC-API-006]** The `POST /dataplane/validate` endpoint shall validate the submitted dataplane policy (JSON or YAML) without applying it, returning HTTP 200 with a validation summary on success, or HTTP 400 with structured error details on validation failure.
+
+---
+
+## 4. Architecture Design
+
+### 4.1 Component Overview
+
+The MPQUIC/STRIPES system is composed of the following components:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  VM MPQUIC (10.10.11.100) — CLIENT SIDE                              │
+│                                                                      │
+│  ┌─────────────┐   ┌─────────────────────────────────────────────┐   │
+│  │ OpenWrt     │   │ mpquic binary (client role)                 │   │
+│  │ Router      │   │                                             │   │
+│  │ (mwan3,     │   │  ┌───────────┐  ┌────────────────────────┐  │   │
+│  │  nftables)  │   │  │ TUN read  │  │  Stripe Engine         │  │   │
+│  └──────┬──────┘   │  │ TUN write │  │  (stripe.go)           │  │   │
+│         │ LAN      │  │ mpq1–mpq6 │  │  FEC + ARQ + AES-GCM   │  │   │
+│         │ transit  │  │ mp1, cr/* │  │  Batch I/O (GSO/mmsg)  │  │   │
+│         ▼          │  └─────┬─────┘  └──────────┬─────────────┘  │   │
+│  enp6s20–23        │        │ IP pkts             │ UDP pipes    │   │
+│  enp7s1–2          │        └─────────────────────┘              │   │
+│                    │                                             │   │
+│                    │  WAN interfaces: enp7s3–enp7s8              │   │
+│                    │  SO_BINDTODEVICE per pipe                   │   │
+│                    └─────────────────────────────────────────────┘   │
+│                                                                      │
+│  ┌────────────────────────────────────────┐                          │
+│  │ mpquic-mgmt REST daemon (:8080)        │                          │
+│  │ Tunnel lifecycle API (start/stop/stats)│                          │
+│  └────────────────────────────────────────┘                          │
+│                                                                      │
+│  ┌────────────────────────────────────────┐                          │
+│  │ mpquic-watchdog (systemd timer)        │                          │
+│  │ Periodic health check + auto-recovery  │                          │
+│  └────────────────────────────────────────┘                          │
+└──────────────────────────────────────────────────────────────────────┘
+                             │  UDP (WAN5, WAN6)
+                             │  Multiple pipes (e.g., 12 per path)
+                             ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  VPS Server (172.238.232.223) — SERVER SIDE                          │
+│                                                                      │
+│  ┌─────────────────────────────────────────────────────────────┐     │
+│  │ mpquic binary (server role)                                 │     │
+│  │                                                             │     │
+│  │  ┌─────────────────────┐  ┌────────────────────────────┐    │     │
+│  │  │ UDP Listener        │  │ Stripe Session (per path)  │    │     │
+│  │  │ :46017 (mp1)        │  │ AES-GCM decrypt            │    │     │
+│  │  │ :45001–:45006       │  │ FEC Decoder                │    │     │
+│  │  │ recvmmsg batch      │  │ ARQ RX Tracker             │    │     │
+│  │  └──────────┬──────────┘  └──────────┬─────────────────┘    │     │
+│  │             │ demux by session ID    │                      │     │
+│  │             └────────────────────────┘                      │     │
+│  │                         │                                   │     │
+│  │                    TUN write/read                           │     │
+│  │                 mp1 (10.200.17.254/24)                      │     │
+│  │                 mpq1–mpq6 (10.200.1-6.2/30)                 │     │
+│  └─────────────────────────────────────────────────────────────┘     │
+│                                                                      │
+│  Prometheus metrics: tunnel_ip:9090 (not exposed on WAN)             │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### 4.2 Component Descriptions
+
+#### 4.2.1 `mpquic` binary — client role
+
+| Property | Value |
+|----------|-------|
+| Source | `cmd/mpquic/main.go` |
+| Language | Go |
+| Entry point | `func main()` → `runClientLoop()` |
+| Inputs | TUN interface (IP packets), YAML config, env vars |
+| Outputs | UDP datagrams on WAN sockets; TUN write (return path) |
+| Responsibilities | TUN read loop, multipath path management, stripe session lifecycle, signal handling, metrics server |
+
+**Key behaviours:**
+- Reads the YAML config file from `--config`
+- Initialises TUN interface (already created by `ensure_tun.sh`)
+- When `transport_mode: stripe`, instantiates `stripeClientConn` per path
+- When `multipath_enabled: true`, manages N paths with independent reconnection
+- Binds metrics HTTP server to `metrics_listen` address
+- Handles `SIGTERM`/`SIGINT` gracefully with 10-second hard deadline
+
+#### 4.2.2 `mpquic` binary — server role
+
+| Property | Value |
+|----------|-------|
+| Source | `cmd/mpquic/main.go` |
+| Language | Go |
+| Entry point | `func main()` → `runServer()` |
+| Inputs | UDP datagrams from client pipes; TUN interface (return traffic) |
+| Outputs | TUN write (received traffic); UDP datagrams to client (return path) |
+| Responsibilities | UDP listener, session demultiplexing, stripe session management, connectionTable maintenance |
+
+**Key behaviours:**
+- Accepts connections from all client pipes on a single UDP listener port
+- Demultiplexes by session ID derived from client TUN IP and path hash
+- Maintains `connectionTable` for return routing including LAN hosts
+- Exposes Prometheus metrics on tunnel IP
+
+#### 4.2.3 STRIPES transport engine
+
+| Property | Value |
+|----------|-------|
+| Sources | `cmd/mpquic/stripe.go`, `stripe_crypto.go`, `stripe_arq.go`, `stripe_gso_linux.go` |
+| Language | Go (~3400 LOC total) |
+| Implements | `datagramConn` interface (transparent to the multipath system) |
+
+**Sub-components:**
+
+| Sub-component | File | Function |
+|---------------|------|----------|
+| Wire protocol encoder/decoder | `stripe.go` | 16-byte header: magic, version, type, session, groupSeq, shardIdx, groupDataN, dataLen |
+| FEC Reed-Solomon encoder | `stripe.go` | K=10 data + M≤2 parity; adaptive mode; `github.com/klauspost/reedsolomon` |
+| FEC Reed-Solomon decoder | `stripe.go` | Reconstruct missing shards; buffer per FEC group |
+| AES-256-GCM encrypt | `stripe_crypto.go` | Per-packet encrypt; TLS Exporter key derivation |
+| AES-256-GCM decrypt | `stripe_crypto.go` | Per-packet decrypt + AEAD tag verify |
+| ARQ TX ring buffer | `stripe_arq.go` | 4096-entry ring; plaintext store for re-encrypt on NACK |
+| ARQ RX bitmap tracker | `stripe_arq.go` | 8192-bit circular bitmap; gap detection; NACK encode |
+| Deduplication receiver | `stripe.go` | Drop packets with already-seen sequence numbers |
+| Token-bucket pacer | `stripe.go` | Per-session TX rate limiter (`stripePacer`) |
+| Batch RX (`recvmmsg`) | `stripe.go` | 8 datagrams per syscall |
+| UDP GSO TX | `stripe_gso_linux.go` | `UDP_SEGMENT` coalescing; EIO fallback |
+| sendmmsg TX (server) | `stripe.go` | `WriteBatch` for multi-destination TX |
+| Keepalive loop | `stripe.go` | 1 s interval; session timeout 30 s; periodic REGISTER refresh 30 s |
+| Path health check loop | `stripe.go` | 500 ms interval; blackhole detection within 3.5 s |
+
+#### 4.2.4 mpquic-mgmt REST daemon
+
+| Property | Value |
+|----------|-------|
+| Listen address | `10.10.11.100:8080` (VM MPQUIC, LAN-only) |
+| Authentication | Bearer token (`MGMT_TOKEN`) |
+| Purpose | Tunnel lifecycle management: start, stop, restart, status, config patch |
+
+Exposed via ubus/rpcd on OpenWrt through `luci-app-mpquic` rpcd plugin. The plugin translates ubus calls to HTTP requests against mpquic-mgmt.
+
+#### 4.2.5 mpquic-watchdog
+
+| Property | Value |
+|----------|-------|
+| Type | systemd service + timer |
+| Script | `/usr/local/lib/mpquic/mpquic-tunnel-watchdog.sh` |
+| Health check script | `scripts/mpquic-healthcheck.sh` |
+| Role | Periodic health verification; optional auto-restart of failed instances |
+
+### 4.3 Data Flow
+
+#### 4.3.1 Client TX path (LAN → WAN)
+
+```
+LAN host packet
+  │
+  ▼
+OpenWrt (nftables DSCP mark + fwmark → policy routing table)
+  │
+  ▼
+TUN interface mpq{i} or mp1 (10.200.x.y/24 or /30)
+  │ TUN read (syscall)
+  ▼
+mpquic dataplane (main.go: tunReadLoop)
+  │ IP packet buffer (MTU ≤ 1300 bytes)
+  ▼
+[if transport_mode == stripe]
+Stripe Engine (stripe.go: SendDatagram)
+  │
+  ├─ FEC Encoder (Reed-Solomon K=10, effective_M shards)
+  │    → produces 1 DATA shard + M PARITY shards per group
+  │
+  ├─ AES-256-GCM Encrypt (stripe_crypto.go)
+  │    → 16B stripe header + ciphertext + 16B GCM tag
+  │
+  ├─ ARQ TX ring buffer store (plaintext, for future retransmission)
+  │
+  └─ TX dispatch (round-robin over txActivePipes)
+       │
+       ├─ [Linux] UDP GSO: coalesce N shards → 1 sendmsg per pipe
+       └─ Socket (SO_BINDTODEVICE=enp7s7, buf=7MB)
+            │ UDP datagrams → Internet → VPS :46017
+```
+
+#### 4.3.2 Server RX path (WAN → server TUN)
+
+```
+UDP datagrams arrive at VPS :46017 (all 24 client pipes → 1 socket)
+  │ recvmmsg batch (8 datagrams per syscall)
+  ▼
+Session demultiplexing (session ID = ipToUint32(tunIP) XOR fnv32a(path))
+  │
+  ▼
+Stripe Session RX (per-session goroutine)
+  │
+  ├─ AES-256-GCM Decrypt + AEAD verify
+  │    → reject + increment decrypt_fail on failure
+  │
+  ├─ ARQ RX bitmap: mark received; generate NACK if gap detected
+  │
+  ├─ Dedup check: drop if sequence already delivered
+  │
+  ├─ FEC Decoder: buffer DATA/PARITY shards; reconstruct when M shards missing
+  │
+  └─ Deliver IP packet to TUN write queue (rxCh → tunWriter goroutine)
+       │
+       ▼
+TUN write → mp1 (10.200.17.254/24) → routing → internet egress
+```
+
+#### 4.3.3 Return path (VPS TUN → client)
+
+```
+Reply IP packet arrives at VPS TUN (mp1, 10.200.17.254/24)
+  │ TUN read
+  ▼
+Connection table lookup: dstIP → stripe session (flow-hash FNV-1a on 5-tuple)
+  │
+  ▼
+FEC Encode → AES-256-GCM Encrypt → sendmmsg TX → client pipe addresses
+  │
+  ▼
+Client recvmmsg → decrypt → FEC decode → dedup → TUN write → OpenWrt → LAN host
+```
+
+---
+
+## 5. Interface Design
+
+### 5.1 YAML Instance Configuration
+
+Each instance is configured by a YAML file rendered from a `.yaml.tpl` template by `render_config.sh`. The table below lists all supported fields.
+
+#### Mandatory fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `role` | string | `client` or `server` |
+| `tun_name` | string | TUN interface name (e.g., `mpq1`, `mp1`) |
+| `tun_cidr` | string | TUN IP/prefix (e.g., `10.200.1.1/30`) |
+| `remote_addr` | string | Server IP or hostname |
+| `remote_port` | int | Server UDP listen port |
+
+#### TLS fields (client)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tls_ca_file` | string | Path to CA certificate PEM |
+| `tls_server_name` | string | Expected server CN (e.g., `mpquic-server`) |
+| `tls_insecure_skip_verify` | bool | Must be `false` in production |
+
+#### Transport fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `transport_mode` | string | `datagram` | `datagram`, `stream`, or `stripe` |
+| `congestion_algorithm` | string | `cubic` | `cubic` or `bbr` |
+| `bind_ip` | string | — | Bind IP or `if:<ifname>` |
+
+#### Stripe fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `stripe_pipes` | int | 4 | UDP pipes per path |
+| `stripe_fec_data_shards` | int | 10 | FEC K parameter |
+| `stripe_fec_parity_shards` | int | 2 | FEC M parameter |
+| `stripe_fec_mode` | string | `adaptive` | `none`, `static`, `adaptive` |
+| `stripe_rate_mbps` | int | 0 | TX rate limiter (0 = disabled) |
+
+#### Multipath fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `multipath_enabled` | bool | Enable multipath mode |
+| `multipath_policy` | string | `priority`, `failover`, `balanced` |
+| `multipath_paths` | list | Per-path: `name`, `bind_ip`, `remote_addr`, `remote_port`, `priority`, `weight` |
+
+#### Management fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `metrics_listen` | string | `auto` or `ip:port`; omit to disable |
+| `control_api_listen` | string | `127.0.0.1:19090` |
+| `control_api_auth_token` | string | Bearer token for Control API |
+| `log_level` | string | `debug`, `info`, `error` |
+
+### 5.2 Systemd Service Interface
+
+Template: `deploy/systemd/mpquic@.service`
+
+```ini
+[Unit]
+Description=MPQUIC tunnel instance %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/mpquic/global.env
+EnvironmentFile=/etc/mpquic/instances/%i.env
+ExecStartPre=/bin/sh -c '/usr/local/lib/mpquic/ensure_tun.sh "$TUN_NAME" "$TUN_CIDR" "${TUN_MTU:-1300}"'
+ExecStartPre=/bin/sh -c '/usr/local/lib/mpquic/render_config.sh "%i"'
+ExecStart=/usr/local/bin/mpquic --config /run/mpquic/%i.yaml
+ExecStopPost=-/bin/sh -c 'ip link set dev "$TUN_NAME" down 2>/dev/null || true'
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+KillMode=mixed
+KillSignal=SIGTERM
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+LimitNOFILE=1048576
+```
+
+**Environment file format** (`/etc/mpquic/instances/<i>.env`):
+```
+TUN_NAME=mpq1
+TUN_CIDR=10.200.1.1/30
+TUN_MTU=1300
+```
+
+**Global env file** (`/etc/mpquic/global.env`):
+```
+VPS_PUBLIC_IP=172.238.232.223
+```
+
+### 5.3 REST Metrics API
+
+**Base URL:** `http://<tunnel_ip>:9090`
+
+| Endpoint | Method | Content-Type | Description |
+|----------|--------|--------------|-------------|
+| `/api/v1/stats` | GET | `application/json` | JSON statistics snapshot |
+| `/metrics` | GET | `text/plain` | Prometheus text exposition |
+
+**Example: `GET /api/v1/stats` (server)**
+
+```json
+{
+  "role": "server",
+  "version": "4.2",
+  "uptime_sec": 14523.45,
+  "sessions": [
+    {
+      "session_id": "a1b2c3d4",
+      "peer_ip": "100.64.86.226",
+      "pipes": 12,
+      "tx_bytes": 892345678,
+      "tx_pkts": 612345,
+      "rx_bytes": 1234567890,
+      "rx_pkts": 845678,
+      "fec_mode": "adaptive",
+      "adaptive_m": 0,
+      "fec_encoded": 12345,
+      "fec_recovered": 234,
+      "arq_nack_sent": 567,
+      "arq_retx_recv": 523,
+      "arq_dup_filtered": 89,
+      "loss_rate_pct": 0,
+      "uptime_sec": 14500.12,
+      "decrypt_fail": 0
+    }
+  ],
+  "total_tx_bytes": 892345678,
+  "total_rx_bytes": 1234567890,
+  "total_tx_pkts": 612345,
+  "total_rx_pkts": 845678
+}
+```
+
+### 5.4 Control API
+
+**Base URL:** `http://127.0.0.1:<control_api_port>`  
+**Authentication:** `Authorization: Bearer <token>` (required for POST endpoints when token is configured)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/healthz` | GET | Process and API health status (HTTP 200 / 503) |
+| `/dataplane` | GET | Current dataplane policy snapshot (JSON) |
+| `/dataplane/validate` | POST | Validate policy body (JSON or YAML); no side effects |
+| `/dataplane/apply` | POST | Validate and apply policy body at runtime |
+| `/dataplane/reload` | POST | Reload and apply `dataplane_config_file` from disk |
+
+**Dataplane policy schema excerpt:**
+```yaml
+default_class: default
+classes:
+  critical:
+    scheduler_policy: failover
+    preferred_paths: [wan5, wan6]
+    duplicate: true
+    duplicate_copies: 2
+  default:
+    scheduler_policy: balanced
+    preferred_paths: [wan4, wan5, wan6]
+classifiers:
+  - name: voip
+    class: critical
+    protocol: udp
+    dst_ports: ["5060", "10000-20000"]
+    dscp: [46]
+```
+
+### 5.5 Prometheus Metrics Interface
+
+All metrics carry the prefix `mpquic_`. Metrics are scraped by Prometheus from `http://<tunnel_ip>:9090/metrics`.
+
+**Global metrics (no labels):**
+
+| Metric | Type | Unit |
+|--------|------|------|
+| `mpquic_uptime_seconds` | gauge | seconds |
+| `mpquic_tx_bytes_total` | counter | bytes |
+| `mpquic_rx_bytes_total` | counter | bytes |
+| `mpquic_tx_packets_total` | counter | packets |
+| `mpquic_rx_packets_total` | counter | packets |
+
+**Server per-session metrics (labels: `session`, `peer`):**
+
+| Metric | Type |
+|--------|------|
+| `mpquic_session_tx_bytes` | counter |
+| `mpquic_session_rx_bytes` | counter |
+| `mpquic_session_tx_packets` | counter |
+| `mpquic_session_rx_packets` | counter |
+| `mpquic_session_pipes` | gauge |
+| `mpquic_session_fec_encoded` | counter |
+| `mpquic_session_fec_recovered` | counter |
+| `mpquic_session_arq_nack_sent` | counter |
+| `mpquic_session_arq_retx_recv` | counter |
+| `mpquic_session_arq_dup_filtered` | counter |
+| `mpquic_session_loss_rate_pct` | gauge |
+| `mpquic_session_adaptive_m` | gauge |
+| `mpquic_session_decrypt_fail` | counter |
+| `mpquic_session_uptime_seconds` | gauge |
+
+**Client per-path metrics (labels: `path`, `bind`):**
+
+| Metric | Type |
+|--------|------|
+| `mpquic_path_alive` | gauge |
+| `mpquic_path_tx_packets` | counter |
+| `mpquic_path_rx_packets` | counter |
+| `mpquic_path_stripe_tx_bytes` | counter |
+| `mpquic_path_stripe_rx_bytes` | counter |
+| `mpquic_path_stripe_fec_recovered` | counter |
+
+---
+
+## 6. Verification and Validation
+
+### 6.1 Test Approach
+
+Testing is performed at three levels:
+
+| Level | Method | Files |
+|-------|--------|-------|
+| Unit | Go test (`go test ./cmd/mpquic/...`) | `cmd/mpquic/stripe_test.go` (14 test functions) |
+| Integration | Manual end-to-end on lab environment (VM MPQUIC + VPS) | `scripts/mpquic-multipath-smoke.sh` |
+| System | Performance benchmark on production hardware | Lab infrastructure (dual Starlink) |
+
+**Unit test scope (stripe_test.go):**
+- FEC encode/decode round-trip with and without loss
+- AES-256-GCM encrypt/decrypt correctness
+- ARQ NACK encode/decode
+- Deduplication bitmap behaviour
+- Wire protocol header encode/decode
+
+**Integration test scope:**
+- Tunnel establishment (TUN creation, QUIC handshake, REGISTER flow)
+- IP packet forwarding through single-path tunnel
+- Multipath path failover and recovery
+- Metrics endpoint availability
+
+**System test scope:**
+- Aggregate throughput ≥ 300 Mbps on 3-path stripe (validated: 303 Mbps)
+- ARQ improvement: ≥ 30% throughput gain on dual Starlink with ARQ enabled (validated: +48%, 239→354 Mbps)
+
+### 6.2 Test Cases
+
+---
+
+**[TC-MPQUIC-SW-001]** — TUN Interface Creation
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that `ensure_tun.sh` creates the TUN interface and assigns the correct IP address |
+| Preconditions | TUN interface does not exist |
+| Procedure | 1. Execute `ensure_tun.sh mpq1 10.200.1.1/30 1300`; 2. Run `ip link show mpq1`; 3. Run `ip -4 addr show mpq1` |
+| Expected result | Interface `mpq1` exists, is in UP state, IP `10.200.1.1/30` is assigned, MTU = 1300 |
+| Verifies | [REQ-MPQUIC-NET-001] |
+
+---
+
+**[TC-MPQUIC-SW-002]** — Single-path IP packet forwarding
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that IP packets injected into the client TUN interface reach the server TUN interface |
+| Preconditions | `mpquic@1` running on client; `mpquic@1` running on server |
+| Procedure | 1. `ping -I mpq1 -c 10 10.200.1.2`; 2. Capture on server TUN `mp{q1}` with `tcpdump` |
+| Expected result | 10/10 ICMP echo requests appear on server TUN within 500 ms; ICMP replies return |
+| Verifies | [REQ-MPQUIC-SW-002], [REQ-MPQUIC-SW-003] |
+
+---
+
+**[TC-MPQUIC-SW-003]** — FEC Reed-Solomon recovery
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that the FEC decoder reconstructs missing shards when M shards are absent per group |
+| Preconditions | Unit test environment; FEC K=10, M=2 |
+| Procedure | Execute `stripe_test.go` test `TestFECRoundTrip` with simulated 2-shard drop per group of 12 |
+| Expected result | All IP packets are delivered without retransmission; `fec_recovered` counter increments |
+| Verifies | [REQ-MPQUIC-SW-008], [REQ-MPQUIC-SW-009] |
+
+---
+
+**[TC-MPQUIC-SW-004]** — Adaptive FEC threshold activation
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that adaptive FEC enables parity shards when peer-reported loss exceeds 2% |
+| Preconditions | `stripe_fec_mode: adaptive`; baseline `effective_M = 0` |
+| Procedure | Simulate peer-reported loss > 2% via keepalive feedback; observe `mpquic_session_adaptive_m` metric |
+| Expected result | `mpquic_session_adaptive_m` transitions from 0 to configured M within 2 keepalive intervals (≤ 2 s) |
+| Verifies | [REQ-MPQUIC-SW-010] |
+
+---
+
+**[TC-MPQUIC-SW-005]** — ARQ NACK generation and retransmission
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that the ARQ subsystem sends NACKs and triggers retransmission for missing packets |
+| Preconditions | Unit test `TestARQNACK` in `stripe_test.go`; simulated packet drop at RX |
+| Procedure | Drop shard sequence N; wait ≤ 5 ms; observe NACK packet on wire; verify packet N is retransmitted |
+| Expected result | NACK packet encodes missing sequence N; retransmission of shard N arrives within 30 ms |
+| Verifies | [REQ-MPQUIC-SW-011], [REQ-MPQUIC-SW-012], [REQ-MPQUIC-SW-013] |
+
+---
+
+**[TC-MPQUIC-SW-006]** — Stripe deduplication
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that duplicate packets (replay of an already-received sequence) are silently discarded |
+| Preconditions | Unit test environment |
+| Procedure | Inject sequence N once, then inject it again; observe `arq_dup_filtered` counter |
+| Expected result | Second packet is dropped; `arq_dup_filtered` increments by 1; no duplicate delivery to TUN |
+| Verifies | [REQ-MPQUIC-SW-015] |
+
+---
+
+**[TC-MPQUIC-SEC-001]** — TLS 1.3 handshake and certificate validation
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that the client rejects a server presenting an untrusted certificate |
+| Preconditions | Server started with a certificate signed by a different CA |
+| Procedure | Start client with `tls_insecure_skip_verify: false`; observe connection attempt |
+| Expected result | Client logs TLS handshake error and connection is refused; tunnel is not established |
+| Verifies | [REQ-MPQUIC-SEC-001], [REQ-MPQUIC-SEC-002] |
+
+---
+
+**[TC-MPQUIC-SEC-002]** — AES-256-GCM encrypt/decrypt round-trip
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that `stripe_crypto.go` encrypt/decrypt functions are inverses for arbitrary payloads |
+| Preconditions | Unit test `TestCryptoRoundTrip` in `stripe_test.go` |
+| Procedure | Encrypt a 1400-byte payload; decrypt the ciphertext; compare with original |
+| Expected result | Decrypted output is byte-for-byte identical to original; no error returned |
+| Verifies | [REQ-MPQUIC-SEC-004] |
+
+---
+
+**[TC-MPQUIC-SEC-003]** — Anti-replay: monotonic nonce enforcement
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that a replayed packet (same nonce as a previously accepted packet) is rejected |
+| Preconditions | Unit test; established stripe session with advancing nonce |
+| Procedure | Record ciphertext of packet with nonce N; replay it after packet N+k has been accepted |
+| Expected result | Decryption of replayed packet fails; `mpquic_session_decrypt_fail` counter increments by 1 |
+| Verifies | [REQ-MPQUIC-SEC-006] |
+
+---
+
+**[TC-MPQUIC-PERF-001]** — Aggregate throughput ≥ 300 Mbps (3-path stripe)
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify the stripe engine meets the minimum throughput requirement under production conditions |
+| Preconditions | mp1 configured with WAN5+WAN6, 12 pipes per path (24 total); `iperf3` server at VPS |
+| Procedure | Run `iperf3 -c 10.200.17.254 -P 4 -t 60 -B 10.200.17.1` from VM MPQUIC; record TCP throughput |
+| Expected result | Measured aggregate throughput ≥ 300 Mbps sustained over 60 seconds |
+| Verifies | [REQ-MPQUIC-PERF-001] |
+
+---
+
+**[TC-MPQUIC-API-001]** — JSON stats endpoint correctness
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that `GET /api/v1/stats` returns a valid JSON document with all required top-level fields |
+| Preconditions | `mpquic@mp1` running with `metrics_listen: auto`; tunnel established |
+| Procedure | `curl -s http://10.200.17.1:9090/api/v1/stats \| jq .` |
+| Expected result | JSON contains `role`, `version`, `uptime_sec`, `paths[]` (client) with `name`, `alive`, `stripe_tx_bytes`; HTTP 200 |
+| Verifies | [REQ-MPQUIC-API-002] |
+
+---
+
+**[TC-MPQUIC-API-002]** — Prometheus metrics endpoint correctness
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that `GET /metrics` returns Prometheus text format with all required metric names |
+| Preconditions | `mpquic@mp1` running; tunnel established |
+| Procedure | `curl -s http://10.200.17.254:9090/metrics \| grep -E "^mpquic_"` |
+| Expected result | Output contains `mpquic_uptime_seconds`, `mpquic_session_tx_bytes`, `mpquic_session_decrypt_fail`, `mpquic_path_alive`; content-type is `text/plain` |
+| Verifies | [REQ-MPQUIC-API-001], [REQ-MPQUIC-API-003], [REQ-MPQUIC-API-004] |
+
+---
+
+**[TC-MPQUIC-OPS-001]** — Systemd auto-restart on abnormal termination
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that the systemd service restarts the process within 2 seconds of abnormal termination |
+| Preconditions | `mpquic@1.service` active and running |
+| Procedure | `kill -KILL $(systemctl show -p MainPID --value mpquic@1.service)`; wait 5 s; check service state |
+| Expected result | `systemctl is-active mpquic@1.service` returns `active`; service restarts within ≤ 4 s (RestartSec=2 + process start time) |
+| Verifies | [REQ-MPQUIC-OPS-001], [REQ-MPQUIC-OPS-002] |
+
+---
+
+**[TC-MPQUIC-OPS-002]** — Health check script: TUN interface validation
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that `mpquic-healthcheck.sh` correctly detects a missing TUN interface and reports failure |
+| Preconditions | `mpquic@1` stopped; TUN interface `mpq1` manually removed (`ip link del mpq1`) |
+| Procedure | Run `mpquic-healthcheck.sh client 1`; check exit code and stdout |
+| Expected result | Exit code non-zero; log line contains `FAIL` and `mpq1` |
+| Verifies | [REQ-MPQUIC-OPS-004] |
+
+---
+
+## 7. Requirements Traceability Matrix (RTM)
+
+| REQ-ID | Short Description | Design §ref | Implementation File | TC-ID | Status |
+|--------|------------------|-------------|---------------------|-------|--------|
+| REQ-MPQUIC-SW-001 | Single binary client/server role | §4.2.1, §4.2.2 | `cmd/mpquic/main.go` | TC-MPQUIC-SW-002 | Draft |
+| REQ-MPQUIC-SW-002 | Client TUN→transport forward | §4.3.1 | `cmd/mpquic/main.go: tunReadLoop` | TC-MPQUIC-SW-002 | Draft |
+| REQ-MPQUIC-SW-003 | Server transport→TUN forward | §4.3.2 | `cmd/mpquic/main.go: runServer` | TC-MPQUIC-SW-002 | Draft |
+| REQ-MPQUIC-SW-004 | Up to 6 simultaneous instances | §4.1, §5.2 | `deploy/systemd/mpquic@.service` | TC-MPQUIC-OPS-001 | Draft |
+| REQ-MPQUIC-SW-005 | SO_BINDTODEVICE per pipe | §4.2.3 | `cmd/mpquic/stripe.go: bindPipeToDevice` | — | Draft |
+| REQ-MPQUIC-SW-006 | N pipes per path | §4.2.3 | `cmd/mpquic/stripe.go: stripeClientConn` | TC-MPQUIC-PERF-001 | Draft |
+| REQ-MPQUIC-SW-007 | Round-robin TX + zero-alloc cache | §4.2.3 | `cmd/mpquic/stripe.go: txActivePipes` | TC-MPQUIC-PERF-001 | Draft |
+| REQ-MPQUIC-SW-008 | FEC Reed-Solomon K=10, M≤2 | §4.2.3 | `cmd/mpquic/stripe.go: fecEncode` | TC-MPQUIC-SW-003 | Draft |
+| REQ-MPQUIC-SW-009 | FEC decoder reconstruction | §4.2.3 | `cmd/mpquic/stripe.go: fecDecode` | TC-MPQUIC-SW-003 | Draft |
+| REQ-MPQUIC-SW-010 | Adaptive FEC threshold 2% | §4.2.3 | `cmd/mpquic/stripe.go: adaptiveFEC` | TC-MPQUIC-SW-004 | Draft |
+| REQ-MPQUIC-SW-011 | ARQ TX ring buffer 4096 | §4.2.3 | `cmd/mpquic/stripe_arq.go: txRing` | TC-MPQUIC-SW-005 | Draft |
+| REQ-MPQUIC-SW-012 | ARQ RX bitmap 8192 bits | §4.2.3 | `cmd/mpquic/stripe_arq.go: rxBitmap` | TC-MPQUIC-SW-005 | Draft |
+| REQ-MPQUIC-SW-013 | NACK interval 5 ms, rate 30 ms | §4.2.3 | `cmd/mpquic/stripe_arq.go: nackLoop` | TC-MPQUIC-SW-005 | Draft |
+| REQ-MPQUIC-SW-014 | connectionTable per peer TUN IP | §4.2.2 | `cmd/mpquic/main.go: connectionTable` | TC-MPQUIC-SW-002 | Draft |
+| REQ-MPQUIC-SW-015 | Stripe RX deduplication | §4.2.3 | `cmd/mpquic/stripe.go: markReceived` | TC-MPQUIC-SW-006 | Draft |
+| REQ-MPQUIC-SW-016 | N-path multipath management | §4.2.1 | `cmd/mpquic/main.go: runClientLoop` | — | Draft |
+| REQ-MPQUIC-SW-017 | Scheduler composite score | §4.2.1 | `cmd/mpquic/main.go: selectPath` | — | Draft |
+| REQ-MPQUIC-SW-018 | Path down/cooldown/recovery | §4.2.1 | `cmd/mpquic/main.go: reconnectPath` | — | Draft |
+| REQ-MPQUIC-SW-019 | Flow-hash FNV-1a 5-tuple | §4.3.3 | `cmd/mpquic/stripe.go: flowHash` | TC-MPQUIC-SW-002 | Draft |
+| REQ-MPQUIC-SW-020 | Token-bucket pacer | §4.2.3 | `cmd/mpquic/stripe.go: stripePacer` | — | Draft |
+| REQ-MPQUIC-SEC-001 | TLS 1.3 mutual auth | §4.2.1, §4.2.2 | `cmd/mpquic/main.go: tlsConfig` | TC-MPQUIC-SEC-001 | Draft |
+| REQ-MPQUIC-SEC-002 | CA + CN certificate verify | §4.2.1 | `cmd/mpquic/main.go: tlsConfig.RootCAs` | TC-MPQUIC-SEC-001 | Draft |
+| REQ-MPQUIC-SEC-003 | tls_insecure_skip_verify=false | §5.1 | `cmd/mpquic/main.go: loadConfig` | TC-MPQUIC-SEC-001 | Draft |
+| REQ-MPQUIC-SEC-004 | AES-256-GCM per shard | §4.2.3 | `cmd/mpquic/stripe_crypto.go: encrypt` | TC-MPQUIC-SEC-002 | Draft |
+| REQ-MPQUIC-SEC-005 | TLS Exporter key derivation | §4.2.3 | `cmd/mpquic/stripe_crypto.go: deriveKeys` | TC-MPQUIC-SEC-002 | Draft |
+| REQ-MPQUIC-SEC-006 | Monotonic nonce anti-replay | §4.2.3 | `cmd/mpquic/stripe_crypto.go: decrypt` | TC-MPQUIC-SEC-003 | Draft |
+| REQ-MPQUIC-SEC-007 | pprof localhost only | §4.2.1 | `cmd/mpquic/main.go: pprofAddr` | — | Draft |
+| REQ-MPQUIC-SEC-008 | Control API localhost + Bearer | §5.4 | `cmd/mpquic/main.go: controlAPIHandler` | — | Draft |
+| REQ-MPQUIC-SEC-009 | Metrics bind tunnel IP only | §5.3 | `cmd/mpquic/main.go: startMetricsServer` | TC-MPQUIC-API-001 | Draft |
+| REQ-MPQUIC-SEC-010 | systemd NoNewPrivileges + caps | §5.2 | `deploy/systemd/mpquic@.service` | TC-MPQUIC-OPS-001 | Draft |
+| REQ-MPQUIC-NET-001 | TUN creation idempotent | §4.2.5 | `scripts/ensure_tun.sh` | TC-MPQUIC-SW-001 | Draft |
+| REQ-MPQUIC-NET-002 | SO_BINDTODEVICE + bind IP | §4.2.3 | `cmd/mpquic/stripe.go: resolveBindIP` | — | Draft |
+| REQ-MPQUIC-NET-003 | 1:1 WAN–instance mapping | §2.2, §5.2 | `deploy/config/client/{1..6}.yaml` | TC-MPQUIC-SW-002 | Draft |
+| REQ-MPQUIC-NET-004 | N-path multipath | §4.2.1 | `cmd/mpquic/main.go` | TC-MPQUIC-PERF-001 | Draft |
+| REQ-MPQUIC-NET-005 | Server multi-client demux | §4.2.2 | `cmd/mpquic/main.go: runServer` | TC-MPQUIC-SW-002 | Draft |
+| REQ-MPQUIC-NET-006 | LAN routing validation script | §4.2.5 | `scripts/mpquic-lan-routing-check.sh` | TC-MPQUIC-OPS-002 | Draft |
+| REQ-MPQUIC-PERF-001 | Throughput ≥ 300 Mbps | §4.3.1 | `cmd/mpquic/stripe.go` | TC-MPQUIC-PERF-001 | Draft |
+| REQ-MPQUIC-PERF-002 | Socket buffers ≥ 7 MB | §4.2.3 | `cmd/mpquic/stripe.go: stripeSocketBufSize` | TC-MPQUIC-PERF-001 | Draft |
+| REQ-MPQUIC-PERF-003 | recvmmsg batch 8 | §4.2.3 | `cmd/mpquic/stripe.go: stripeBatchSize=8` | TC-MPQUIC-PERF-001 | Draft |
+| REQ-MPQUIC-PERF-004 | UDP GSO client TX | §4.2.3 | `cmd/mpquic/stripe_gso_linux.go` | TC-MPQUIC-PERF-001 | Draft |
+| REQ-MPQUIC-PERF-005 | sendmmsg server TX | §4.2.3 | `cmd/mpquic/stripe.go: WriteBatch` | TC-MPQUIC-PERF-001 | Draft |
+| REQ-MPQUIC-PERF-006 | sync/atomic counters, no alloc | §4.2.3 | `cmd/mpquic/stripe.go: atomic.AddUint64` | TC-MPQUIC-PERF-001 | Draft |
+| REQ-MPQUIC-PERF-007 | Timeout 30s / keepalive 1s | §4.2.3 | `cmd/mpquic/stripe.go: stripeSessionTimeout` | — | Draft |
+| REQ-MPQUIC-CONF-001 | YAML per-instance config | §5.1 | `cmd/mpquic/main.go: loadConfig` | TC-MPQUIC-SW-002 | Draft |
+| REQ-MPQUIC-CONF-002 | Mandatory YAML fields | §5.1 | `cmd/mpquic/main.go: validateConfig` | TC-MPQUIC-SW-002 | Draft |
+| REQ-MPQUIC-CONF-003 | render_config.sh env substitution | §5.2 | `scripts/render_config.sh` | TC-MPQUIC-OPS-001 | Draft |
+| REQ-MPQUIC-CONF-004 | Dataplane file precedence | §5.1, §4.2.4 | `cmd/mpquic/main.go: loadDataplane` | — | Draft |
+| REQ-MPQUIC-CONF-005 | metrics_listen auto resolution | §5.3 | `cmd/mpquic/main.go: startMetricsServer` | TC-MPQUIC-API-001 | Draft |
+| REQ-MPQUIC-CONF-006 | Congestion default cubic | §5.1 | `cmd/mpquic/main.go: main()` | — | Draft |
+| REQ-MPQUIC-CONF-007 | Transport default datagram | §5.1 | `cmd/mpquic/main.go: main()` | — | Draft |
+| REQ-MPQUIC-OPS-001 | systemd template service | §5.2 | `deploy/systemd/mpquic@.service` | TC-MPQUIC-OPS-001 | Draft |
+| REQ-MPQUIC-OPS-002 | Restart=always RestartSec=2 | §5.2 | `deploy/systemd/mpquic@.service` | TC-MPQUIC-OPS-001 | Draft |
+| REQ-MPQUIC-OPS-003 | TUN idempotent ExecStartPre | §5.2 | `scripts/ensure_tun.sh` | TC-MPQUIC-SW-001 | Draft |
+| REQ-MPQUIC-OPS-004 | Health check script | §4.2.5 | `scripts/mpquic-healthcheck.sh` | TC-MPQUIC-OPS-002 | Draft |
+| REQ-MPQUIC-OPS-005 | Update script git+rebuild+restart | §4.2.5 | `scripts/mpquic-update.sh` | — | Draft |
+| REQ-MPQUIC-OPS-006 | 10s hard shutdown deadline | §4.2.1 | `cmd/mpquic/main.go: main()` | — | Draft |
+| REQ-MPQUIC-OPS-007 | NoNewPrivileges + min caps | §5.2 | `deploy/systemd/mpquic@.service` | TC-MPQUIC-OPS-001 | Draft |
+| REQ-MPQUIC-OPS-008 | LimitNOFILE=1048576 | §5.2 | `deploy/systemd/mpquic@.service` | — | Draft |
+| REQ-MPQUIC-API-001 | Prometheus /metrics endpoint | §5.5 | `cmd/mpquic/main.go: startMetricsServer` | TC-MPQUIC-API-002 | Draft |
+| REQ-MPQUIC-API-002 | JSON /api/v1/stats endpoint | §5.3 | `cmd/mpquic/main.go: statsHandler` | TC-MPQUIC-API-001 | Draft |
+| REQ-MPQUIC-API-003 | Server session metrics labels | §5.5 | `cmd/mpquic/main.go: registerMetrics` | TC-MPQUIC-API-002 | Draft |
+| REQ-MPQUIC-API-004 | Client path metrics labels | §5.5 | `cmd/mpquic/main.go: registerMetrics` | TC-MPQUIC-API-002 | Draft |
+| REQ-MPQUIC-API-005 | Control API 5 endpoints | §5.4 | `cmd/mpquic/main.go: controlAPIServer` | — | Draft |
+| REQ-MPQUIC-API-006 | /dataplane/validate no side-effects | §5.4 | `cmd/mpquic/main.go: validateHandler` | — | Draft |
+
+---
+
+## 8. Change Log
+
+| Issue | Rev | Date | Description of Change | Author |
+|-------|-----|------|-----------------------|--------|
+| 1 | 0 | 2026-05-14 | Initial draft — ECSS-compliant TDD for MPQUIC/STRIPES system. Covers: system overview, 60 requirements (SW/SEC/NET/PERF/CONF/OPS/API), architecture design, interface design, 13 test cases, full RTM. | Telespazio Engineering Team |
+
+---
+
+*End of Document — TPZ-MPQUIC-TDD-001 Issue 1, Rev 0*

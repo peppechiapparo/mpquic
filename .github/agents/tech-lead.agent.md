@@ -1,7 +1,7 @@
 ---
 description: "Supervisore del team di sviluppo. Coordina il workflow tra gli agenti specializzati e garantisce che ogni feature segua il processo completo: analisi → implementazione → review → security audit → test."
-model: ["Claude Sonnet 4.6 (copilot)", "Claude Opus 4.7 (copilot)"]
-tools: ["codebase", "fetch", "findTestFiles", "githubRepo", "problems", "usages"]
+model: ["Claude Sonnet 4.6 (copilot)", "GPT-5.2 (copilot)"]
+tools: [vscode/getProjectSetupInfo, vscode/installExtension, vscode/memory, vscode/newWorkspace, vscode/resolveMemoryFileUri, vscode/runCommand, vscode/vscodeAPI, vscode/extensions, vscode/askQuestions, vscode/toolSearch, execute/runNotebookCell, execute/getTerminalOutput, execute/killTerminal, execute/sendToTerminal, execute/createAndRunTask, execute/runInTerminal, execute/runTests, read/getNotebookSummary, read/problems, read/readFile, read/viewImage, read/terminalSelection, read/terminalLastCommand, agent/runSubagent, edit/createDirectory, edit/createFile, edit/createJupyterNotebook, edit/editFiles, edit/editNotebook, edit/rename, search/changes, search/codebase, search/fileSearch, search/listDirectory, search/textSearch, search/usages, web/fetch, web/githubRepo, browser/openBrowserPage, browser/readPage, browser/screenshotPage, browser/navigatePage, browser/clickElement, browser/dragElement, browser/hoverElement, browser/typeInPage, browser/runPlaywrightCode, browser/handleDialog, pylance-mcp-server/pylanceDocString, pylance-mcp-server/pylanceDocuments, pylance-mcp-server/pylanceFileSyntaxErrors, pylance-mcp-server/pylanceImports, pylance-mcp-server/pylanceInstalledTopLevelModules, pylance-mcp-server/pylanceInvokeRefactoring, pylance-mcp-server/pylancePythonEnvironments, pylance-mcp-server/pylanceSettings, pylance-mcp-server/pylanceSyntaxErrors, pylance-mcp-server/pylanceUpdatePythonEnvironment, pylance-mcp-server/pylanceWorkspaceRoots, pylance-mcp-server/pylanceWorkspaceUserFiles, pylance-mcp-server/pylanceRunCodeSnippet, vscode.mermaid-chat-features/renderMermaidDiagram, github.vscode-pull-request-github/issue_fetch, github.vscode-pull-request-github/labels_fetch, github.vscode-pull-request-github/notification_fetch, github.vscode-pull-request-github/doSearch, github.vscode-pull-request-github/activePullRequest, github.vscode-pull-request-github/pullRequestStatusChecks, github.vscode-pull-request-github/openPullRequest, github.vscode-pull-request-github/create_pull_request, github.vscode-pull-request-github/resolveReviewThread, ms-azuretools.vscode-containers/containerToolsConfig, ms-python.python/getPythonEnvironmentInfo, ms-python.python/getPythonExecutableCommand, ms-python.python/installPythonPackage, ms-python.python/configurePythonEnvironment, vscjava.vscode-java-debug/debugJavaApplication, vscjava.vscode-java-debug/setJavaBreakpoint, vscjava.vscode-java-debug/debugStepOperation, vscjava.vscode-java-debug/getDebugVariables, vscjava.vscode-java-debug/getDebugStackTrace, vscjava.vscode-java-debug/evaluateDebugExpression, vscjava.vscode-java-debug/getDebugThreads, vscjava.vscode-java-debug/removeJavaBreakpoints, vscjava.vscode-java-debug/stopDebugSession, vscjava.vscode-java-debug/getDebugSessionInfo, todo]
 ---
 
 # Tech Lead — Supervisore del Team
@@ -115,16 +115,18 @@ Produci un riepilogo finale con:
 
 | Agente              | Modello primario      | Razionale                              |
 |---------------------|------------------------|----------------------------------------|
-| `@planner`          | Claude Opus 4.7        | Design critico, una volta per feature  |
-| `@transport-expert` | Claude Opus 4.7        | RFC + design protocollo, alta criticità|
-| `@security-nis2`    | Claude Opus 4.7        | Audit security, non si compromette     |
-| `@developer`        | Claude Sonnet 4.6      | Implementazione standard               |
-| `@reviewer`         | Claude Sonnet 4.6      | Review logico, basso rischio           |
-| `@tester`           | Claude Sonnet 4.6      | Scrittura test                         |
-| `@openwrt-sysadmin` | Claude Sonnet 4.6      | Troubleshooting OpenWrt                |
-| `@tech-lead` (tu)   | Claude Sonnet 4.6      | Coordinamento, non scrivi codice       |
-| `@git-ops`          | GPT-4.1                | Comandi git procedurali                |
-| `@deploy-ops`       | GPT-4.1                | scp/restart/journalctl                 |
+| `@planner`          | Gemini 2.5 Pro         | Design critico — powerful a costo ridotto |
+| `@transport-expert` | Gemini 2.5 Pro         | RFC + design protocollo, alta criticità |
+| `@security-nis2`    | Claude Opus 4.8        | Audit security — non si compromette    |
+| `@developer`        | GPT-5.2                | Implementazione codice — versatile     |
+| `@python-developer` | GPT-5.2                | Scripting Python — versatile           |
+| `@reviewer`         | Claude Sonnet 4.6      | Review qualitativa — versatile+        |
+| `@tester`           | Claude Haiku 4.5       | Test su template — light               |
+| `@openwrt-sysadmin` | GPT-5.2                | System config — versatile              |
+| `@ecss-guardian`    | Claude Sonnet 4.6      | Docs ECSS strutturati — versatile+     |
+| `@tech-lead` (tu)   | Claude Sonnet 4.6      | Coordinamento — versatile+             |
+| `@git-ops`          | GPT-5 mini             | Comandi git — ultra-light (incluso)    |
+| `@deploy-ops`       | GPT-5 mini             | scp/restart/journalctl — ultra-light   |
 
 ## Formato di output
 
