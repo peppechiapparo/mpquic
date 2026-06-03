@@ -18,10 +18,10 @@ package main
 // Per-packet overhead: 24 bytes (8 seq + 16 tag) — vs 20 bytes for the old MAC.
 
 import (
-	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
+	mpquiccrypto "mpquic/internal/mpquic/crypto"
 	"sync"
 	"sync/atomic"
 )
@@ -102,13 +102,10 @@ type stripeCipher struct {
 
 // newStripeCipher creates an AES-256-GCM cipher from a 32-byte key.
 func newStripeCipher(key [32]byte) (*stripeCipher, error) {
-	block, err := aes.NewCipher(key[:])
+	var p mpquiccrypto.AESGCMProvider
+	aead, err := p.NewAEAD(key[:])
 	if err != nil {
-		return nil, fmt.Errorf("stripe: AES init: %w", err)
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("stripe: GCM init: %w", err)
+		return nil, fmt.Errorf("stripe: %w", err)
 	}
 	return &stripeCipher{aead: aead}, nil
 }

@@ -53,6 +53,12 @@ func (s *CryptoSession) Close() error {
 		for i := range s.keys.ServerKey {
 			s.keys.ServerKey[i] = 0
 		}
+		for i := range s.keys.ClientIV {
+			s.keys.ClientIV[i] = 0
+		}
+		for i := range s.keys.ServerIV {
+			s.keys.ServerIV[i] = 0
+		}
 	}
 	return nil
 }

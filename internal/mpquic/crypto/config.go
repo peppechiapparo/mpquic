@@ -45,6 +45,11 @@ func (c *CryptoConfig) Validate() error {
 		}
 	}
 
+	if c.CustomProvider != nil && c.Profile != ProfileCustomProvider {
+		return fmt.Errorf("%w: custom_provider section present but profile is %q (expected %q)",
+			ErrInvalidConfig, c.Profile, ProfileCustomProvider)
+	}
+
 	if c.Rekey.AntiFlappingSeconds < 0 {
 		return fmt.Errorf("%w: rekey.anti_flapping_seconds must be >= 0", ErrInvalidConfig)
 	}
@@ -65,6 +70,7 @@ func DefaultCryptoConfig() *CryptoConfig {
 			IntervalSeconds:     3600,
 			MaxPackets:          1_000_000_000,
 			MaxBytes:            1_073_741_824,
+			OnEpochChange:       true,
 			AntiFlappingSeconds: 10,
 		},
 	}
