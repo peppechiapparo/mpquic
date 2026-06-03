@@ -2,9 +2,9 @@
 
 **Progetto:** MPQUIC/STRIPES — Telespazio  
 **Feature:** `feat/crypto-abstraction-layer`  
-**Versione baseline:** v4.9  
+**Versione baseline:** v4.9 → commit 1459ed8  
 **Data:** 2026-06-03  
-**Stato:** Design approvato — Implementazione in corso
+**Stato:** Fasi A-D completate — Implementazione Fase E in corso
 
 ---
 
@@ -23,6 +23,24 @@
 11. [Piano di rollback](#11-piano-di-rollback)
 12. [Analisi rischi e invarianti](#12-analisi-rischi-e-invarianti)
 13. [Test e benchmark plan](#13-test-e-benchmark-plan)
+
+---
+
+## Stato di implementazione (aggiornato 2026-06-03)
+
+| Fase | Nome | Stato | Commit | Test |
+|------|------|--------|--------|------|
+| A | Foundation — interfacce e tipi | ✅ Completata | `c08d5c3` | 18/18 |
+| B | Provider AES-GCM | ✅ Completata | `4ff1d3a` | 18/18 |
+| C | NonceManager + AAD esteso | ✅ Completata | `35e6f13` | 18/18 |
+| D | KeyExchangeProvider classico + hybrid | ✅ Completata | `1459ed8` | 36/36 |
+| E | External provider skeleton | 🔜 In pianificazione | — | — |
+| F | Rekey engine | 🔜 In pianificazione | — | — |
+| G | Integrazione completa | 🔜 In pianificazione | — | — |
+
+**Go version**: `1.24` (aggiornato da 1.22 in Fase D — richiesto da `crypto/mlkem`)  
+**Branch attivo**: `feat/crypto-abstraction-layer`  
+**Prossima release target**: v5.0 (completamento Fase G)
 
 ---
 
@@ -769,6 +787,222 @@ BenchmarkStripeEncryptShard_After   # post-refactoring (deve essere ≤ baseline
 BenchmarkHybridKEX_DeriveKeys       # overhead ML-KEM vs classical
 BenchmarkRekey_Full                 # overhead rekey completo
 ```
+
+---
+
+## 14. Fase D — Dettaglio implementazione KeyExchangeProvider
+
+*Data completamento: 2026-06-03 | Commit: `1459ed8` | Branch: `feat/crypto-abstraction-layer`*
+
+### 14.1 File implementati
+
+| File | LOC | Ruolo |
+|------|-----|-------|
+| `internal/mpquic/crypto/kex.go` | ~50 | Interfacce `KeyExchangeProvider` e `KemProvider` |
+| `internal/mpquic/crypto/kex_classical.go` | ~90 | `ClassicalKEXProvider` (X25519 + HKDF-SHA256) |
+| `internal/mpquic/crypto/kex_hybrid.go` | ~240 | `HybridKEXProvider` (X25519 + ML-KEM-768 + HKDF-SHA256) |
+| `internal/mpquic/crypto/kex_factory.go` | ~30 | Factory `NewKeyExchangeProvider(profile)` |
+| `internal/mpquic/crypto/kex_classical_test.go` | ~120 | 5 test ClassicalKEX |
+| `internal/mpquic/crypto/kex_hybrid_test.go` | ~180 | 6 test HybridKEX |
+| `internal/mpquic/crypto/kex_factory_test.go` | ~60 | 4 test factory (100% coverage) |
+| `internal/mpquic/crypto/kex_bench_test.go` | ~80 | 4 benchmark handshake/derive |
+| `go.mod` | — | `go 1.22` → `go 1.24` |
+| **Eliminato** | — | `errors_kex.go` (consolidato in `errors.go`) |
+
+### 14.2 Interfaccia `KeyExchangeProvider` (invariata dal design Fase A)
+
+```go
+type KeyExchangeProvider interface {
+    Name() string
+    GenerateKeyPair() (publicKey, privateKey []byte, err error)
+    DeriveSessionKeys(quicSecret, localPrivKey, remotePubKey, sessionID []byte) (*SessionKeys, error)
+}
+```
+
+### 14.3 Sub-interfaccia `KemProvider` (nuova in Fase D)
+
+Introdotta per i provider KEM che richiedono un passo di encapsulation client-side prima della derivazione delle chiavi. I provider DH classici (es. `ClassicalKEXProvider`) implementano solo `KeyExchangeProvider`; i provider KEM implementano `KemProvider`.
+
+```go
+type KemProvider interface {
+    KeyExchangeProvider
+    // ClientEncapsulate prepara il materiale per il lato client del KEX KEM.
+    // serverPubKey: chiave pubblica ibrida del server (X25519_pub || MLKEM_ek) = 1216 bytes
+    // Returns:
+    //   localPrivKey  = X25519_priv_client || mlkem_shared (64 bytes)
+    //   peerKeyShare  = X25519_pub_client  || MLKEM_ciphertext (1120 bytes)
+    ClientEncapsulate(serverPubKey []byte) (localPrivKey, peerKeyShare []byte, err error)
+}
+```
+
+**Nota per integratori**: per usare `HybridKEXProvider` come client, fare type assertion a `KemProvider`:
+```go
+if kp, ok := provider.(crypto.KemProvider); ok {
+    localPrivKey, peerKeyShare, err := kp.ClientEncapsulate(serverPubKey)
+}
+```
+
+### 14.4 ClassicalKEXProvider — Specifica tecnica
+
+| Parametro | Valore |
+|-----------|--------|
+| **Algoritmo KEX** | X25519 Elliptic Curve Diffie-Hellman |
+| **KDF** | HKDF-SHA-256 (RFC 5869) |
+| **Libreria** | `crypto/ecdh` (Go stdlib) |
+| **Chiave pubblica** | 32 byte |
+| **Chiave privata** | 32 byte |
+| **HKDF salt** | `quicSecret` (64 byte, da QUIC TLS Exporter) |
+| **HKDF IKM** | `sharedX` (32 byte, output ECDH X25519) |
+| **HKDF info** | `"X25519-HKDF-SHA256" \|\| "\|" \|\| sessionID` |
+| **HKDF output** | 88 byte |
+| **Output layout** | `ClientKey[0:32] \| ServerKey[32:64] \| ClientIV[64:76] \| ServerIV[76:88]` |
+| **Sicurezza classica** | 128-bit |
+| **Sicurezza post-quantum** | ❌ Non protetto |
+
+**Flusso handshake Classical**:
+```
+SERVER:
+  pub_s, priv_s := ClassicalKEX.GenerateKeyPair()  // → X25519 keypair server
+  # trasmetti pub_s al client
+
+CLIENT:
+  pub_c, priv_c := ClassicalKEX.GenerateKeyPair()  // → X25519 keypair client
+  # trasmetti pub_c al server
+
+ENTRAMBI:
+  SessionKeys = ClassicalKEX.DeriveSessionKeys(quicSecret, priv_own, pub_peer, sessionID)
+  # quicSecret = QUIC TLS Exporter("mpquic-stripe-v1", sessionID_bytes, 64)
+  # risultato identico su entrambi i lati (simmetria ECDH)
+```
+
+### 14.5 HybridKEXProvider — Specifica tecnica
+
+| Parametro | Valore |
+|-----------|--------|
+| **Algoritmo KEX** | X25519 + ML-KEM-768 (ibrido) |
+| **Standard ML-KEM** | NIST FIPS 203 — IND-CCA2, livello 3 |
+| **KDF** | HKDF-SHA-256 (RFC 5869) |
+| **Libreria X25519** | `crypto/ecdh` (Go stdlib) |
+| **Libreria ML-KEM** | `crypto/mlkem` (Go 1.24 stdlib, FIPS 203) |
+| **Chiave pubblica server** | 1216 byte = `X25519_pub(32) \|\| ML-KEM-768_ek(1184)` |
+| **Chiave privata server** | 96 byte = `X25519_priv(32) \|\| ML-KEM-768_dk_seed(64)` |
+| **peerKeyShare (client→server)** | 1120 byte = `X25519_pub_client(32) \|\| ML-KEM-768_ciphertext(1088)` |
+| **localPrivKey client** | 64 byte = `X25519_priv_client(32) \|\| mlkem_shared(32)` |
+| **HKDF salt** | `quicSecret` (64 byte) |
+| **HKDF IKM** | `sharedX(32) \|\| mlkemShared(32)` = 64 byte |
+| **HKDF info** | `"X25519+ML-KEM-768-HKDF-SHA256" \|\| "\|" \|\| sessionID` |
+| **HKDF output** | 88 byte |
+| **Output layout** | `ClientKey[0:32] \| ServerKey[32:64] \| ClientIV[64:76] \| ServerIV[76:88]` |
+| **Sicurezza classica** | 128-bit (X25519) |
+| **Sicurezza post-quantum** | ✅ NIST level 3 (ML-KEM-768, 178-bit quantum security) |
+| **Protezione SNDL** | ✅ "Store Now Decrypt Later" mitigato |
+
+**Flusso handshake Hybrid**:
+```
+SERVER (una sola volta per sessione):
+  pub_s, priv_s := HybridKEX.GenerateKeyPair()
+  # pub_s = X25519_pub_s(32) || ML-KEM-768_ek(1184) — trasmetti al client
+
+CLIENT:
+  localPrivKey, peerKeyShare := HybridKEX.ClientEncapsulate(pub_s)
+  # Internamente:
+  #   1. Genera X25519_priv_c, X25519_pub_c
+  #   2. Encapsula su ML-KEM-768_ek del server → mlkem_shared(32), mlkem_ct(1088)
+  #   3. localPrivKey = X25519_priv_c(32) || mlkem_shared(32)
+  #   4. peerKeyShare = X25519_pub_c(32)  || mlkem_ct(1088)
+  # trasmetti peerKeyShare al server
+
+  servPubX25519 := pub_s[:32]  # primi 32 byte di pub_s
+  clientKeys := HybridKEX.DeriveSessionKeys(quicSecret, localPrivKey, servPubX25519, sessionID)
+
+SERVER:
+  serverKeys := HybridKEX.DeriveSessionKeys(quicSecret, priv_s, peerKeyShare, sessionID)
+  # Internamente:
+  #   1. X25519 ECDH: sharedX = X25519(priv_s[:32], peerKeyShare[:32])
+  #   2. ML-KEM Decapsulate: mlkemShared = dk.Decapsulate(peerKeyShare[32:])
+  #   3. IKM = sharedX(32) || mlkemShared(32) = 64 byte
+  #   4. HKDF(sha256, IKM, quicSecret, "X25519+ML-KEM-768-HKDF-SHA256|<sessionID>", 88)
+  #   5. SessionKeys = keyMat[:88]
+
+# clientKeys == serverKeys (proprietà di correttezza del KEM)
+```
+
+### 14.6 Sicurezza crittografica — dettaglio
+
+**Domain separation** (applicato in Fase D su indicazione @security-nis2):
+L'`info` HKDF include il nome dell'algoritmo come prefix (`"algo_name|sessionID"`). Questo impedisce cross-protocol confusion tra provider diversi anche in caso di futura negoziazione on-wire.
+
+**Zeroization** (in tutti i provider):
+- `defer zeroize(sharedX)` — segreto X25519 azzerato immediatamente dopo l'uso
+- `defer zeroize(mlkemShared)` — shared secret ML-KEM azzerato
+- `defer zeroize(ikm)` — IKM composito azzerato
+- `defer zeroize(keyMat)` — output HKDF azzerato dopo la copia in SessionKeys
+- `runtime.KeepAlive` applicato per prevenire dead-code elimination del compilatore
+
+**Input validation** (fail strict):
+- Tutte le slice sono validate con `!= expected_size` (uguaglianza esatta) prima di ogni slicing
+- `ErrEmptySessionID` tornato se `len(sessionID) == 0`
+- `ErrInvalidKeySize` tornato per qualsiasi dimensione non attesa
+
+### 14.7 Factory — `NewKeyExchangeProvider`
+
+```go
+func NewKeyExchangeProvider(profile CryptoProfile) (KeyExchangeProvider, error) {
+    switch profile {
+    case ProfilePerformance:    return NewClassicalKEXProvider(), nil
+    case ProfileHybridSecurity: return NewHybridKEXProvider(), nil
+    case ProfileCustomProvider: return nil, ErrProviderNotFound  // Fase E
+    default:                    return nil, ErrInvalidProfile
+    }
+}
+```
+
+### 14.8 Benchmark performance (misurati su Intel Core Ultra 9 185H, Go 1.26.0)
+
+| Operazione | Classical (X25519) | Hybrid (X25519+ML-KEM-768) | Overhead assoluto |
+|------------|-------------------|---------------------------|-------------------|
+| **Handshake completo** | 203 µs | 387 µs | +184 µs (+90%) |
+| **DeriveSessionKeys only** | 68 µs | 153 µs | +85 µs (+125%) |
+| Allocazioni/handshake | 84 allocs, 4.9 KB | 96 allocs, 31.8 KB | +12 allocs, +26.9 KB |
+
+**Impatto sul throughput tunnel**: **ZERO**. Il KEX avviene una sola volta al riavvio del tunnel (handshake ~0.4ms). AES-256-GCM rimane il cifrante per-pacchetto in entrambi i profili. Test iperf3 reale: 365 Mbps receiver su tunnel mp1 (WAN5+WAN6, 12 pipe/WAN, 20 secondi) — risultato identico pre e post Fase D.
+
+### 14.9 Test suite (risultati aggiornati)
+
+| Suite | Test | Risultato | Race detector |
+|-------|------|-----------|---------------|
+| `TestClassicalKEX_GenerateKeyPair` | Dimensioni chiavi | ✅ PASS | ✅ |
+| `TestClassicalKEX_DeriveSessionKeys` | Output SessionKeys | ✅ PASS | ✅ |
+| `TestClassicalKEX_CrossDerivation` | Simmetria ECDH | ✅ PASS | ✅ |
+| `TestClassicalKEX_EmptySessionID` | Errore atteso | ✅ PASS | ✅ |
+| `TestClassicalKEX_InvalidKeySize` | Errore atteso | ✅ PASS | ✅ |
+| `TestHybridKEX_GenerateKeyPair` | Dimensioni 1216/96 | ✅ PASS | ✅ |
+| `TestHybridKEX_ClientEncapsulate` | Dimensioni 64/1120 | ✅ PASS | ✅ |
+| `TestHybridKEX_CrossDerivation` | Simmetria KEM | ✅ PASS | ✅ |
+| `TestHybridKEX_EmptySessionID` | Errore atteso | ✅ PASS | ✅ |
+| `TestHybridKEX_InvalidLocalPrivKeySize` | Errore atteso | ✅ PASS | ✅ |
+| `TestHybridKEX_ClientEncapsulate_InvalidKeySize` | Errore atteso | ✅ PASS | ✅ |
+| `TestNewKeyExchangeProvider_*` (4) | Factory profiles | ✅ PASS | ✅ |
+| **Totale crypto package** | **36/36** | **✅ PASS** | **✅ 0 race** |
+
+### 14.10 Security audit — esito (@security-nis2, 2026-06-03)
+
+**Esito**: APPROVATO CON NOTE — nessuna vulnerabilità critica.
+
+| Finding | Severità | Stato |
+|---------|----------|-------|
+| SEC-D01: Domain separation HKDF mancante | Media (CVSSv3 4.8) | ✅ Risolto in Fase D |
+| SEC-D03: Validazione lunghezza `<` invece di `==` | Bassa | ✅ Risolto in Fase D |
+| SEC-D02: Ordine IKM X25519‖ML-KEM vs standard TLS | Bassa | 📝 Debito tecnico (protocollo STRIPES proprietario) |
+| SEC-D04: zeroize best-effort (limite Go stdlib) | Informativa | 📝 Documentato, non risolvibile |
+
+### 14.11 Stato di integrazione nel tunnel
+
+⚠️ **I provider Fase D NON sono ancora integrati nel tunnel operativo.**
+
+Il tunnel attivo usa ancora `stripe_keyex.go` (QUIC TLS Exporter), che produce chiavi per AES-256-GCM. Il campo `encrypted=AES-256-GCM` nei log di sistema è corretto e **rimarrà tale** — AES-256-GCM è il cifrante simmetrico per-pacchetto (non il KEX).
+
+L'integrazione completa dei provider Fase D avverrà in **Fase G** (`NewCryptoSession` → `stripe.go`).
 
 ---
 

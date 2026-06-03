@@ -4905,3 +4905,94 @@ mpquic_path_blackhole_seconds_total{path="mp1",bind="if:enp7s8"} 3.215
   entrambi i path.
 - I valori `mpquic_path_blackhole_seconds_total` sono cumulativi: confrontare il
   delta pre/post chaos, non il valore assoluto.
+
+---
+
+## 8. Crypto Abstraction Layer
+
+*Sezione aggiornata: 2026-06-03 | Fasi A-D completate*
+
+### Stato implementazione
+
+Il Crypto Abstraction Layer di STRIPES è implementato in `internal/mpquic/crypto/`. L'obiettivo è rendere il sottosistema cifrante **indipendente dal data plane** e supportare profili crittografici configurabili, inclusi provider post-quantum e provider esterni certificati.
+
+| Fase | Nome | Stato | Note |
+|------|------|--------|------|
+| A | Foundation — interfacce e tipi | ✅ | Package `internal/mpquic/crypto/` creato |
+| B | Provider AES-GCM | ✅ | `AESGCMProvider` — comportamento identico all'esistente |
+| C | NonceManager + AAD esteso | ✅ | `ContextualNonceManager`, AAD v1/v2 backward-compatible |
+| D | KeyExchangeProvider | ✅ | `ClassicalKEXProvider` + `HybridKEXProvider` (ML-KEM-768) |
+| E-G | Ext. provider, Rekey, Integrazione | 🔜 | Rilascio v5.0 |
+
+### Package structure
+
+```
+internal/mpquic/crypto/
+├── errors.go           # Errori: ErrAuthFailed, ErrNonceExhausted, ErrInvalidKeySize, ...
+├── types.go            # CryptoProfile, SessionKeys, CryptoMetrics
+├── config.go           # CryptoConfig (mapping YAML crypto:)
+├── crypto.go           # CryptoSession factory (wiring completo in Fase G)
+├── aead.go             # AEADProvider interface + AESGCMProvider
+├── kex.go              # KeyExchangeProvider + KemProvider interfaces
+├── kex_classical.go    # ClassicalKEXProvider: X25519 + HKDF-SHA256
+├── kex_hybrid.go       # HybridKEXProvider: X25519 + ML-KEM-768 + HKDF-SHA256
+├── kex_factory.go      # NewKeyExchangeProvider(profile)
+├── nonce.go            # NonceManager + ContextualNonceManager (per-worker, lock-free)
+└── aad.go              # BuildAADv1, BuildAADv2, DetectAADVersion
+```
+
+### Profili crittografici
+
+| Profilo YAML | KEX | AEAD | Post-quantum | Uso tipico |
+|-------------|-----|------|-------------|-----------|
+| `performance` | X25519 | AES-256-GCM | ❌ | Default — alta velocità |
+| `hybrid_security` | X25519 + ML-KEM-768 | AES-256-GCM | ✅ NIST level 3 | Ambienti ad alta classificazione |
+| `custom_provider` | Fornitore terzo | Fornitore terzo | Dipende | Integrazione cifrante certificata |
+
+### Separazione responsabilità KEX vs AEAD
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                    Una volta per sessione                   │
+│                                                            │
+│  KeyExchangeProvider.GenerateKeyPair()                     │
+│  [+ KemProvider.ClientEncapsulate()] ← solo profilo hybrid │
+│  KeyExchangeProvider.DeriveSessionKeys()                   │
+│       → SessionKeys {ClientKey, ServerKey, ClientIV, ServerIV} │
+└───────────────────────┬────────────────────────────────────┘
+                        │ SessionKeys (88 byte totali)
+┌───────────────────────▼────────────────────────────────────┐
+│                  Per ogni pacchetto (hot path)              │
+│                                                            │
+│  NonceManager.NextNonce(workerID) → nonce[12]              │
+│  AEADProvider.NewAEAD(ClientKey/ServerKey) → cipher.AEAD   │
+│  aead.Seal(dst, nonce, plaintext, AAD)     → ciphertext    │
+└────────────────────────────────────────────────────────────┘
+```
+
+**Importante**: `encrypted=AES-256-GCM` nel log STRIPES indica il cifrante **per-pacchetto** (hot path). Cambiare il profilo da `performance` a `hybrid_security` non cambia questa dicitura — cambia il meccanismo di derivazione delle chiavi AES-256, non il cifrante stesso.
+
+### Handshake hybrid X25519+ML-KEM-768 (Fase D)
+
+Il protocollo STRIPES implementa lo scambio ibrido con le seguenti proprietà:
+- **Sicurezza combinata**: la sessione è sicura se almeno uno tra X25519 e ML-KEM-768 è sicuro (defense in depth)
+- **Ordine IKM**: `sharedX(32) || mlkemShared(32)` → proprietario STRIPES (non interoperabile con TLS X25519MLKEM768 IETF)
+- **HKDF info**: `"X25519+ML-KEM-768-HKDF-SHA256|<sessionID>"` — domain separation per prevenire downgrade attack
+- **Overhead handshake**: +184µs rispetto al classico (+0.4ms totale, trascurabile)
+
+Riferimento tecnico completo: `docs/CIFRANTE_STRIPES.md` §14.
+
+### Integrazione con provider esterno (Fase E, in sviluppo)
+
+Il profilo `custom_provider` caricherà un plugin Go (`.so`) che implementa `ExternalCryptoAdapter`. Il fornitore esterno può sostituire il KEX, l'AEAD o entrambi. Per la specifica di integrazione, vedere `docs/CIFRANTE_STRIPES.md` §8 e il documento `STRIPES_External_Crypto_Provider_Spec.md` (da creare in Fase E).
+
+Livelli di integrazione previsti:
+- **Livello A**: fornitore fornisce solo `AEADProvider` (cifrante per-pacchetto)
+- **Livello B**: fornitore fornisce solo `KeyExchangeProvider` (derivazione chiavi)
+- **Livello C**: fornitore fornisce `ExternalCryptoAdapter` completo (KEX + AEAD)
+
+### Requisiti di sistema
+
+- **Go 1.24+** obbligatorio per il profilo `hybrid_security` (`crypto/mlkem` richiede Go 1.24)
+- Build corrente: Go 1.26.0 su VPS (172.238.232.223) e VM client (10.10.11.100)
+- Tutti e 36 i test del package crypto passano con `-race` (zero data races)
