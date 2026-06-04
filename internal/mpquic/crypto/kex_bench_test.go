@@ -1,6 +1,7 @@
-package crypto
+package crypto_test
 
 import (
+	"mpquic/internal/mpquic/crypto"
 	"testing"
 )
 
@@ -13,7 +14,7 @@ var (
 // X25519: GenerateKeyPair (server) + GenerateKeyPair (client) + DeriveSessionKeys x2.
 // Questo è l'overhead one-time per tunnel al momento della connessione.
 func BenchmarkClassicalKEX_Handshake(b *testing.B) {
-	p := NewClassicalKEXProvider()
+	p := crypto.NewClassicalKEXProvider()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		servPub, servPriv, err := p.GenerateKeyPair()
@@ -39,7 +40,7 @@ func BenchmarkClassicalKEX_Handshake(b *testing.B) {
 // X25519+ML-KEM-768: GenerateKeyPair (server) + ClientEncapsulate + DeriveSessionKeys x2.
 // Questo è l'overhead one-time per tunnel al momento della connessione.
 func BenchmarkHybridKEX_Handshake(b *testing.B) {
-	p := NewHybridKEXProvider()
+	p := crypto.NewHybridKEXProvider()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		servPub, servPriv, err := p.GenerateKeyPair()
@@ -54,7 +55,7 @@ func BenchmarkHybridKEX_Handshake(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		_, err = p.DeriveSessionKeys(benchQuicSecret, clientLocalPriv, servPub[:x25519KeySize], benchSessionID)
+		_, err = p.DeriveSessionKeys(benchQuicSecret, clientLocalPriv, servPub[:32], benchSessionID)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -64,7 +65,7 @@ func BenchmarkHybridKEX_Handshake(b *testing.B) {
 // BenchmarkClassicalKEX_DeriveOnly misura solo DeriveSessionKeys (senza keygen).
 // Modella il costo quando le chiavi sono già note (es. rekeying).
 func BenchmarkClassicalKEX_DeriveOnly(b *testing.B) {
-	p := NewClassicalKEXProvider()
+	p := crypto.NewClassicalKEXProvider()
 	servPub, servPriv, _ := p.GenerateKeyPair()
 	clientPub, _, _ := p.GenerateKeyPair()
 	_ = servPub
@@ -79,7 +80,7 @@ func BenchmarkClassicalKEX_DeriveOnly(b *testing.B) {
 
 // BenchmarkHybridKEX_DeriveOnly misura solo DeriveSessionKeys lato server (senza keygen/encapsulate).
 func BenchmarkHybridKEX_DeriveOnly(b *testing.B) {
-	p := NewHybridKEXProvider()
+	p := crypto.NewHybridKEXProvider()
 	servPub, servPriv, _ := p.GenerateKeyPair()
 	clientLocalPriv, clientPeerKeyShare, _ := p.ClientEncapsulate(servPub)
 	_ = clientLocalPriv

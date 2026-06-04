@@ -1,13 +1,14 @@
-package crypto
+package crypto_test
 
 import (
 	"bytes"
 	"errors"
+	"mpquic/internal/mpquic/crypto"
 	"testing"
 )
 
 func TestClassicalKEX_GenerateKeyPair(t *testing.T) {
-	p := NewClassicalKEXProvider()
+	p := crypto.NewClassicalKEXProvider()
 	pub1, priv1, err := p.GenerateKeyPair()
 	if err != nil {
 		t.Fatalf("GenerateKeyPair: %v", err)
@@ -32,7 +33,7 @@ func TestClassicalKEX_GenerateKeyPair(t *testing.T) {
 }
 
 func TestClassicalKEX_DeriveSessionKeys(t *testing.T) {
-	p := NewClassicalKEXProvider()
+	p := crypto.NewClassicalKEXProvider()
 	remotePub, _, err := p.GenerateKeyPair()
 	if err != nil {
 		t.Fatalf("GenerateKeyPair(remote): %v", err)
@@ -67,7 +68,7 @@ func TestClassicalKEX_DeriveSessionKeys(t *testing.T) {
 }
 
 func TestClassicalKEX_CrossDerivation(t *testing.T) {
-	p := NewClassicalKEXProvider()
+	p := crypto.NewClassicalKEXProvider()
 	clientPub, clientPriv, err := p.GenerateKeyPair()
 	if err != nil {
 		t.Fatalf("GenerateKeyPair(client): %v", err)
@@ -98,7 +99,7 @@ func TestClassicalKEX_CrossDerivation(t *testing.T) {
 }
 
 func TestClassicalKEX_EmptySessionID(t *testing.T) {
-	p := NewClassicalKEXProvider()
+	p := crypto.NewClassicalKEXProvider()
 	remotePub, _, err := p.GenerateKeyPair()
 	if err != nil {
 		t.Fatalf("GenerateKeyPair(remote): %v", err)
@@ -108,20 +109,20 @@ func TestClassicalKEX_EmptySessionID(t *testing.T) {
 		t.Fatalf("GenerateKeyPair(local): %v", err)
 	}
 	_, err = p.DeriveSessionKeys(nil, localPriv, remotePub, nil)
-	if !errors.Is(err, ErrEmptySessionID) {
+	if !errors.Is(err, crypto.ErrEmptySessionID) {
 		t.Fatalf("expected ErrEmptySessionID, got %v", err)
 	}
 }
 
 func TestClassicalKEX_InvalidKeySize(t *testing.T) {
-	p := NewClassicalKEXProvider()
+	p := crypto.NewClassicalKEXProvider()
 	remotePub, _, err := p.GenerateKeyPair()
 	if err != nil {
 		t.Fatalf("GenerateKeyPair(remote): %v", err)
 	}
 	badPriv := make([]byte, 31)
 	_, err = p.DeriveSessionKeys(nil, badPriv, remotePub, []byte("sess"))
-	if !errors.Is(err, ErrInvalidKeySize) {
+	if !errors.Is(err, crypto.ErrInvalidKeySize) {
 		t.Fatalf("expected ErrInvalidKeySize, got %v", err)
 	}
 }

@@ -21,6 +21,8 @@ type AEADProvider interface {
 // Allocazione-libera nel hot path: la AEAD restituita da NewAEAD usa AES-NI quando disponibile.
 type AESGCMProvider struct{}
 
+func NewAESGCMProvider() *AESGCMProvider { return &AESGCMProvider{} }
+
 // Name restituisce il nome dell'algoritmo.
 func (AESGCMProvider) Name() string { return "AES-256-GCM" }
 

@@ -140,17 +140,17 @@ QUIC TLS Exporter("mpquic-stripe-v1", sessionID_bytes, 64)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        stripe.go (data plane)                    │
-│                                                                  │
+│                        stripe.go (data plane)                   │
+│                                                                 │
 │  stripeEncryptShard(session CryptoSession, hdr, shard) []byte   │
-│  stripeDecryptPkt(session CryptoSession, pkt) ([]byte, bool)     │
-│                              │                                   │
+│  stripeDecryptPkt(session CryptoSession, pkt) ([]byte, bool)    │
+│                              │                                  │
 │                              │ interface calls only             │
 └──────────────────────────────┼──────────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────────┐
-│              internal/mpquic/crypto/  (CryptoSession)            │
-│                                                                  │
+│              internal/mpquic/crypto/  (CryptoSession)           │
+│                                                                 │
 │  ┌──────────────────┐  ┌────────────────┐  ┌─────────────────┐  │
 │  │ KeyExchangeProv. │  │  AEADProvider  │  │  NonceManager   │  │
 │  │                  │  │                │  │                 │  │
@@ -158,17 +158,17 @@ QUIC TLS Exporter("mpquic-stripe-v1", sessionID_bytes, 64)
 │  │ • HybridKEX      │  │ (future: CC20) │  │ (per-worker)    │  │
 │  │   (X25519+MLKEM) │  │                │  │                 │  │
 │  └──────────────────┘  └────────────────┘  └─────────────────┘  │
-│                                                                  │
-│  ┌──────────────────┐  ┌────────────────┐                        │
-│  │  RekeyManager    │  │ ExtCryptoAdapt.│                        │
-│  │ (epoch, triggers)│  │ (plugin loader)│                        │
-│  └──────────────────┘  └────────────────┘                        │
+│                                                                 │
+│  ┌──────────────────┐  ┌────────────────┐                       │
+│  │  RekeyManager    │  │ ExtCryptoAdapt.│                       │
+│  │ (epoch, triggers)│  │ (plugin loader)│                       │
+│  └──────────────────┘  └────────────────┘                       │
 └─────────────────────────────────────────────────────────────────┘
               │                    │
-    ┌─────────▼────────┐  ┌────────▼──────────┐
+    ┌─────────▼────────┐  ┌────────▼───────────┐
     │  crypto/mlkem    │  │ external .so plugin│
     │  crypto/ecdh     │  │ (fornitore terzo)  │
-    │  crypto/aes      │  └───────────────────┘
+    │  crypto/aes      │  └────────────────────┘
     │  crypto/hkdf     │
     └──────────────────┘
 ```
