@@ -9,12 +9,12 @@
 |-------|--------|
 | Document ID | TPZ-MPQUIC-TDD-001 |
 | Issue | 1 |
-| Revision | 0 |
+| Revision | 1 |
 | Status | Draft |
 | Author | Telespazio Engineering Team |
 | Reviewed by | Tech Lead |
 | Approved by | — |
-| Date | 2026-05-14 |
+| Date | 2026-06-04 |
 | Classification | Internal |
 | Applicable standards | ECSS-E-ST-40C, ECSS-Q-ST-80C |
 
@@ -43,15 +43,18 @@
    - 4.1 [Component Overview](#41-component-overview)
    - 4.2 [Component Descriptions](#42-component-descriptions)
    - 4.3 [Data Flow](#43-data-flow)
+   - 4.4 [Crypto Abstraction Layer (CAL)](#44-crypto-abstraction-layer-cal)
 5. [Interface Design](#5-interface-design)
    - 5.1 [YAML Instance Configuration](#51-yaml-instance-configuration)
    - 5.2 [Systemd Service Interface](#52-systemd-service-interface)
    - 5.3 [REST Metrics API](#53-rest-metrics-api)
    - 5.4 [Control API](#54-control-api)
    - 5.5 [Prometheus Metrics Interface](#55-prometheus-metrics-interface)
+   - 5.6 [Crypto Section YAML Configuration](#56-crypto-section-yaml-configuration)
 6. [Verification and Validation](#6-verification-and-validation)
    - 6.1 [Test Approach](#61-test-approach)
    - 6.2 [Test Cases](#62-test-cases)
+   - 6.3 [Crypto Abstraction Layer Test Cases](#63-crypto-abstraction-layer-test-cases)
 7. [Requirements Traceability Matrix (RTM)](#7-requirements-traceability-matrix-rtm)
 8. [Change Log](#8-change-log)
 
@@ -97,6 +100,8 @@ This document does **not** cover: OpenWrt mwan3 configuration, nftables firewall
 | RD-08 | AES-256-GCM crypto module | `cmd/mpquic/stripe_crypto.go` |
 | RD-09 | Hybrid ARQ module | `cmd/mpquic/stripe_arq.go` |
 | RD-10 | Systemd service template | `deploy/systemd/mpquic@.service` |
+| RD-11 | Crypto Abstraction Layer design document | `docs/CIFRANTE_STRIPES.md` |
+| RD-12 | STRIPES External Crypto Provider Specification | `docs/STRIPES_External_Crypto_Provider_Spec.md` |
 
 ### 1.4 Acronyms and Abbreviations
 
@@ -105,18 +110,24 @@ This document does **not** cover: OpenWrt mwan3 configuration, nftables firewall
 | ARQ | Automatic Repeat reQuest |
 | AES-GCM | Advanced Encryption Standard — Galois/Counter Mode |
 | BBR | Bottleneck Bandwidth and RTT (congestion control algorithm) |
+| CAL | Crypto Abstraction Layer |
 | CC | Congestion Control |
 | ECSS | European Cooperation for Space Standardization |
 | FEC | Forward Error Correction |
 | GEO | Geostationary Earth Orbit |
 | GSO | Generic Segmentation Offload |
+| HKDF | HMAC-based Key Derivation Function (RFC 5869) |
 | ICD | Interface Control Document |
+| KEM | Key Encapsulation Mechanism |
+| KEX | Key Exchange |
 | LEO | Low Earth Orbit |
 | LTE | Long-Term Evolution (mobile broadband) |
+| ML-KEM | Module-Lattice Key Encapsulation Mechanism (NIST FIPS 203) |
 | MPQUIC | Multipath QUIC (project name; also refers to the binary) |
 | NACK | Negative Acknowledgement |
 | NIS2 | Network and Information Security Directive 2 (EU 2022/2555) |
 | PFS | Perfect Forward Secrecy |
+| PQC | Post-Quantum Cryptography |
 | QUIC | QUIC transport protocol (RFC 9000) |
 | RTM | Requirements Traceability Matrix |
 | SATCOM | Satellite Communications |
@@ -270,6 +281,20 @@ Operator runs `mpquic-update.sh`. The script performs: git pull, binary rebuild,
 **[REQ-MPQUIC-SEC-009]** The Prometheus metrics HTTP server shall bind to the tunnel IP address (e.g., `10.200.x.y:9090`) and shall not be accessible from WAN interfaces or public IP addresses; the nftables firewall on the VPS server shall not expose port 9090 externally.
 
 **[REQ-MPQUIC-SEC-010]** The systemd service unit shall set `NoNewPrivileges=true` and shall restrict the process capability set to the minimum required: `CAP_NET_ADMIN`, `CAP_NET_RAW`, and `CAP_NET_BIND_SERVICE`.
+
+**[REQ-MPQUIC-SEC-011]** When `stripe_crypto_enabled: true`, the data plane shall access all cryptographic operations exclusively through the `CryptoSession` interface (`internal/mpquic/crypto/`); direct dependencies on `crypto/aes` or `crypto/cipher` in transport code shall not exist on the CAL path. When `stripe_crypto_enabled: false`, the pre-v5.0 legacy cipher path shall remain active for backward compatibility.
+
+**[REQ-MPQUIC-SEC-012]** The `performance` crypto profile shall use X25519 (ECDH, RFC 7748) for key exchange and AES-256-GCM for authenticated encryption; key derivation shall use HKDF-SHA-256 (RFC 5869) with `quicSecret` (64 bytes from QUIC TLS Exporter) as salt and the X25519 shared secret as IKM; the output layout shall be `ClientKey[32] | ServerKey[32] | ClientIV[12] | ServerIV[12]`.
+
+**[REQ-MPQUIC-SEC-013]** The `hybrid_security` crypto profile shall combine X25519 and ML-KEM-768 (NIST FIPS 203, IND-CCA2, security level 3) in a hybrid key exchange; the combined IKM for HKDF-SHA-256 shall be `sharedX(32) ‖ mlkemShared(32)`; this profile shall provide at minimum 178-bit post-quantum security against quantum adversaries, mitigating Store-Now-Decrypt-Later (SNDL) attacks.
+
+**[REQ-MPQUIC-SEC-014]** The `custom_provider` crypto profile shall load the external cipher implementation via Go `plugin.Open`; the loaded symbol `CryptoProvider` shall be type-asserted to `ExternalCryptoAdapter`; failure of `plugin.Open` or the type assertion shall cause a fatal error at session establishment and shall not fall back to any built-in profile.
+
+**[REQ-MPQUIC-SEC-015]** `CryptoSession` shall retain at minimum the two most recent cipher epochs (current epoch N and previous epoch N-1) to allow decryption of in-flight packets during re-key transitions; the `Open` function shall attempt decryption with the current epoch first and fall back to epoch N-1 on AEAD tag failure before returning `ErrAuthFailed`.
+
+**[REQ-MPQUIC-SEC-016]** Registering a cipher epoch with an ID already present in the `CryptoSession` epoch map shall return `ErrRekeyBadEpoch` and shall not overwrite the existing epoch entry; the session shall remain fully operational after this error condition.
+
+**[REQ-MPQUIC-SEC-017]** Cryptographic key material (`quicSecret`, derived session keys, shared secrets) shall not be written to log output at any severity level; when `stripe_crypto_enabled: true`, the system shall return a hard error (not a silent downgrade to the legacy path) if `len(quicSecret) < 64`.
 
 ### 3.3 Networking Requirements
 
@@ -576,6 +601,132 @@ Client recvmmsg → decrypt → FEC decode → dedup → TUN write → OpenWrt �
 
 ---
 
+### 4.4 Crypto Abstraction Layer (CAL)
+
+The Crypto Abstraction Layer (`internal/mpquic/crypto/`) decouples STRIPES cryptographic operations from the data plane, enabling runtime-configurable cipher profiles without modifying transport code. Introduced in v5.0 (Fasi A–G), it is governed by the `stripe_crypto_enabled` feature flag (default `false` — legacy path remains active when unset).
+
+#### 4.4.1 Package architecture
+
+```
+internal/mpquic/crypto/
+├── crypto.go           # CryptoSession — implements cipher.AEAD; epoch-aware encrypt/decrypt
+├── aead.go             # AEADProvider interface + AESGCMProvider
+├── kex.go              # KeyExchangeProvider interface + KemProvider sub-interface
+├── kex_classical.go    # ClassicalKEXProvider (X25519 + HKDF-SHA-256)
+├── kex_hybrid.go       # HybridKEXProvider (X25519 + ML-KEM-768 + HKDF-SHA-256)
+├── kex_factory.go      # NewKeyExchangeProvider(profile) factory
+├── nonce.go            # NonceManager interface + ContextualNonceManager (per-worker, lock-free)
+├── rekey.go            # RekeyManager (threshold + event triggers, anti-flap 10 s)
+├── external.go         # ExternalCryptoAdapter interface + plugin loader (plugin.Open)
+├── config.go           # CryptoConfig (YAML mapping), Validate()
+├── errors.go           # Domain errors (ErrAuthFailed, ErrRekeyBadEpoch, ErrNonceExhausted, …)
+├── types.go            # CryptoProfile, SessionKeys, EpochID, CryptoMetrics
+└── metrics.go          # Prometheus metrics registration
+```
+
+#### 4.4.2 Component interaction
+
+```
+cmd/mpquic/stripe.go  (data plane)
+        │  cipher.AEAD interface only
+        ▼
+cmd/mpquic/stripe_crypto.go  newStripeCiphers()
+        │
+        │  (StripeCryptoEnabled=true → CAL path)
+        ▼
+internal/mpquic/crypto/  CryptoSession  ─── implements cipher.AEAD
+        │
+        ├── AEADProvider  ──► AESGCMProvider  (crypto/aes, AES-256-GCM)
+        ├── KeyExchangeProvider
+        │     ├── ClassicalKEXProvider   (X25519 + HKDF-SHA-256)
+        │     └── HybridKEXProvider      (X25519 + ML-KEM-768 + HKDF-SHA-256)
+        │           └── KemProvider sub-interface  (ClientEncapsulate)
+        ├── RekeyManager   ── epoch 0..255; threshold + event triggers
+        └── ExternalCryptoAdapter  (plugin.Open → vendor .so)
+```
+
+#### 4.4.3 Cipher profiles
+
+| Profile | KEX | AEAD | Post-quantum | Use case |
+|---------|-----|------|-------------|----------|
+| `performance` | X25519 | AES-256-GCM | ❌ | High-throughput, classical security |
+| `hybrid_security` | X25519 + ML-KEM-768 | AES-256-GCM | ✅ FIPS 203 level 3 | SNDL resistance, NIS2 high-impact |
+| `custom_provider` | Vendor plugin | Vendor plugin | Vendor-defined | Certified third-party cipher |
+
+Profile selection is governed by the `crypto.profile` YAML field (see §5.6). When `stripe_crypto_enabled: false`, the pre-v5.0 `stripeEncrypt*` path is used unchanged (full backward compatibility).
+
+#### 4.4.4 Epoch management
+
+`CryptoSession` maintains a map of active cipher epochs keyed by `EpochID` (`uint8`). At most two epochs are typically active (current N and previous N-1) to handle in-flight packets during re-key transitions. Epoch 0 is the initial epoch derived via QUIC TLS Exporter.
+
+| Event | Action |
+|-------|--------|
+| `UpdateKeys(N)` | Adds epoch N; calls `PruneOldKeys` to remove epochs older than N-1 |
+| Duplicate `UpdateKeys(N)` | Returns `ErrRekeyBadEpoch` — no silent overwrite (§REQ-MPQUIC-SEC-016) |
+| `Seal(dst, nonce, plaintext, aad)` | Copies nonce to local buffer; sets `nonce[0] = epochID` (no caller mutation) |
+| `Open(dst, nonce, ciphertext, aad)` | Tries current epoch; falls back to prev-epoch on AEAD tag failure |
+| Tag verify failure | Increments `TotalAuthFailures`; returns `dst` unmodified |
+
+#### 4.4.5 Key derivation summary
+
+**Classical (`performance` profile):**
+```
+quicSecret = QUIC TLS Exporter("mpquic-stripe-v1", sessionID, 64)
+sharedX    = X25519(localPrivKey, remotePubKey)   [32 bytes]
+
+HKDF-SHA-256(
+  salt = quicSecret[64B],
+  IKM  = sharedX[32B],
+  info = "X25519-HKDF-SHA256|<sessionID>"
+) → 88B → ClientKey[32] | ServerKey[32] | ClientIV[12] | ServerIV[12]
+```
+
+**Hybrid (`hybrid_security` profile):**
+```
+quicSecret  = QUIC TLS Exporter("mpquic-stripe-v1", sessionID, 64)
+sharedX     = X25519(localPrivKey, remotePubKey)     [32 bytes]
+mlkemShared = ML-KEM-768 decapsulate/encapsulate     [32 bytes]
+
+HKDF-SHA-256(
+  salt = quicSecret[64B],
+  IKM  = sharedX[32B] ‖ mlkemShared[32B],
+  info = "X25519+ML-KEM-768-HKDF-SHA256|<sessionID>"
+) → 88B → ClientKey[32] | ServerKey[32] | ClientIV[12] | ServerIV[12]
+```
+
+The `quicSecret` derivation is unchanged from pre-CAL (QUIC TLS Exporter per REQ-MPQUIC-SEC-005).
+
+#### 4.4.6 Implementation status (v5.0)
+
+| Phase | Name | Status | Commit | Test results |
+|-------|------|--------|--------|-------------|
+| A | Foundation — interfaces and types | ✅ Complete | `c08d5c3` | 18/18 PASS |
+| B | AES-GCM provider | ✅ Complete | `4ff1d3a` | 18/18 PASS |
+| C | NonceManager + extended AAD | ✅ Complete | `35e6f13` | 18/18 PASS |
+| D | Classical + Hybrid KEX providers | ✅ Complete | `1459ed8` | 36/36 PASS |
+| E | External provider plugin loader | ✅ Complete | combined E+F | — |
+| F | Rekey engine | ✅ Complete | combined E+F | — |
+| G | Full wire integration + hardening | ✅ Complete | `418d7b6` | **58/58 PASS + 3 SKIP** |
+
+**Release tag**: `v5.0` — deployed on both production nodes (2026-06-04).
+**Go version**: 1.26 (upgraded from 1.22 in Phase D — required by `crypto/mlkem`).
+**Race detector**: 0 data races across all 58 passing tests.
+
+#### 4.4.7 Security audit summary (Fasi A–G)
+
+| Finding | Description | Severity | Status |
+|---------|-------------|----------|--------|
+| SEC-D01 | HKDF domain separation missing | Medium (CVSSv3 4.8) | ✅ Fixed in Phase D |
+| SEC-D02 | X25519‖ML-KEM IKM ordering vs TLS convention | Low | 📝 Accepted debt (proprietary protocol) |
+| SEC-D03 | Key size validated with `<` instead of `==` | Low | ✅ Fixed in Phase D |
+| SEC-D04 | `zeroize` best-effort (Go stdlib GC limitation) | Informational | 📝 Documented |
+| SEC-G01 | Re-key in-place server bypasses CAL factory | Low | 📝 Phase H debt |
+| SEC-G02 | Duplicate epoch registration — silent overwrite | Medium | ✅ Fixed in Phase G |
+| SEC-G03 | `stripeKeyMaterial` not zeroed after consumption | Low | 📝 Phase H debt |
+| SEC-G04 | Short `quicSecret` caused silent legacy downgrade | Medium | ✅ Fixed in Phase G |
+
+---
+
 ## 5. Interface Design
 
 ### 5.1 YAML Instance Configuration
@@ -800,6 +951,58 @@ All metrics carry the prefix `mpquic_`. Metrics are scraped by Prometheus from `
 
 ---
 
+### 5.6 Crypto Section YAML Configuration
+
+The `crypto:` block is added to an instance YAML file when the Crypto Abstraction Layer is activated via `stripe_crypto_enabled: true`. When this flag is `false` (default), the legacy `stripe_crypto.go` path is used and this section is ignored.
+
+#### Activation field
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `stripe_crypto_enabled` | bool | `false` | `true` activates the CAL; `false` uses the pre-v5.0 legacy cipher path |
+
+#### Full `crypto:` schema
+
+```yaml
+stripe_crypto_enabled: true          # false = pre-v5.0 legacy path (default)
+
+crypto:
+  enabled: true
+  profile: performance               # performance | hybrid_security | custom_provider
+
+  rekey:
+    enabled: false                   # Phase H — disabled in v5.0
+    interval_seconds: 3600           # periodic re-key interval
+    max_packets: 1000000000          # re-key after N packets
+    max_bytes: 1073741824            # re-key after N bytes
+    on_path_recovery: false          # re-key on WAN path recovery
+    anti_flapping_seconds: 10        # minimum interval between re-keys
+
+  # Required only when profile: custom_provider
+  custom_provider:
+    path: /opt/mpquic/plugins/crypto/vendor_crypto.so
+    config_file: /etc/mpquic/crypto/vendor_config.yaml
+```
+
+#### Profile-specific notes
+
+| Profile | Additional requirement | Build flag |
+|---------|----------------------|------------|
+| `performance` | None | Standard |
+| `hybrid_security` | `quicSecret` must be ≥ 64 bytes; ML-KEM available | `goexperiment.mlkem` (Go 1.24+) |
+| `custom_provider` | `custom_provider.path` must be set; `.so` must export `CryptoProvider` symbol | Standard |
+
+#### Validation rules
+
+| Rule | Enforcement |
+|------|-------------|
+| `stripe_crypto_enabled: true` + `len(quicSecret) < 64` | Hard error — no silent downgrade (REQ-MPQUIC-SEC-017) |
+| `profile: custom_provider` without `custom_provider.path` | Fatal config error at startup |
+| `profile: hybrid_security` without `goexperiment.mlkem` build | Compile-time error |
+| `rekey.anti_flapping_seconds < 0` | Config validation error |
+
+---
+
 ## 6. Verification and Validation
 
 ### 6.1 Test Approach
@@ -808,7 +1011,7 @@ Testing is performed at three levels:
 
 | Level | Method | Files |
 |-------|--------|-------|
-| Unit | Go test (`go test ./cmd/mpquic/...`) | `cmd/mpquic/stripe_test.go` (14 test functions) |
+| Unit | Go test (`go test ./cmd/mpquic/... ./internal/mpquic/crypto/...`) | `stripe_test.go` (14 functions), `crypto_test.go`, `kex_*_test.go`, `external_loader_test.go` |
 | Integration | Manual end-to-end on lab environment (VM MPQUIC + VPS) | `scripts/mpquic-multipath-smoke.sh` |
 | System | Performance benchmark on production hardware | Lab infrastructure (dual Starlink) |
 
@@ -1001,6 +1204,82 @@ Testing is performed at three levels:
 
 ---
 
+### 6.3 Crypto Abstraction Layer Test Cases
+
+---
+
+**[TC-MPQUIC-CAL-001]** — CryptoSession Seal/Open round-trip
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that `CryptoSession.Seal` followed by `CryptoSession.Open` recovers the original plaintext without mutating the caller's nonce buffer |
+| Preconditions | `CryptoSession` initialised with `performance` profile, single epoch |
+| Procedure | Execute Go unit tests in `internal/mpquic/crypto/crypto_test.go` with `-race` flag |
+| Expected result | `Open(Seal(plaintext)) == plaintext`; no error; nonce slice passed to `Seal` is unmodified after return |
+| Verifies | [REQ-MPQUIC-SEC-011], [REQ-MPQUIC-SEC-012] |
+
+---
+
+**[TC-MPQUIC-CAL-002]** — Epoch fallback during re-key transition
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that a packet encrypted under epoch N-1 is correctly decrypted after epoch N is installed on the receiver |
+| Preconditions | Two `CryptoSession` instances representing server and client; server advances to epoch 1, client remains at epoch 0 |
+| Procedure | Execute `TestCryptoSession_EpochFallback_RealScenario` in `crypto_test.go` |
+| Expected result | Server successfully decrypts epoch-0 packet using prev-epoch fallback; no `ErrAuthFailed`; `TotalDecryptions` increments |
+| Verifies | [REQ-MPQUIC-SEC-015] |
+
+---
+
+**[TC-MPQUIC-CAL-003]** — Duplicate epoch rejection
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that registering the same epoch ID twice returns `ErrRekeyBadEpoch` and leaves the session operational |
+| Preconditions | `CryptoSession` with epoch 1 already installed |
+| Procedure | Execute `TestCryptoSession_DuplicateEpoch` in `crypto_test.go` |
+| Expected result | Second `UpdateKeys(epoch=1)` returns `ErrRekeyBadEpoch`; session continues functioning; `UpdateKeys(epoch=2)` succeeds |
+| Verifies | [REQ-MPQUIC-SEC-016] |
+
+---
+
+**[TC-MPQUIC-CAL-004]** — Short `quicSecret` hard error with `StripeCryptoEnabled=true`
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that `newStripeCiphers` returns a hard error (no silent downgrade to legacy) when `quicSecret` < 64 bytes and `StripeCryptoEnabled=true` |
+| Preconditions | `StripeCryptoEnabled=true`; `quicSecret` of length 32 bytes |
+| Procedure | Execute `TestNewStripeCiphers_ShortQuicSecret_StripeCryptoEnabled` in `cmd/mpquic/stripe_crypto_test.go` |
+| Expected result | Error returned containing `"StripeCryptoEnabled=true but quicSecret len=32 (need ≥64)"`; no cipher instance created; no fallback to legacy |
+| Verifies | [REQ-MPQUIC-SEC-011], [REQ-MPQUIC-SEC-017] |
+
+---
+
+**[TC-MPQUIC-CAL-005]** — External plugin loader (`custom_provider`)
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that `LoadExternalProvider` correctly loads a compliant Go plugin and type-asserts `ExternalCryptoAdapter` |
+| Preconditions | Fake provider `.so` compiled from `internal/mpquic/crypto/testdata/fake_provider/` using compatible Go build mode |
+| Procedure | Execute `TestLoadExternalProvider_*` tests in `external_loader_test.go`; tests SKIP automatically when plugin ABI is incompatible (e.g., `-race` build mode) |
+| Expected result | With compatible build: provider loads; `Name()`, `Version()`, `AEADProvider()` return expected values; `Close()` returns nil; with incompatible ABI: test SKIPs gracefully |
+| Verifies | [REQ-MPQUIC-SEC-014] |
+
+---
+
+**[TC-MPQUIC-CAL-006]** — Hybrid KEX cross-derivation symmetry
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that `HybridKEXProvider.DeriveSessionKeys` produces identical `SessionKeys` on client and server sides from their respective key material |
+| Preconditions | `hybrid_security` profile; Go 1.24+ with `goexperiment.mlkem` |
+| Procedure | Execute `TestHybridKEX_CrossDerivation` in `internal/mpquic/crypto/kex_hybrid_test.go` |
+| Expected result | `clientKeys.ClientKey == serverKeys.ClientKey`; `clientKeys.ServerKey == serverKeys.ServerKey`; each key is exactly 32 bytes; no errors |
+| Verifies | [REQ-MPQUIC-SEC-013] |
+
+---
+
 ## 7. Requirements Traceability Matrix (RTM)
 
 | REQ-ID | Short Description | Design §ref | Implementation File | TC-ID | Status |
@@ -1069,6 +1348,13 @@ Testing is performed at three levels:
 | REQ-MPQUIC-API-004 | Client path metrics labels | §5.5 | `cmd/mpquic/main.go: registerMetrics` | TC-MPQUIC-API-002 | Draft |
 | REQ-MPQUIC-API-005 | Control API 5 endpoints | §5.4 | `cmd/mpquic/main.go: controlAPIServer` | — | Draft |
 | REQ-MPQUIC-API-006 | /dataplane/validate no side-effects | §5.4 | `cmd/mpquic/main.go: validateHandler` | — | Draft |
+| REQ-MPQUIC-SEC-011 | CAL exclusive crypto dependency (when enabled) | §4.4.2, §5.6 | `cmd/mpquic/stripe_crypto.go: newStripeCiphers` | TC-MPQUIC-CAL-001, TC-MPQUIC-CAL-004 | Draft |
+| REQ-MPQUIC-SEC-012 | Performance profile: X25519 + AES-256-GCM + HKDF-SHA-256 | §4.4.3, §4.4.5 | `internal/mpquic/crypto/kex_classical.go` | TC-MPQUIC-CAL-001 | Draft |
+| REQ-MPQUIC-SEC-013 | Hybrid profile: X25519 + ML-KEM-768 + HKDF-SHA-256 | §4.4.3, §4.4.5 | `internal/mpquic/crypto/kex_hybrid.go` | TC-MPQUIC-CAL-006 | Draft |
+| REQ-MPQUIC-SEC-014 | custom_provider: plugin.Open + ExternalCryptoAdapter | §4.4.2, §5.6 | `internal/mpquic/crypto/external.go` | TC-MPQUIC-CAL-005 | Draft |
+| REQ-MPQUIC-SEC-015 | Epoch fallback: retain current N and previous N-1 | §4.4.4 | `internal/mpquic/crypto/crypto.go: Open` | TC-MPQUIC-CAL-002 | Draft |
+| REQ-MPQUIC-SEC-016 | Duplicate epoch → ErrRekeyBadEpoch, no overwrite | §4.4.4 | `internal/mpquic/crypto/crypto.go: addEpochLocked` | TC-MPQUIC-CAL-003 | Draft |
+| REQ-MPQUIC-SEC-017 | No key logging; hard error on short quicSecret | §4.4.5, §5.6 | `cmd/mpquic/stripe_crypto.go: newStripeCiphers` | TC-MPQUIC-CAL-004 | Draft |
 
 ---
 
@@ -1077,6 +1363,7 @@ Testing is performed at three levels:
 | Issue | Rev | Date | Description of Change | Author |
 |-------|-----|------|-----------------------|--------|
 | 1 | 0 | 2026-05-14 | Initial draft — ECSS-compliant TDD for MPQUIC/STRIPES system. Covers: system overview, 60 requirements (SW/SEC/NET/PERF/CONF/OPS/API), architecture design, interface design, 13 test cases, full RTM. | Telespazio Engineering Team |
+| 1 | 1 | 2026-06-04 | Crypto Abstraction Layer (CAL) — v5.0. Added: §4.4 CAL architecture (phases A–G, tag v5.0, 58/58 PASS); §5.6 crypto YAML schema; §6.3 six CAL test cases (TC-MPQUIC-CAL-001..006); §3.2 security requirements REQ-MPQUIC-SEC-011..017 (crypto profiles, epoch management, key zeroization); §7 RTM rows for SEC-011..017; §1.3 RD-11 (CIFRANTE_STRIPES.md) and RD-12 (External Provider Spec); acronyms CAL/KEX/KEM/ML-KEM/PQC/HKDF. Security audit (Fasi A–G): SEC-G02 and SEC-G04 fixed; SEC-D01 and SEC-D03 fixed in Phase D; SEC-G01/G03 and SEC-D02/D04 accepted as Phase H deferred items. | Telespazio Engineering Team |
 
 ---
 
