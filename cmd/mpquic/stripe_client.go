@@ -273,14 +273,10 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		initialAdaptiveM = int32(parityM)
 	}
 
-	// Create AES-256-GCM ciphers from TLS-exported key material
-	txCipher, err := newStripeCipher(keys.c2sKey)
+	// Create crypto layer: CryptoSession (se StripeCryptoEnabled) o AES-GCM diretto.
+	txCipher, rxCipher, err := newStripeCiphers(cfg, keys, false /* isServer */)
 	if err != nil {
-		return nil, fmt.Errorf("stripe: TX cipher: %w", err)
-	}
-	rxCipher, err := newStripeCipher(keys.s2cKey)
-	if err != nil {
-		return nil, fmt.Errorf("stripe: RX cipher: %w", err)
+		return nil, fmt.Errorf("stripe: cipher init: %w", err)
 	}
 
 	scc := &stripeClientConn{

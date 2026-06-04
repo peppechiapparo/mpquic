@@ -60,6 +60,8 @@ type Config struct {
 	StripePathDegradedThreshold time.Duration `yaml:"stripe_path_degraded_threshold"`
 	StripePathDegradedRecovery  time.Duration `yaml:"stripe_path_degraded_recovery"`
 	StripeHealthCheckInterval   time.Duration `yaml:"stripe_health_check_interval"`
+	// CryptoSession: layer crypto avanzato su stripe (Fase G).
+	StripeCryptoEnabled bool `yaml:"stripe_crypto_enabled"` // default false
 }
 
 type MultipathPathConfig struct {

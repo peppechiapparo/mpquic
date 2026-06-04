@@ -522,6 +522,7 @@ func (sdc *stripeServerDC) resetFlushTimer() {
 // stripeServer manages the server-side UDP listener for stripe connections.
 // Multiple clients can connect; each is identified by session ID.
 type stripeServer struct {
+	cfg        *Config
 	conn       *net.UDPConn
 	sessions   map[uint32]*stripeSession
 	addrToSess map[string]uint32 // "IP:port" → sessionID
@@ -612,6 +613,7 @@ func newStripeServer(cfg *Config, tun *water.Interface, tunMultiQueue bool, ct *
 	}
 
 	ss := &stripeServer{
+		cfg:        cfg,
 		conn:       conn,
 		sessions:   make(map[uint32]*stripeSession),
 		addrToSess: make(map[string]uint32),
@@ -905,14 +907,9 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 			ss.logger.Errorf("stripe: register for session %08x with no negotiated key", sessionID)
 			return
 		}
-		txCipher, err := newStripeCipher(km.s2cKey)
+		txCipher, rxCipher, err := newStripeCiphers(ss.cfg, km, true /* isServer */)
 		if err != nil {
-			ss.logger.Errorf("stripe: TX cipher init session %08x: %v", sessionID, err)
-			return
-		}
-		rxCipher, err := newStripeCipher(km.c2sKey)
-		if err != nil {
-			ss.logger.Errorf("stripe: RX cipher init session %08x: %v", sessionID, err)
+			ss.logger.Errorf("stripe: cipher init session %08x: %v", sessionID, err)
 			return
 		}
 

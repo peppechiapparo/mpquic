@@ -68,16 +68,16 @@ func TestNewRekeyManager_Validation(t *testing.T) {
 	metrics := &CryptoMetrics{}
 	sessionID := []byte{1, 2, 3}
 
-	if _, err := NewRekeyManager(context.Background(), cfg, nil, sess, metrics, sessionID, 1); err == nil {
+	if _, err := NewRekeyManager(context.Background(), cfg, nil, sess, metrics, sessionID, nil, 1); err == nil {
 		t.Fatal("expected error for nil kex")
 	}
-	if _, err := NewRekeyManager(context.Background(), cfg, kex, nil, metrics, sessionID, 1); err == nil {
+	if _, err := NewRekeyManager(context.Background(), cfg, kex, nil, metrics, sessionID, nil, 1); err == nil {
 		t.Fatal("expected error for nil session")
 	}
-	if _, err := NewRekeyManager(context.Background(), cfg, kex, sess, nil, sessionID, 1); err == nil {
+	if _, err := NewRekeyManager(context.Background(), cfg, kex, sess, nil, sessionID, nil, 1); err == nil {
 		t.Fatal("expected error for nil metrics")
 	}
-	if _, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, nil, 1); err == nil {
+	if _, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, nil, nil, 1); err == nil {
 		t.Fatal("expected error for empty sessionID")
 	}
 }
@@ -88,7 +88,7 @@ func TestRekeyManager_StartStop(t *testing.T) {
 	sess := newMockSession()
 	metrics := &CryptoMetrics{}
 
-	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{9, 9, 9}, 1)
+	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{9, 9, 9}, nil, 1)
 	if err != nil {
 		t.Fatalf("NewRekeyManager: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestRekeyManager_NotifyPacketSent_Threshold(t *testing.T) {
 	sess := newMockSession()
 	metrics := &CryptoMetrics{}
 
-	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{1}, 1)
+	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{1}, nil, 1)
 	if err != nil {
 		t.Fatalf("NewRekeyManager: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestRekeyManager_NotifyPathRecovery(t *testing.T) {
 	sess := newMockSession()
 	metrics := &CryptoMetrics{}
 
-	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{2}, 1)
+	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{2}, nil, 1)
 	if err != nil {
 		t.Fatalf("NewRekeyManager: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestRekeyManager_AntiFlap(t *testing.T) {
 	metrics := &CryptoMetrics{}
 	_ = sess
 
-	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{3}, 1)
+	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{3}, nil, 1)
 	if err != nil {
 		t.Fatalf("NewRekeyManager: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestRekeyManager_Disabled(t *testing.T) {
 	sess := newMockSession()
 	metrics := &CryptoMetrics{}
 
-	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{4}, 1)
+	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{4}, nil, 1)
 	if err != nil {
 		t.Fatalf("NewRekeyManager: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestRekeyManager_InitiateRekey(t *testing.T) {
 	metrics := &CryptoMetrics{}
 	initialEpochID := uint8(7)
 
-	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{5}, initialEpochID)
+	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{5}, nil, initialEpochID)
 	if err != nil {
 		t.Fatalf("NewRekeyManager: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestRekeyManager_InitiateRekey_BadEpoch(t *testing.T) {
 	metrics := &CryptoMetrics{}
 	initialEpochID := uint8(10)
 
-	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{6}, initialEpochID)
+	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{6}, nil, initialEpochID)
 	if err != nil {
 		t.Fatalf("NewRekeyManager: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestRekeyManager_InitiateRekey_EmptyPubKey(t *testing.T) {
 	metrics := &CryptoMetrics{}
 	initialEpochID := uint8(15)
 
-	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{8}, initialEpochID)
+	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{8}, nil, initialEpochID)
 	if err != nil {
 		t.Fatalf("NewRekeyManager: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestRekeyManager_StopDuringRekey(t *testing.T) {
 	sess := newMockSession()
 	metrics := &CryptoMetrics{}
 
-	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{7}, 1)
+	rm, err := NewRekeyManager(context.Background(), cfg, kex, sess, metrics, []byte{7}, nil, 1)
 	if err != nil {
 		t.Fatalf("NewRekeyManager: %v", err)
 	}

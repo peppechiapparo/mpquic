@@ -43,8 +43,9 @@ const (
 
 // stripeKeyMaterial holds derived AES-256-GCM keys for a stripe session.
 type stripeKeyMaterial struct {
-	c2sKey [32]byte // client → server
-	s2cKey [32]byte // server → client
+	c2sKey     [32]byte
+	s2cKey     [32]byte
+	quicSecret []byte // 64 byte TLS Exporter output — immutabile per la sessione
 }
 
 // stripeDeriveKeys splits 64 bytes of TLS-exported material into c2s / s2c keys.
@@ -52,9 +53,12 @@ func stripeDeriveKeys(exported []byte) (*stripeKeyMaterial, error) {
 	if len(exported) < 64 {
 		return nil, fmt.Errorf("stripe: exported key material too short (%d < 64)", len(exported))
 	}
-	km := &stripeKeyMaterial{}
+	km := &stripeKeyMaterial{
+		quicSecret: make([]byte, 64),
+	}
 	copy(km.c2sKey[:], exported[:32])
 	copy(km.s2cKey[:], exported[32:64])
+	copy(km.quicSecret, exported[:64])
 	return km, nil
 }
 
@@ -250,4 +254,60 @@ func stripeComputeSessionID(cfg *Config, pathName string) (uint32, error) {
 		return 0, fmt.Errorf("stripe: parse tun cidr: %w", err)
 	}
 	return pathSessionID(tunIP, pathName), nil
+}
+
+// newStripeCiphers crea i cipher TX/RX per una connessione stripe.
+// Se cfg.StripeCryptoEnabled, usa CryptoSession (epoch-aware, con RekeyManager).
+// Altrimenti usa il path legacy (AES-256-GCM diretto per retrocompatibilità).
+//
+// Nessun silent downgrade: se StripeCryptoEnabled=true e la creazione della
+// CryptoSession fallisce, l'errore viene propagato al chiamante (no fallback
+// implicito che degraderebbe silenziosamente la sicurezza).
+func newStripeCiphers(cfg *Config, keys *stripeKeyMaterial, isServer bool) (tx *stripeCipher, rx *stripeCipher, err error) {
+	if cfg.StripeCryptoEnabled {
+		// SEC-G04: quicSecret < 64 con StripeCryptoEnabled=true è un errore esplicito,
+		// non un silent downgrade al path legacy.
+		if len(keys.quicSecret) < 64 {
+			return nil, nil, fmt.Errorf("stripe: StripeCryptoEnabled=true but quicSecret len=%d (need ≥64)", len(keys.quicSecret))
+		}
+		return newStripeCiphersFromCryptoSession(keys, isServer)
+	}
+	return newStripeCiphersLegacy(keys, isServer)
+}
+
+func newStripeCiphersFromCryptoSession(keys *stripeKeyMaterial, isServer bool) (*stripeCipher, *stripeCipher, error) {
+	cryptoCfg := mpquiccrypto.DefaultCryptoConfig()
+	cryptoCfg.Rekey.Enabled = false
+
+	var sessionIDBytes [4]byte
+	copy(sessionIDBytes[:], keys.quicSecret[:4])
+
+	initialKeys := &mpquiccrypto.SessionKeys{
+		ClientKey: keys.c2sKey[:],
+		ServerKey: keys.s2cKey[:],
+		EpochID:   0,
+	}
+
+	cs, err := mpquiccrypto.NewCryptoSession(cryptoCfg, keys.quicSecret, initialKeys, isServer, sessionIDBytes[:], 1)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &stripeCipher{aead: cs}, &stripeCipher{aead: cs}, nil
+}
+
+func newStripeCiphersLegacy(keys *stripeKeyMaterial, isServer bool) (*stripeCipher, *stripeCipher, error) {
+	txKey := keys.c2sKey
+	rxKey := keys.s2cKey
+	if isServer {
+		txKey, rxKey = keys.s2cKey, keys.c2sKey
+	}
+	txC, err := newStripeCipher(txKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	rxC, err := newStripeCipher(rxKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	return txC, rxC, nil
 }

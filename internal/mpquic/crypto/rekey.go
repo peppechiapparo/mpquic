@@ -36,6 +36,7 @@ type RekeyManager struct {
 	session     RekeyableSession
 	metrics     *CryptoMetrics
 	sessionID   []byte
+	quicSecret  []byte // TLS Exporter output — statico per tutta la sessione
 
 	mu             sync.Mutex
 	state          rekeyState
@@ -59,6 +60,7 @@ func NewRekeyManager(
 	session RekeyableSession,
 	metrics *CryptoMetrics,
 	sessionID []byte,
+	quicSecret []byte,
 	initialEpochID uint8,
 ) (*RekeyManager, error) {
 	if kex == nil {
@@ -79,6 +81,10 @@ func NewRekeyManager(
 		return nil, fmt.Errorf("rekey: initial key generation: %w", err)
 	}
 
+	// Copia difensiva di quicSecret (immutabile per tutta la vita del RekeyManager)
+	qsCopy := make([]byte, len(quicSecret))
+	copy(qsCopy, quicSecret)
+
 	childCtx, cancel := context.WithCancel(ctx)
 	rm := &RekeyManager{
 		config:         cfg,
@@ -86,6 +92,7 @@ func NewRekeyManager(
 		session:        session,
 		metrics:        metrics,
 		sessionID:      sessionID,
+		quicSecret:     qsCopy,
 		state:          stateIdle,
 		lastRekeyTime:  time.Time{},
 		currentEpochID: initialEpochID,
@@ -105,6 +112,10 @@ func (rm *RekeyManager) Start() {
 
 func (rm *RekeyManager) Stop() {
 	rm.cancel()
+	rm.mu.Lock()
+	zeroize(rm.localPrivKey)
+	zeroize(rm.quicSecret)
+	rm.mu.Unlock()
 	rm.wg.Wait()
 }
 
@@ -289,7 +300,7 @@ func (rm *RekeyManager) InitiateRekey(remotePubKey []byte, expectedNextEpochID u
 	}
 
 	newKeys, err := rm.kexProvider.DeriveSessionKeys(
-		remotePubKey,
+		rm.quicSecret, // TLS Exporter output — corretto
 		localPrivKey,
 		remotePubKey,
 		sessionIDCopy,
