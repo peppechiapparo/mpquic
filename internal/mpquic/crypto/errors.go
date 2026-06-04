@@ -16,6 +16,9 @@ var (
 	ErrInvalidKeySize        = errors.New("crypto: invalid key size")
 	ErrEmptySessionID        = errors.New("crypto: sessionID must not be empty")
 	ErrMissingProvider       = errors.New("crypto: required provider is nil")
+	ErrRekeyDisabled         = errors.New("crypto: rekey is disabled in configuration")
+	ErrRekeyInProgress       = errors.New("crypto: rekey already in progress")
+	ErrRekeyBadEpoch         = errors.New("crypto: unexpected epoch ID in rekey")
 )
 
 func IsAuthFailure(err error) bool {
