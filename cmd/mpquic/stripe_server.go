@@ -1128,14 +1128,8 @@ func (ss *stripeServer) handleRegister(hdr stripeHdr, payload []byte, from *net.
 	}
 
 	if pipeIdx >= 0 && pipeIdx < len(sess.pipes) {
-		// Conta ogni slot una volta sola: il REGISTER periodico di refresh
-		// (ogni 30s per pipe) ripassa di qui con lo stesso pipeIdx, quindi
-		// incrementare sempre gonfiava il contatore all'infinito. Ora
-		// `registered` riflette davvero il numero di pipe distinti attivi.
-		if sess.pipes[pipeIdx] == nil {
-			sess.registered++
-		}
 		sess.pipes[pipeIdx] = from
+		sess.registered++
 		ss.addrToSess[from.String()] = sessionID
 
 		// Rebuild cached active pipes under txMu for thread-safe TX access
