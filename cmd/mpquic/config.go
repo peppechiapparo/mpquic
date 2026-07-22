@@ -45,16 +45,13 @@ type Config struct {
 	StripePort            int                   `yaml:"stripe_port"`
 	StripeDataShards      int                   `yaml:"stripe_data_shards"`
 	StripeParityShards    int                   `yaml:"stripe_parity_shards"`
-	StripeFECMode         string                `yaml:"stripe_fec_mode"`       // "always" (default), "adaptive", "off"
-	StripePacingRate      int                   `yaml:"stripe_pacing_rate"`    // Mbps per session (0 = disabled)
-	StripeARQ             bool                  `yaml:"stripe_arq"`            // Hybrid ARQ with NACK retransmission
-	StripeDisableGSO      bool                  `yaml:"stripe_disable_gso"`    // Disable UDP GSO (for A/B testing)
-	StripeFECType         string                `yaml:"stripe_fec_type"`       // "rs" (default), "xor" (legacy), "rlc"
-	StripeFECWindow       int                   `yaml:"stripe_fec_window"`     // Sliding-window size W (default 10, used by xor/rlc)
+	StripeFECMode         string                `yaml:"stripe_fec_mode"` // "always" (default), "adaptive", "off"
+	StripePacingRate      int                   `yaml:"stripe_pacing_rate"` // Mbps per session (0 = disabled)
+	StripeARQ             bool                  `yaml:"stripe_arq"`         // Hybrid ARQ with NACK retransmission
+	StripeDisableGSO      bool                  `yaml:"stripe_disable_gso"` // Disable UDP GSO (for A/B testing)
+	StripeFECType         string                `yaml:"stripe_fec_type"`    // "rs" (default), "xor" (legacy), "rlc"
+	StripeFECWindow       int                   `yaml:"stripe_fec_window"`  // Sliding-window size W (default 10, used by xor/rlc)
 	StripeFECInterleave   int                   `yaml:"stripe_fec_interleave"` // RS interleave depth (0=block RS, >0=interleaved, default 4)
-	StripeReseqDisable    bool                  `yaml:"stripe_reseq_disable"`     // kill-switch: disable RX resequencing (default: enabled). Reordering from per-packet pipe striping otherwise collapses single-stream TCP (TS-013).
-	StripeReseqWindow     int                   `yaml:"stripe_reseq_window"`      // reorder window in packets (0 = auto from measured maxOOO)
-	StripeReseqBackstopMs int                   `yaml:"stripe_reseq_backstop_ms"` // head-gap backstop in ms (default 40): a truly lost packet stalls its neighbours at most this long
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
 	MetricsListen         string                `yaml:"metrics_listen"` // e.g. "10.200.17.254:9090" — bind to tunnel IP only
 
@@ -75,7 +72,7 @@ type MultipathPathConfig struct {
 	Priority   int    `yaml:"priority"`
 	Weight     int    `yaml:"weight"`
 	Pipes      int    `yaml:"pipes"`
-	BasePath   string `yaml:"-"`         // original path name before pipe expansion
+	BasePath   string `yaml:"-"`        // original path name before pipe expansion
 	Transport  string `yaml:"transport"` // "quic" (default), "stripe", or "auto"
 }
 
@@ -220,9 +217,6 @@ func applyFastFailoverDefaults(cfg *Config) {
 	}
 	if cfg.StripeHealthCheckInterval <= 0 {
 		cfg.StripeHealthCheckInterval = stripeHealthCheckInterval
-	}
-	if cfg.StripeReseqBackstopMs <= 0 {
-		cfg.StripeReseqBackstopMs = 40
 	}
 
 	// Validation: recovery must be strictly less than degraded threshold,
