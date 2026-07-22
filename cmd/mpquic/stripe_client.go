@@ -67,6 +67,10 @@ type stripeClientConn struct {
 	rxGroups map[uint32]*fecGroup
 	rxMu     sync.Mutex
 
+	// RX resequencing: restores per-packet order destroyed by per-packet pipe
+	// striping (TS-013). nil = disabled (kill-switch) → arrival-order delivery.
+	reseq *reseqBuffer
+
 	// RX loss tracking (measures loss on data FROM server → used to tell server to adjust its TX M)
 	rxSeqHighest  uint64 // atomic: highest GroupSeq seen (M=0 loss detection)
 	rxDirectCount uint64 // atomic: data shards delivered via deliverDataDirect
@@ -358,6 +362,24 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		scc.arqRx = newArqRxTracker()
 	}
 
+	// RX resequencing buffer (TS-013): reorders the striped-across-pipes stream
+	// back into per-packet order before TUN delivery, so single-flow TCP does
+	// not read pipe skew as loss. FEC-recovered packets are injected here too.
+	if !cfg.StripeReseqDisable {
+		scc.reseq = newReseqBuffer(
+			reseqRingSize,
+			uint32(cfg.StripeReseqWindow),
+			time.Duration(cfg.StripeReseqBackstopMs)*time.Millisecond,
+			func(pkt []byte) {
+				select {
+				case scc.rxCh <- pkt:
+				case <-scc.closeCh:
+				default: // full → backpressure drop (matches prior behaviour)
+				}
+			},
+		)
+	}
+
 	// Open N UDP sockets bound to the same interface
 	for i := 0; i < pipes; i++ {
 		laddr := &net.UDPAddr{IP: net.ParseIP(bindIP), Port: 0}
@@ -468,6 +490,11 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	// Start ARQ NACK generation loop if enabled
 	if scc.arqRx != nil {
 		go scc.arqNackLoop(ctx)
+	}
+
+	// Start RX resequencing backstop/adaptation ticker (TS-013)
+	if scc.reseq != nil {
+		go scc.reseqTickLoop(ctx)
 	}
 
 	// Start dynamic pacing adaptation (Step 4.29)
@@ -1194,11 +1221,27 @@ func (scc *stripeClientConn) deliverDataDirect(hdr stripeHdr, payload []byte) {
 
 	atomic.AddUint64(&scc.rxDirectCount, 1)
 
+	// Per-packet order key: in the M=0 fast path ShardIdx=0 (key==GroupSeq); in
+	// the M>0 group path a group shares GroupSeq and shard i carries seq+i.
+	scc.rxDeliver(hdr.GroupSeq+uint32(hdr.ShardIdx), pkt, false)
+}
+
+// rxDeliver hands a decoded IP packet to the RX pipeline. With resequencing
+// enabled it goes through the reorder buffer (keyed on the per-packet session
+// seq); otherwise it is pushed to rxCh in arrival order (kill-switch path).
+func (scc *stripeClientConn) rxDeliver(seq uint32, pkt []byte, recovered bool) {
+	if scc.reseq != nil {
+		if recovered {
+			scc.reseq.insertRecovered(seq, pkt)
+		} else {
+			scc.reseq.insert(seq, pkt)
+		}
+		return
+	}
 	select {
 	case scc.rxCh <- pkt:
 	case <-scc.closeCh:
 	default:
-		// Drop if buffer full (backpressure)
 	}
 }
 
@@ -1220,7 +1263,7 @@ func (scc *stripeClientConn) decodeAndDeliver(groupSeq uint32, grp *fecGroup) {
 	}
 
 	if allPresent {
-		scc.deliverGroupData(grp)
+		scc.deliverGroupData(groupSeq, grp)
 		delete(scc.rxGroups, groupSeq)
 		scc.rxMu.Unlock()
 		atomic.AddUint64(&scc.rxFECGroups, 1)
@@ -1249,13 +1292,14 @@ func (scc *stripeClientConn) decodeAndDeliver(groupSeq uint32, grp *fecGroup) {
 
 	scc.rxMu.Lock()
 	grp.shards = shards
-	scc.deliverGroupData(grp)
+	scc.deliverGroupData(groupSeq, grp)
 	scc.rxMu.Unlock()
 }
 
-// deliverGroupData extracts IP packets from decoded data shards and pushes to rxCh.
+// deliverGroupData extracts IP packets from decoded data shards and delivers
+// them via the RX pipeline. Shard i carries per-packet seq groupSeq+i.
 // Caller must hold rxMu.
-func (scc *stripeClientConn) deliverGroupData(grp *fecGroup) {
+func (scc *stripeClientConn) deliverGroupData(groupSeq uint32, grp *fecGroup) {
 	for i := 0; i < grp.dataK; i++ {
 		if grp.shards[i] == nil || len(grp.shards[i]) < 2 {
 			continue
@@ -1266,13 +1310,7 @@ func (scc *stripeClientConn) deliverGroupData(grp *fecGroup) {
 		}
 		pkt := make([]byte, dataLen)
 		copy(pkt, grp.shards[i][2:2+dataLen])
-		select {
-		case scc.rxCh <- pkt:
-		case <-scc.closeCh:
-			return
-		default:
-			// Drop if full
-		}
+		scc.rxDeliver(groupSeq+uint32(i), pkt, false)
 	}
 }
 
@@ -1305,11 +1343,7 @@ func (scc *stripeClientConn) handleXorRepair(hdr stripeHdr, payload []byte) {
 		scc.arqRx.addRetxReceived(1)
 	}
 	atomic.AddUint64(&scc.rxDirectCount, 1)
-	select {
-	case scc.rxCh <- pkt:
-	case <-scc.closeCh:
-	default:
-	}
+	scc.rxDeliver(recoveredSeq, pkt, true)
 }
 
 // handleRLCRepair processes a received sliding-window RLC repair packet.
@@ -1332,12 +1366,7 @@ func (scc *stripeClientConn) handleRLCRepair(hdr stripeHdr, payload []byte) {
 			scc.arqRx.addRetxReceived(1)
 		}
 		atomic.AddUint64(&scc.rxDirectCount, 1)
-		select {
-		case scc.rxCh <- rp.pkt:
-		case <-scc.closeCh:
-			return
-		default:
-		}
+		scc.rxDeliver(rp.seq, rp.pkt, true)
 	}
 }
 
@@ -1362,12 +1391,7 @@ func (scc *stripeClientConn) handleRSILParity(hdr stripeHdr, payload []byte) {
 			scc.arqRx.addRetxReceived(1)
 		}
 		atomic.AddUint64(&scc.rxDirectCount, 1)
-		select {
-		case scc.rxCh <- rp.Pkt:
-		case <-scc.closeCh:
-			return
-		default:
-		}
+		scc.rxDeliver(rp.Seq, rp.Pkt, true)
 	}
 }
 
@@ -1684,7 +1708,7 @@ func (scc *stripeClientConn) gcRxGroups() {
 			// Deliver whatever we have and discard
 			if !grp.delivered {
 				grp.delivered = true
-				scc.deliverGroupData(grp)
+				scc.deliverGroupData(seq, grp)
 			}
 			delete(scc.rxGroups, seq)
 		}
@@ -1738,6 +1762,27 @@ func (scc *stripeClientConn) handleNack(hdr stripeHdr, payload []byte) {
 
 	if retxCount > 0 {
 		scc.logger.Debugf("stripe ARQ: retransmitted %d packets (base=%d)", retxCount, baseSeq)
+	}
+}
+
+// reseqTickLoop drives the RX resequencing buffer's time backstop and adapts
+// its reorder window to the measured reorder distance (TS-013).
+func (scc *stripeClientConn) reseqTickLoop(ctx context.Context) {
+	ticker := time.NewTicker(arqNackInterval) // 5ms
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-scc.closeCh:
+			return
+		case <-ticker.C:
+			scc.reseq.tick()
+			if scc.arqRx != nil {
+				_, maxOOO, _ := scc.arqRx.dynamicStats()
+				scc.reseq.adaptWindow(maxOOO)
+			}
+		}
 	}
 }
 

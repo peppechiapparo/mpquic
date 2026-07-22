@@ -75,6 +75,10 @@ const (
 	stripeFlushInterval       = 5 * time.Millisecond
 	stripeKeepaliveInterval   = 1 * time.Second
 	stripeReregisterInterval  = 30 * time.Second // periodic REGISTER refresh in keepaliveLoop
+
+	// RX resequencing (TS-013)
+	reseqRingSize     = 4096 // per-session reorder ring (packets); power of two
+	reseqWindowMargin = 128  // added to measured maxOOO for the reorder window
 	stripeSessionTimeout      = 30 * time.Second
 	stripeBatchSize           = 8       // recvmmsg batch size (matches quic-go)
 	stripeSocketBufSize       = 7 << 20 // 7 MB per socket (matches quic-go)
