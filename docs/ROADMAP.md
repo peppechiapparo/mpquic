@@ -4,6 +4,13 @@
 
 ---
 
+## Addendum — Incidenti IBLEA-M TS-014/TS-015 risolti e validati (2026-07-22/23)
+
+- **TS-015 (outage di bordo)**: config client mp1 in drift dal repo (24 pipe, 12 su `enp7s7` = router LTE con DHCP+carrier ma upstream morto) → 50% loss deterministico. Fix: mp1 single-WAN `enp7s8`. Post-fix: 0% loss a link scarico.
+- **TS-014 (accoppiamento tunnel)**: provato con test monitorato che lo stop di `mpquic@6` uccideva mp1 (18.4s blackout) via cancellazione della host route condivisa nella tabella wan6. Fix a `scripts/mpquic-policy-routing.sh` deployato e validato: stop mpq6 → 0 impatto su mp1 (38/38 campioni con host route presente). **mpq6 e mpq5 ora si possono fermare/disabilitare senza toccare mp1** — decisione operativa in mano al cliente.
+- **Follow-up aperto (nuovo item Fase 4c)**: collasso downlink STRIPES sotto burst loss (28 Kbps in-tunnel vs 21.8 Mbps TCP diretto nella stessa finestra; ARQ di fatto non funzionante: retx yield 9%, `arq_pending_span` saturo a 8191, `arqTx.store()` chiamato solo in M=0). Piano transport-expert a 2 stadi in `CHANGELOG_IMPLEMENTAZIONE.md` — stadio 1 solo config (pacing server ~15 Mbps, `fec_mode: always`, poi `pipes: 3` + `stripe_fec_interleave: 4` sincronizzato sui due estremi), stadio 2 codice (ARQ store in M>0, ring TX 32k, cap nackThresh). Da schedulare con finestra di manutenzione.
+- Debiti tecnici da review: test bats non-regressione TS-014, `flock` in `mpquic-policy-routing.sh`.
+
 ## Addendum — Incidente mp1/BOND1 (2026-04-30)
 
 ### Contesto operativo

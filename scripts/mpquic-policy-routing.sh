@@ -42,6 +42,14 @@ TRANSIT_DEV="enp6s20"
 WAIT_SECS=2
 ENFORCE_WAN_SOURCE="${MPQUIC_ENFORCE_WAN_SOURCE:-0}"
 
+lan_dev_for_subnet() {
+  # Return the local dev holding the .1 of the given /30 (the interface facing
+  # the OpenWrt router for that WAN), e.g. 172.16.6.0/30 -> enp7s2.
+  local base="${1%/*}"
+  local pfx="${base%.*}."
+  ip -4 -o addr show 2>/dev/null | awk -v p="$pfx" 'index($4, p)==1 {print $2; exit}'
+}
+
 have_ipv4() {
   ip -4 addr show dev "$1" 2>/dev/null | grep -q "inet "
 }
@@ -152,24 +160,46 @@ for idx in $(seq 0 5); do
   safe_ip ip route replace "${MGMT_NETS[0]}" dev "${MGMT_DEVS[0]}" table "$table"
   safe_ip ip route replace "${MGMT_NETS[1]}" dev "${MGMT_DEVS[1]}" table "$table"
   safe_ip ip route replace "$TRANSIT_SUPERNET" dev "$TRANSIT_DEV" table "$table"
+  # Specific /30 back to the router on its own bridge (more specific than the
+  # transit /16). Without this, return traffic to the router's per-WAN /30
+  # follows 172.16.0.0/16 dev enp6s20 onto the wrong bridge and is dropped
+  # -> heavy loss / mwan3 flapping. Mirrors table bd1.
+  lan_dev="$(lan_dev_for_subnet "$subnet")"
+  if [ -n "$lan_dev" ]; then
+    safe_ip ip route replace "$subnet" dev "$lan_dev" scope link table "$table"
+  fi
 
-  if wan_usable "$dev" && have_tun_up "$tun"; then
-    gw="$(gw_for_dev "$dev")"
+  gw="$(gw_for_dev "$dev")"
 
+  # VPS host route: tied to the WAN's own state only, NOT to the tunnel's.
+  # This table is per-WAN, not per-tunnel: other mpquic instances bound to
+  # the same physical interface (e.g. mp1 on enp7s8 pinned into wan6 via a
+  # remote ip rule) rely on this route to reach the VPS even while mpqN is
+  # down. Coupling it to have_tun_up caused a 18.4s stripe blackout on mp1
+  # during a `systemctl stop mpquic@6` test (IBLEA-M, 2026-07-22): the
+  # networkd-dispatcher hook re-ran this script, saw mpq6 down, and deleted
+  # the shared host route + set a blackhole default in wan6 out from under
+  # mp1's still-alive pipes.
+  if wan_usable "$dev"; then
     if [ -n "$gw" ] && is_ipv4_lit "$rip"; then
       # Atomically replaces any stale VPS host route (e.g. after DHCP gateway change)
       safe_ip ip route replace "${rip}/32" via "$gw" dev "$dev" table "$table"
     fi
+  else
+    # Remove stale VPS host route if present
+    if is_ipv4_lit "$rip"; then
+      safe_ip ip route del "${rip}/32" table "$table"
+    fi
+  fi
 
+  # Tunnel default route: still coupled to have_tun_up, this part is legitimately
+  # per-tunnel (LAN traffic steered into mpqN needs mpqN to actually be up).
+  if wan_usable "$dev" && have_tun_up "$tun"; then
     # Atomically replaces blackhole default (if present) with tunnel default
     safe_ip ip route replace default dev "$tun" table "$table"
   else
     # WAN or TUN is down: replace default with blackhole (atomic)
     safe_ip ip route replace blackhole default table "$table"
-    # Remove stale VPS host route if present
-    if is_ipv4_lit "$rip"; then
-      safe_ip ip route del "${rip}/32" table "$table"
-    fi
   fi
 
   safe_ip ip rule add from "$subnet" lookup "$table" priority "$prio"

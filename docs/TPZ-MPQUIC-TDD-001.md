@@ -9,12 +9,12 @@
 |-------|--------|
 | Document ID | TPZ-MPQUIC-TDD-001 |
 | Issue | 1 |
-| Revision | 1 |
+| Revision | 2 |
 | Status | Draft |
 | Author | Telespazio Engineering Team |
 | Reviewed by | Tech Lead |
 | Approved by | — |
-| Date | 2026-06-04 |
+| Date | 2026-07-23 |
 | Classification | Internal |
 | Applicable standards | ECSS-E-ST-40C, ECSS-Q-ST-80C |
 
@@ -163,6 +163,7 @@ The OpenWrt router upstream of the client VM performs multi-WAN policy routing (
 | `mpquic` binary (server role) | VPS (172.238.232.223) | Terminates UDP stripe; writes/reads TUN |
 | `mpquic-mgmt` REST daemon | VM MPQUIC | Management API for tunnel lifecycle |
 | `mpquic-watchdog` | VM MPQUIC | Health check and auto-recovery |
+| `mpquic-policy-routing.sh` | VM MPQUIC | Per-WAN policy routing tables (host route + tunnel default/blackhole) |
 | `mpquic@*.service` | VM MPQUIC + VPS | systemd service units |
 | TUN interfaces (`mpq1–6`, `mp1`, etc.) | VM MPQUIC + VPS | Virtual L3 tunnel endpoints |
 | STRIPES transport engine | Both | FEC, ARQ, AES-256-GCM, batch I/O |
@@ -309,6 +310,8 @@ Operator runs `mpquic-update.sh`. The script performs: git pull, binary rebuild,
 **[REQ-MPQUIC-NET-005]** The server shall accept connections from multiple simultaneous clients on the same UDP listener port and shall demultiplex sessions by session ID (`ipToUint32(tunIP) XOR fnv32a(pathName)`).
 
 **[REQ-MPQUIC-NET-006]** The `mpquic-lan-routing-check.sh` script shall validate and optionally repair policy routing entries for LAN-to-tunnel traffic for instances 1 through 6 or for a single specified instance.
+
+**[REQ-MPQUIC-NET-007]** In a per-WAN policy routing table (`wanN`) shared by more than one tunnel instance, the `mpquic-policy-routing.sh` script shall maintain the host route to the remote tunnel endpoint (VPS) based solely on the physical WAN link state (`wan_usable`: valid IPv4 address and reachable gateway), independently of the up/down state of any single TUN interface routed through that table.
 
 ### 3.4 Performance Requirements
 
@@ -522,6 +525,30 @@ Exposed via ubus/rpcd on OpenWrt through `luci-app-mpquic` rpcd plugin. The plug
 | Script | `/usr/local/lib/mpquic/mpquic-tunnel-watchdog.sh` |
 | Health check script | `scripts/mpquic-healthcheck.sh` |
 | Role | Periodic health verification; optional auto-restart of failed instances |
+
+#### 4.2.6 `mpquic-policy-routing.sh` — per-WAN policy routing tables
+
+| Property | Value |
+|----------|-------|
+| Type | Bash script, triggered by `networkd-dispatcher` events (WAN interface up/down/carrier change) and by tunnel service start/stop |
+| Script | `scripts/mpquic-policy-routing.sh` |
+| Scope | VM MPQUIC client only |
+| Role | Builds and refreshes one policy routing table per physical WAN interface (`wan1`–`wan6`, `enp7s3`–`enp7s8`), selected via `ip rule` on source address and/or destination |
+
+**Key behaviours:**
+- One routing table per physical WAN interface, not per tunnel instance. A single `wanN` table can carry traffic for more than one tunnel when additional `ip rule` entries route a second instance's source/destination pair through it (e.g. instance `mp1`, bound to `enp7s8`, routed through table `wan6` alongside `mpq6`).
+- Each table holds two route classes toward the remote tunnel endpoint (VPS): a **host route** to the VPS public IP, and a **tunnel default/blackhole route** for traffic entering the table's own TUN.
+
+**Design invariant — per-WAN shared resource vs. per-tunnel resource:**
+
+A `wanN` table belongs to the physical WAN interface, not to whichever tunnel instance happens to bind that WAN as its primary path. Every tunnel routed through the table via `ip rule` depends on it, so the two route classes inside it must be conditioned independently:
+
+| Route | Resource type | Condition |
+|-------|---------------|-----------|
+| Host route to VPS | Per-WAN (shared) | `wan_usable(dev)` — physical link state only |
+| Tunnel default / blackhole | Per-tunnel (exclusive) | `wan_usable(dev) && have_tun_up(tun)` |
+
+Conditioning the host route on a single tunnel's `have_tun_up` breaks this separation: stopping that one tunnel removes the VPS host route for every other tunnel sharing the table, even though their own TUN is still up. This was the root cause of incident TS-014 (`docs/TROUBLESHOOTING_HISTORY.md`): stopping `mpquic@6` deleted the `wan6` host route, blackholing the co-located `mp1` tunnel for 18.4 s. Fixed by decoupling the host route condition from `have_tun_up`; the tunnel default/blackhole route keeps the combined condition, which is correct since it is exclusive to that tunnel. Validated on IBLEA-M, 2026-07-22 — see [TC-MPQUIC-NET-001] in §6.2 and [REQ-MPQUIC-NET-007].
 
 ### 4.3 Data Flow
 
@@ -1204,6 +1231,20 @@ Testing is performed at three levels:
 
 ---
 
+**[TC-MPQUIC-NET-001]** — Per-WAN host route survives stop of a co-located tunnel
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that stopping one tunnel instance sharing a per-WAN policy routing table does not remove the VPS host route relied upon by other tunnel instances routed through the same table |
+| Preconditions | Client VM MPQUIC (IBLEA-M, VM 200); `mpq6` (WAN6, `enp7s8`, table `wan6`) and `mp1` (multipath, routed through table `wan6` via `ip rule` priority 1206) both active; fixed `mpquic-policy-routing.sh` deployed |
+| Procedure | 1. Start continuous liveness sampling on `mp1` pipes (500 ms interval); 2. `systemctl stop mpquic@6`; 3. Sample presence of the VPS host route in table `wan6` and `mp1` pipe liveness for 38 consecutive samples (~19 s); 4. `systemctl start mpquic@6` |
+| Expected result | VPS host route present in table `wan6` for all 38 sampled intervals; `mp1` shows no more than 1 consecutive FAIL sample |
+| Actual result (field validation, IBLEA-M, 2026-07-22) | Host route present 38/38 samples; `mp1` max 1 consecutive FAIL sample (down from 14 consecutive FAIL / 18.4 s blackout measured pre-fix) |
+| Verifies | [REQ-MPQUIC-NET-007] |
+| Known limitation | Validation performed manually on the field; an automated bats regression test for this scenario, and a `flock` guard on concurrent script executions, are open technical debt from the fix review (not blocking, tracked outside this document) |
+
+---
+
 ### 6.3 Crypto Abstraction Layer Test Cases
 
 ---
@@ -1320,6 +1361,7 @@ Testing is performed at three levels:
 | REQ-MPQUIC-NET-004 | N-path multipath | §4.2.1 | `cmd/mpquic/main.go` | TC-MPQUIC-PERF-001 | Draft |
 | REQ-MPQUIC-NET-005 | Server multi-client demux | §4.2.2 | `cmd/mpquic/main.go: runServer` | TC-MPQUIC-SW-002 | Draft |
 | REQ-MPQUIC-NET-006 | LAN routing validation script | §4.2.5 | `scripts/mpquic-lan-routing-check.sh` | TC-MPQUIC-OPS-002 | Draft |
+| REQ-MPQUIC-NET-007 | Per-WAN host route decoupled from single-TUN state | §4.2.6 | `scripts/mpquic-policy-routing.sh` | TC-MPQUIC-NET-001 | Draft |
 | REQ-MPQUIC-PERF-001 | Throughput ≥ 300 Mbps | §4.3.1 | `cmd/mpquic/stripe.go` | TC-MPQUIC-PERF-001 | Draft |
 | REQ-MPQUIC-PERF-002 | Socket buffers ≥ 7 MB | §4.2.3 | `cmd/mpquic/stripe.go: stripeSocketBufSize` | TC-MPQUIC-PERF-001 | Draft |
 | REQ-MPQUIC-PERF-003 | recvmmsg batch 8 | §4.2.3 | `cmd/mpquic/stripe.go: stripeBatchSize=8` | TC-MPQUIC-PERF-001 | Draft |
@@ -1364,6 +1406,7 @@ Testing is performed at three levels:
 |-------|-----|------|-----------------------|--------|
 | 1 | 0 | 2026-05-14 | Initial draft — ECSS-compliant TDD for MPQUIC/STRIPES system. Covers: system overview, 60 requirements (SW/SEC/NET/PERF/CONF/OPS/API), architecture design, interface design, 13 test cases, full RTM. | Telespazio Engineering Team |
 | 1 | 1 | 2026-06-04 | Crypto Abstraction Layer (CAL) — v5.0. Added: §4.4 CAL architecture (phases A–G, tag v5.0, 58/58 PASS); §5.6 crypto YAML schema; §6.3 six CAL test cases (TC-MPQUIC-CAL-001..006); §3.2 security requirements REQ-MPQUIC-SEC-011..017 (crypto profiles, epoch management, key zeroization); §7 RTM rows for SEC-011..017; §1.3 RD-11 (CIFRANTE_STRIPES.md) and RD-12 (External Provider Spec); acronyms CAL/KEX/KEM/ML-KEM/PQC/HKDF. Security audit (Fasi A–G): SEC-G02 and SEC-G04 fixed; SEC-D01 and SEC-D03 fixed in Phase D; SEC-G01/G03 and SEC-D02/D04 accepted as Phase H deferred items. | Telespazio Engineering Team |
+| 1 | 2 | 2026-07-23 | Incident TS-014 closure — per-WAN policy routing shared-resource fix. Added: §2.2 in-scope component `mpquic-policy-routing.sh`; §4.2.6 new component description with design invariant (per-WAN host route vs. per-tunnel default/blackhole route); §3.3 REQ-MPQUIC-NET-007 (host route decoupled from single-TUN state); §6.2 TC-MPQUIC-NET-001 with field validation numbers (IBLEA-M, 2026-07-22: host route present 38/38 samples post-fix, max 1 consecutive FAIL vs 14/18.4 s pre-fix); §7 RTM row for NET-007. Root cause: `mpquic-policy-routing.sh` conditioned the shared VPS host route in table `wan6` on `have_tun_up(mpq6)`, so stopping the WAN-owning tunnel blackholed the co-located `mp1` tunnel. Open technical debt (non-blocking, tracked outside this document): bats regression test for the TS-014 scenario, `flock` guard on the script. | Telespazio Engineering Team |
 
 ---
 

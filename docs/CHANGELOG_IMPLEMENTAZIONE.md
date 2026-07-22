@@ -1,5 +1,22 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-07-22/23 — IBLEA-M: outage di bordo (TS-015) + decoupling tabelle wanN (TS-014)
+
+Incidenti risolti e validati sul campo, dettaglio completo in `TROUBLESHOOTING_HISTORY.md` (TS-014, TS-015).
+
+**Modifiche:**
+- `scripts/mpquic-policy-routing.sh` — la host route verso il VPS nelle tabelle per-WAN ora dipende solo da `wan_usable` (stato fisico WAN), non più da `have_tun_up` del tunnel "titolare". Prima, `systemctl stop mpquic@6` cancellava la route condivisa e mandava in blackout le pipe di mp1 (18.4s misurati). Riallineato anche il drift repo↔deployato pregresso (blocco `lan_dev_for_subnet` + route `/30`).
+- Config client IBLEA-M `mp1.yaml` — riallineata al template repo: single-WAN `if:enp7s8` (le 12 pipe su `enp7s7`, router LTE con lease DHCP ma upstream morto, causavano 50% loss deterministico). Backup on-host `.bak-fix7s7`.
+
+**Test/validazione (numeri):**
+- Pre-fix: stop mpq6 → mp1 blackout 18.4s (14 FAIL consecutivi, RTT max 10.3s dal VPS).
+- Post-fix: stop mpq6 60s → host route presente 38/38 campioni a 1 Hz, max 1 FAIL su mp1, RTT max 126 ms. mpq6 e mpq5 ora si possono fermare senza impatto su mp1.
+- Outage: da 50% loss deterministico a 0% (a link scarico) dopo config single-WAN + restart server per pulizia sessioni stale.
+
+**Review:** approvata (reviewer). **Security NIS2:** approvata (miglioramento resilienza Art. 21(2)(c), fail-closed preservato). Debiti tecnici: test bats non-regressione scenario TS-014, `flock` nello script.
+
+**Follow-up aperto:** collasso downlink STRIPES sotto burst loss (28 Kbps in-tunnel vs 21.8 Mbps diretto nella stessa finestra) — analisi transport-expert consegnata con piano a 2 stadi (stadio 1 solo config: pacing server, `fec_mode: always`, poi `pipes: 3` + `stripe_fec_interleave: 4` simultaneo sui due estremi; stadio 2 codice: ARQ `store()` anche in M>0, ring TX più grande, cap `nackThresh`). Richiede finestra di manutenzione concordata.
+
 ## 2026-03-25
 
 ### LuCI App per OpenWrt — `luci-app-mpquic` (commit `1a81452` + `c74c028` + `192a25d`)
