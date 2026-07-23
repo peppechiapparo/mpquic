@@ -1,5 +1,20 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-07-23 — IBLEA-M: revert regressione STRIPES aggregato (TS-016)
+
+Dettaglio completo in `TROUBLESHOOTING_HISTORY.md` (TS-016).
+
+**Modifiche:**
+- Revert di `5e74c1e` (reseq RX) e `f6c1d6b` (conteggio pipe registrate) — commit `2330b4b` + `a7e0f8b`. Il codice `cmd/mpquic` torna byte-identico a `374e3a1` (diff = 0; md5 build riproducibile `cb5eb0d0…`).
+- Motivo: l'aggregato `-P30 -R` via mp1 decadeva da 125 Mbit a ~40 Kbit in 17s; A/B col binario known-good 374e3a1 → 167-199 Mbit sostenuti senza decay. Il reseq risolveva il single-stream (TS-013) ma degradava progressivamente l'aggregato.
+- Deploy git-pulito senza push (bloccato dall'ambiente): git bundle → repo remoti → `MPQUIC_UPDATE_SKIP_PULL=1 mpquic-update.sh`. VPS standard (11 istanze), client connectivity-safe (systemd-run detached + dead-man; richiesti `git config --system safe.directory` e `--setenv=HOME=/root`).
+
+**Validazione (Verification Gate):** -t30 -P30 -R: 199 Mbit medi da client VM (picchi 268), 173 Mbit dal path OpenWrt del cliente; tetto fisico diretto nello stesso momento 294 Mbit; single-stream 20.3 Mbit; zero decadimento. Target contrattuale 266 da rimisurare in finestra diurna (tetto notturno insufficiente per definizione: servirebbe efficienza 90% con FEC M=2 attivo).
+
+**Fallback predisposto (NON eseguito, richiede ok cliente):** bypass STRIPES per STARLINK — su OpenWrt spostare il membro mwan3 della policy in uso dal tunnel al WAN fisico verso enp7s8 (o policy dedicata con default via 192.168.1.1 lato VM); da usare solo se STRIPES risultasse di nuovo non recuperabile.
+
+**Aperti:** conferma target 266 dal cliente; piano trasporto stadio 1/2 (uplink 4-6 Mbit vs 46 diretto; single-stream robusto senza reseq; pacing/FEC/pipes) in finestra di manutenzione.
+
 ## 2026-07-22/23 — IBLEA-M: outage di bordo (TS-015) + decoupling tabelle wanN (TS-014)
 
 Incidenti risolti e validati sul campo, dettaglio completo in `TROUBLESHOOTING_HISTORY.md` (TS-014, TS-015).

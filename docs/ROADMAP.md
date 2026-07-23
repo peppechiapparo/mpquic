@@ -4,6 +4,12 @@
 
 ---
 
+## Addendum — TS-016: regressione aggregato da reseq, revertata (2026-07-23)
+
+- Il reseq RX (5e74c1e, fix TS-013 single-stream) degradava progressivamente l'aggregato -P30 (125 Mbit → 40 Kbit in 17s): revertato insieme a f6c1d6b, deploy git-pulito su VPS+client, validato -t30 entrambi i lati (199/173 Mbit sostenuti vs tetto fisico 294). Dettagli in TROUBLESHOOTING_HISTORY TS-016.
+- Conseguenza per la Fase 4c: il riordino RX per il single-stream va riprogettato (il buffer adattivo cross-flow è bocciato dai fatti); la via corretta resta il piano trasporto a 2 stadi (pacing, FEC interleave, pipes ridotte, ARQ store in M>0) con validazione OBBLIGATORIA su entrambi i profili -P1 e -P30 sostenuti ≥30s.
+- Regola di validazione nuova per ogni modifica al data plane: misurare sempre in-tunnel vs tetto fisico diretto nello stesso minuto, e riavviare il server iperf3 prima di ogni campagna (sessioni appese producono finti decadimenti).
+
 ## Addendum — Incidenti IBLEA-M TS-014/TS-015 risolti e validati (2026-07-22/23)
 
 - **TS-015 (outage di bordo)**: config client mp1 in drift dal repo (24 pipe, 12 su `enp7s7` = router LTE con DHCP+carrier ma upstream morto) → 50% loss deterministico. Fix: mp1 single-WAN `enp7s8`. Post-fix: 0% loss a link scarico.
