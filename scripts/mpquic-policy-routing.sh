@@ -42,6 +42,20 @@ TRANSIT_DEV="enp6s20"
 WAIT_SECS=2
 ENFORCE_WAN_SOURCE="${MPQUIC_ENFORCE_WAN_SOURCE:-0}"
 
+# WAN i cui pacchetti LAN escono DIRETTI sul WAN fisico (col masquerade per-oif
+# gia' presente), invece di essere instradati dentro mpqN. Lista dev separata da
+# spazi. TS-017 (IBLEA-M): STARLINK su enp7s8 va diretto dopo aver tolto STRIPES
+# dal data-path del client. mp1/bd1 non e' toccato (gestito fuori da questo script).
+BYPASS_WANS="${MPQUIC_BYPASS_WANS:-enp7s8}"
+
+is_bypass() {
+  local d
+  for d in $BYPASS_WANS; do
+    [[ "$d" == "$1" ]] && return 0
+  done
+  return 1
+}
+
 lan_dev_for_subnet() {
   # Return the local dev holding the .1 of the given /30 (the interface facing
   # the OpenWrt router for that WAN), e.g. 172.16.6.0/30 -> enp7s2.
@@ -192,9 +206,17 @@ for idx in $(seq 0 5); do
     fi
   fi
 
-  # Tunnel default route: still coupled to have_tun_up, this part is legitimately
-  # per-tunnel (LAN traffic steered into mpqN needs mpqN to actually be up).
-  if wan_usable "$dev" && have_tun_up "$tun"; then
+  # Default route: bypass WAN -> diretto sul fisico; altrimenti dentro il tunnel.
+  if is_bypass "$dev"; then
+    # TS-017 bypass: il traffico LAN esce DIRETTO dal WAN fisico (no tunnel).
+    # L'egress e' mascherato dalla regola nft per-oif gia' esistente. Non dipende
+    # da have_tun_up: mpqN puo' anche essere fermo.
+    if wan_usable "$dev" && [ -n "$gw" ]; then
+      safe_ip ip route replace default via "$gw" dev "$dev" table "$table"
+    else
+      safe_ip ip route replace blackhole default table "$table"
+    fi
+  elif wan_usable "$dev" && have_tun_up "$tun"; then
     # Atomically replaces blackhole default (if present) with tunnel default
     safe_ip ip route replace default dev "$tun" table "$table"
   else
