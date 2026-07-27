@@ -1,0 +1,65 @@
+# VAPT Docker Compose — Security Assessment Tools
+# Uso: docker compose up -d
+# Target: impostare VAPT_TARGET come env var prima di avviare
+
+services:
+
+  # ─── VAPT-TOOLS: nmap, nikto, sslscan, ssh-audit ────────────────────────────
+  vapt-tools:
+    build:
+      context: .
+      dockerfile: Dockerfile.tools
+    image: tpz/vapt-tools:latest
+    container_name: vapt-tools
+    network_mode: host
+    volumes:
+      - ${VAPT_RESULTS:-/tmp/vapt-results}:/results
+      - ${HOME}/.ssh:/root/.ssh:ro
+    environment:
+      - VAPT_TARGET=${VAPT_TARGET:-10.10.11.254}
+      - VAPT_HOST=${VAPT_HOST:-TBOX-EVO}
+    restart: "no"
+    entrypoint: ["sleep", "infinity"]
+
+  # ─── NUCLEI: template-based CVE/misconfig scanner ───────────────────────────
+  nuclei:
+    image: projectdiscovery/nuclei:latest
+    container_name: vapt-nuclei
+    network_mode: host
+    volumes:
+      - ${VAPT_RESULTS:-/tmp/vapt-results}:/results
+      - nuclei-templates:/root/nuclei-templates
+    environment:
+      - VAPT_TARGET=${VAPT_TARGET:-10.10.11.254}
+    restart: "no"
+    entrypoint: ["sleep", "infinity"]
+
+  # ─── TRIVY: container/filesystem/config scanner ─────────────────────────────
+  trivy:
+    image: aquasec/trivy:latest
+    container_name: vapt-trivy
+    network_mode: host
+    volumes:
+      - ${VAPT_RESULTS:-/tmp/vapt-results}:/results
+      - /var/run/docker.sock:/var/run/docker.sock
+      - trivy-cache:/root/.cache/trivy
+    environment:
+      - VAPT_TARGET=${VAPT_TARGET:-10.10.11.254}
+    restart: "no"
+    entrypoint: ["sleep", "infinity"]
+
+  # ─── NMAP: dedicated port scanner ────────────────────────────────────────────
+  nmap:
+    image: instrumentisto/nmap:latest
+    container_name: vapt-nmap
+    network_mode: host
+    volumes:
+      - ${VAPT_RESULTS:-/tmp/vapt-results}:/results
+    restart: "no"
+    entrypoint: ["sleep", "infinity"]
+
+volumes:
+  nuclei-templates:
+    name: vapt-nuclei-templates
+  trivy-cache:
+    name: vapt-trivy-cache

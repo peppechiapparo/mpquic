@@ -69,10 +69,10 @@ type stripeSession struct {
 	rxCh     chan []byte // decoded IP packets delivered to tunWriter
 
 	// RX loss tracking (measures loss on data FROM client → reported to client so it adjusts TX M)
-	rxSeqHighest   uint64 // atomic
-	rxDirectCount  uint64 // atomic
-	rxFECGroups    uint64 // atomic
-	rxFECRecov     uint64 // atomic
+	rxSeqHighest  uint64 // atomic
+	rxDirectCount uint64 // atomic
+	rxFECGroups   uint64 // atomic
+	rxFECRecov    uint64 // atomic
 
 	// Peer-reported loss (loss on data WE send, reported BY client → we adjust our TX M)
 	peerLossRate uint32 // atomic: 0-100
@@ -87,8 +87,8 @@ type stripeSession struct {
 	rxLossPrevXorUnrecov uint64
 
 	// TX (server → client): FEC encode + stripe
-	txSeq    uint32 // atomic
-	txPipe   uint32 // atomic
+	txSeq         uint32 // atomic
+	txPipe        uint32 // atomic
 	txGroup       [][]byte
 	txGrpSeq      uint32
 	txActivePipes []*net.UDPAddr // cached non-nil pipes, rebuilt on REGISTER (under txMu)
@@ -105,9 +105,9 @@ type stripeSession struct {
 	// Kernel TX pacing (SO_TXTIME + sch_fq) — per-session EDT tracking.
 	// The server socket has SO_TXTIME set once; each message in the sendmmsg
 	// batch carries its own SCM_TXTIME cmsg with the next EDT for this session.
-	txtimeEnabled bool   // inherited from stripeServer
-	txtimeEDT     int64  // next EDT (ns, CLOCK_MONOTONIC) — protected by txMu
-	txtimeGapNs   int64  // inter-packet gap derived from pacing rate
+	txtimeEnabled bool  // inherited from stripeServer
+	txtimeEDT     int64 // next EDT (ns, CLOCK_MONOTONIC) — protected by txMu
+	txtimeGapNs   int64 // inter-packet gap derived from pacing rate
 
 	// Metrics (atomic, zero-alloc counters for /metrics and /api/v1/stats)
 	txPkts     uint64 // IP packets sent to client
@@ -528,23 +528,23 @@ type stripeServer struct {
 	addrToSess map[string]uint32 // "IP:port" → sessionID
 	mu         sync.RWMutex
 
-	tun            *water.Interface // primary fd (fallback if multiqueue unavailable)
-	tunName        string           // TUN device name for opening multiqueue fds
-	tunMultiQueue  bool             // true if TUN was opened with IFF_MULTI_QUEUE
-	ct             *connectionTable
-	dataK   int
-	parityM int
-	fecMode    string // "always", "adaptive", "off"
-	fecType    string // "rs" (default), "xor", "rlc"
-	fecWindow  int    // sliding-window size W (used when fecType=xor|rlc)
-	interleaveDepth int // RS interleave depth (0=block RS, >0=interleaved)
-	rsilK           int // RS-IL data shards per generation (== dataK or default)
-	rsilM           int // RS-IL parity shards per generation (original parityM or default)
-	pacingRate int    // Mbps per session (0 = disabled)
-	arqEnabled bool   // Hybrid ARQ enabled
-	txtimeEnabled bool // SO_TXTIME probed OK on listener socket
-	logger     *Logger
-	closeCh    chan struct{}
+	tun             *water.Interface // primary fd (fallback if multiqueue unavailable)
+	tunName         string           // TUN device name for opening multiqueue fds
+	tunMultiQueue   bool             // true if TUN was opened with IFF_MULTI_QUEUE
+	ct              *connectionTable
+	dataK           int
+	parityM         int
+	fecMode         string // "always", "adaptive", "off"
+	fecType         string // "rs" (default), "xor", "rlc"
+	fecWindow       int    // sliding-window size W (used when fecType=xor|rlc)
+	interleaveDepth int    // RS interleave depth (0=block RS, >0=interleaved)
+	rsilK           int    // RS-IL data shards per generation (== dataK or default)
+	rsilM           int    // RS-IL parity shards per generation (original parityM or default)
+	pacingRate      int    // Mbps per session (0 = disabled)
+	arqEnabled      bool   // Hybrid ARQ enabled
+	txtimeEnabled   bool   // SO_TXTIME probed OK on listener socket
+	logger          *Logger
+	closeCh         chan struct{}
 
 	pendingKeys *stripePendingKeys
 
@@ -613,27 +613,27 @@ func newStripeServer(cfg *Config, tun *water.Interface, tunMultiQueue bool, ct *
 	}
 
 	ss := &stripeServer{
-		cfg:        cfg,
-		conn:       conn,
-		sessions:   make(map[uint32]*stripeSession),
-		addrToSess: make(map[string]uint32),
-		tun:           tun,
-		tunName:       tunName,
-		tunMultiQueue: tunMultiQueue,
-		ct:            ct,
-		dataK:      dataK,
-		parityM:    parityM,
-		fecMode:    fecMode,
-		fecType:    fecType,
-		fecWindow:  fecWindow,
+		cfg:             cfg,
+		conn:            conn,
+		sessions:        make(map[uint32]*stripeSession),
+		addrToSess:      make(map[string]uint32),
+		tun:             tun,
+		tunName:         tunName,
+		tunMultiQueue:   tunMultiQueue,
+		ct:              ct,
+		dataK:           dataK,
+		parityM:         parityM,
+		fecMode:         fecMode,
+		fecType:         fecType,
+		fecWindow:       fecWindow,
 		interleaveDepth: interleaveDepth,
-		rsilK:      rsilK,
-		rsilM:      rsilM,
-		pacingRate: cfg.StripePacingRate,
-		arqEnabled: cfg.StripeARQ,
-		logger:     logger,
-		closeCh:    make(chan struct{}),
-		pendingKeys: pendingKeys,
+		rsilK:           rsilK,
+		rsilM:           rsilM,
+		pacingRate:      cfg.StripePacingRate,
+		arqEnabled:      cfg.StripeARQ,
+		logger:          logger,
+		closeCh:         make(chan struct{}),
+		pendingKeys:     pendingKeys,
 	}
 
 	// Probe SO_TXTIME on the server listener socket.
@@ -1555,14 +1555,14 @@ func (ss *stripeServer) computeSessionRxLoss(sess *stripeSession) uint8 {
 		return uint8(rate)
 	}
 
-	// XOR FEC Anti-Waste (Step 4.28): 
+	// XOR FEC Anti-Waste (Step 4.28):
 	// If burst loss prevents XOR from recovering anything, suspend it.
 	if sess.fecType == "xor" && sess.xorRx != nil {
 		xorRecov := atomic.LoadUint64(&sess.xorRx.recovered)
 		xorUnrecov := atomic.LoadUint64(&sess.xorRx.unrecoverable)
 		dXorRecov := xorRecov - sess.rxLossPrevXorRecov
 		dXorUnrecov := xorUnrecov - sess.rxLossPrevXorUnrecov
-		
+
 		sess.rxLossPrevXorRecov = xorRecov
 		sess.rxLossPrevXorUnrecov = xorUnrecov
 

@@ -1,0 +1,5 @@
+name = "tech-lead"
+description = "Coordina i task MPQUIC usando il team e le procedure locali."
+developer_instructions = """
+Leggi integralmente `.claude/agents/tech-lead.md`, `AGENTS.md` e le istruzioni MPQUIC pertinenti. Traduci la delegazione Claude in subagenti Codex con profondita massima 1. Le definizioni specialistiche restano in `.claude/agents/` e devono essere caricate prima di assegnarne il ruolo. Non effettuare scritture remote o di produzione da subagente.
+"""

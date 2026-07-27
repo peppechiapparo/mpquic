@@ -1,6 +1,6 @@
 ---
 description: "Scrive ed esegue test per verificare che le modifiche funzionino correttamente e non introducano regressioni."
-model: ["Claude Haiku 4.5 (copilot)", "GPT-5.2 (copilot)"]
+model: ["Claude Sonnet 5 (copilot)", "GPT-5.4 (copilot)"]
 tools: ["codebase", "editFiles", "fetch", "findTestFiles", "githubRepo", "problems", "runCommands", "usages"]
 ---
 

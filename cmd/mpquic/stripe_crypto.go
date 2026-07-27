@@ -34,8 +34,8 @@ const (
 	stripeKXLabel = "mpquic-stripe-v1"
 
 	// Wire overhead constants.
-	stripeCryptoSeqLen   = 8  // explicit 8-byte sequence number
-	stripeCryptoTagLen   = 16 // AES-GCM authentication tag
+	stripeCryptoSeqLen   = 8                                       // explicit 8-byte sequence number
+	stripeCryptoTagLen   = 16                                      // AES-GCM authentication tag
 	stripeCryptoOverhead = stripeCryptoSeqLen + stripeCryptoTagLen // 24 bytes total
 )
 

@@ -1,6 +1,6 @@
 ---
 description: "Sviluppatore Python per script di monitoring, generazione dashboard Grafana, automazione e tooling. Può delegare operazioni git/deploy ai subagent leggeri."
-model: ["GPT-5.2 (copilot)", "Claude Haiku 4.5 (copilot)", "Claude Sonnet 4.6 (copilot)"]
+model: ["Claude Sonnet 5 (copilot)", "GPT-5.4 (copilot)"]
 tools: ["agent", "codebase", "editFiles", "fetch", "findTestFiles", "githubRepo", "problems", "runCommands", "usages"]
 ---
 

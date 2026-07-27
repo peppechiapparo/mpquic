@@ -1,6 +1,6 @@
 ---
 description: "Esperto di trasporti multipath e algoritmi di liveness/failover/scheduling. Affianca il planner per task che riguardano scheduler, congestion control, path management, sub-RTT health detection."
-model: ["Gemini 2.5 Pro (copilot)", "Claude Opus 4.8 (copilot)"]
+model: ["Claude Opus 5 (copilot)", "Claude Sonnet 5 (copilot)"]
 tools: ["codebase", "fetch", "findTestFiles", "githubRepo", "problems", "usages"]
 ---
 

@@ -1,6 +1,6 @@
 ---
 description: "Esegue code review tecnica verificando correttezza, coerenza architetturale, manutenibilità e aderenza al piano."
-model: ["Claude Sonnet 4.6 (copilot)", "GPT-5.2 (copilot)"]
+model: ["Claude Sonnet 5 (copilot)", "GPT-5.4 (copilot)"]
 tools: ["codebase", "fetch", "findTestFiles", "githubRepo", "problems", "usages"]
 ---
 
