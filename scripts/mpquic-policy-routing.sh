@@ -42,19 +42,15 @@ TRANSIT_DEV="enp6s20"
 WAIT_SECS=2
 ENFORCE_WAN_SOURCE="${MPQUIC_ENFORCE_WAN_SOURCE:-0}"
 
-# WAN i cui pacchetti LAN escono DIRETTI sul WAN fisico (col masquerade per-oif
-# gia' presente), invece di essere instradati dentro mpqN. Lista dev separata da
-# spazi. TS-017 (IBLEA-M): STARLINK su enp7s8 va diretto dopo aver tolto STRIPES
-# dal data-path del client. mp1/bd1 non e' toccato (gestito fuori da questo script).
-BYPASS_WANS="${MPQUIC_BYPASS_WANS:-enp7s8}"
-
-is_bypass() {
-  local d
-  for d in $BYPASS_WANS; do
-    [[ "$d" == "$1" ]] && return 0
-  done
-  return 1
-}
+# RIMOSSO il meccanismo di bypass sul WAN fisico (era TS-017, MPQUIC_BYPASS_WANS).
+# Questo script non mette MAI il gateway fisico come default di una tabella wanN:
+# a tunnel giu' il traffico LAN muore in blackhole, sempre. Due ragioni (2026-07-27):
+# (1) il default della variabile (enp7s8) attivava il bypass in silenzio a ogni
+#     esecuzione fuori dalla unit (es. lancio manuale da shell), facendo credere
+#     di testare i tunnel mentre si testava il fisico nudo;
+# (2) il fallback sul canale fisico e' una decisione di policy e appartiene a
+#     mwan3 su OpenWrt, esplicita e osservabile, sulle VLAN dedicate ai canali
+#     fisici (91-96, stile BOND1/VLAN17), non a un ripiego nascosto nel client.
 
 lan_dev_for_subnet() {
   # Return the local dev holding the .1 of the given /30 (the interface facing
@@ -240,17 +236,10 @@ for idx in $(seq 0 5); do
     fi
   fi
 
-  # Default route: bypass WAN -> diretto sul fisico; altrimenti dentro il tunnel.
-  if is_bypass "$dev"; then
-    # TS-017 bypass: il traffico LAN esce DIRETTO dal WAN fisico (no tunnel).
-    # L'egress e' mascherato dalla regola nft per-oif gia' esistente. Non dipende
-    # da have_tun_up: mpqN puo' anche essere fermo.
-    if wan_usable "$dev" && [ -n "$gw" ]; then
-      safe_ip ip route replace default via "$gw" dev "$dev" table "$table"
-    else
-      safe_ip ip route replace blackhole default table "$table"
-    fi
-  elif wan_usable "$dev" && have_tun_up "$tun"; then
+  # Default route: dentro il tunnel se WAN e TUN sono su, altrimenti blackhole.
+  # MAI il gateway fisico qui: il fallback sul canale fisico e' di mwan3 (VLAN
+  # dedicate 91-96), non del client. Vedi commento in testa allo script.
+  if wan_usable "$dev" && have_tun_up "$tun"; then
     # Atomically replaces blackhole default (if present) with tunnel default
     safe_ip ip route replace default dev "$tun" table "$table"
   else
