@@ -141,17 +141,49 @@ safe_ip() { "$@" 2>/dev/null || true; }
 
 sleep "$WAIT_SECS"
 
-# ── ip rules: delete+re-add SOLO quelle che dipendono dal DHCP ───────────
+# ── ip rules ──────────────────────────────────────────────────────────────
 # TS-020: la wan rule (prio 1001-1006, "from 172.16.N.0/30 lookup wanN") e'
 # statica: il vecchio del+add apriva una finestra in cui la rule mancava e il
 # /30 cadeva in main, uscendo dal default fisico in bypass del tunnel. Con il
 # watchdog in churn su tunnel morti la finestra restava quasi sempre aperta.
-# Le rule src/remote (1101-1106, 1201-1206) contengono IP presi dal DHCP e
-# restano su del+add per raccogliere i cambi di indirizzo.
-for idx in $(seq 0 5); do
-  safe_ip ip rule del priority "${SRC_RULE_PRIOS[$idx]}"
-  safe_ip ip rule del priority "${REMOTE_RULE_PRIOS[$idx]}"
-done
+#
+# Le rule src/remote (1101-1106, 1201-1206) dipendono dal DHCP, ma anche per
+# loro il "cancella tutte in testa, riaggiungi in coda al giro" e' vietato:
+# lasciava le rule remote assenti per secondi a ogni run, i socket QUIC
+# attivi perdevano la route (EPERM su sendmsg), le istanze riconnettevano
+# ricreando il TUN e networkd, riconfigurando il link appena ricomparso,
+# spazzava anche le rule statiche (storm osservato sul banco, 2026-07-27).
+# replace_prio_rule confronta la rule esistente con quella voluta: se uguale
+# non tocca nulla; se diversa fa del+add adiacenti (finestra sub-ms).
+
+# replace_prio_rule <prio> <table> <table_name> <src_cidr> [<dst_cidr>]
+# Con src vuoto rimuove la rule alla priorita' data (stato "non deve esserci").
+replace_prio_rule() {
+  local rprio="$1" rtable="$2" rtname="$3" rsrc="$4" rdst="${5:-}"
+  local cur want_name want_num
+  cur="$(ip rule show priority "$rprio" 2>/dev/null | head -n1 | sed "s/^${rprio}:[[:space:]]*//")"
+  if [ -z "$rsrc" ]; then
+    [ -n "$cur" ] && safe_ip ip rule del priority "$rprio"
+    return 0
+  fi
+  # ip rule show stampa gli host senza /32 e la tabella per nome se mappata
+  if [ -n "$rdst" ]; then
+    want_name="from ${rsrc%/32} to ${rdst%/32} lookup ${rtname}"
+    want_num="from ${rsrc%/32} to ${rdst%/32} lookup ${rtable}"
+  else
+    want_name="from ${rsrc%/32} lookup ${rtname}"
+    want_num="from ${rsrc%/32} lookup ${rtable}"
+  fi
+  case "$cur" in
+    "$want_name"|"$want_num") return 0 ;;
+  esac
+  [ -n "$cur" ] && safe_ip ip rule del priority "$rprio"
+  if [ -n "$rdst" ]; then
+    safe_ip ip rule add from "$rsrc" to "$rdst" lookup "$rtable" priority "$rprio"
+  else
+    safe_ip ip rule add from "$rsrc" lookup "$rtable" priority "$rprio"
+  fi
+}
 
 # ── Route tables: use "replace" instead of "flush + add" ─────────────────
 # "ip route replace" atomically updates or inserts a route without creating
@@ -229,14 +261,21 @@ for idx in $(seq 0 5); do
   # TS-020: add-if-absent, la rule statica non si tocca se c'e' gia'
   ip rule show | grep -q "^${prio}:" || safe_ip ip rule add from "$subnet" lookup "$table" priority "$prio"
 
-  if [ "$ENFORCE_WAN_SOURCE" = "1" ]; then
-    if [ -n "$src_ip" ]; then
-      safe_ip ip rule add from "${src_ip}/32" lookup "$table" priority "$src_prio"
-    fi
+  # Rule DHCP-dipendenti: aggiornate solo se cambiate davvero (vedi commento
+  # in testa alla sezione). Il nome tabella serve per il confronto con
+  # l'output di ip rule show, che stampa il nome quando rt_tables lo mappa.
+  tname="wan$((idx+1))"
+
+  if [ "$ENFORCE_WAN_SOURCE" = "1" ] && [ -n "$src_ip" ]; then
+    replace_prio_rule "$src_prio" "$table" "$tname" "${src_ip}/32"
+  else
+    replace_prio_rule "$src_prio" "$table" "$tname" ""
   fi
 
   if [ -n "$src_ip" ] && is_ipv4_lit "$rip"; then
-    safe_ip ip rule add from "${src_ip}/32" to "${rip}/32" lookup "$table" priority "$remote_prio"
+    replace_prio_rule "$remote_prio" "$table" "$tname" "${src_ip}/32" "${rip}/32"
+  else
+    replace_prio_rule "$remote_prio" "$table" "$tname" ""
   fi
 done
 
