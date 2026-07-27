@@ -11,7 +11,7 @@ Restart=always
 RestartSec=10
 
 # Variabili configurabili (decommentare per override)
-#Environment=WAN_INTERFACES=enp7s7 enp7s8
+#Environment="WAN_INTERFACES=enp7s7 enp7s8"
 #Environment=CHECK_INTERVAL=15
 #Environment=FAIL_THRESHOLD=4
 #Environment=COOLDOWN=120
