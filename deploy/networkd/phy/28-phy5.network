@@ -1,0 +1,26 @@
+# VLAN 95: canale fisico LTE diretto (enp7s7), fallback esplicito governato da
+# mwan3 su OpenWrt (LTE_PHY su eth12.95). Il default dinamico della tabella phy5
+# (via gw DHCP di enp7s7) lo mantiene mpquic-policy-routing.sh.
+[Match]
+Name=enp7s1.95
+
+[Network]
+Address=172.16.95.1/30
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[RoutingPolicyRule]
+From=172.16.95.0/30
+Table=195
+Priority=1095
+
+[Route]
+Destination=172.16.95.0/30
+Scope=link
+Table=195
+
+[Route]
+Type=blackhole
+Destination=0.0.0.0/0
+Table=195
+Metric=9999

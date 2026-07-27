@@ -247,6 +247,17 @@ for idx in $(seq 0 5); do
     safe_ip ip route replace blackhole default table "$table"
   fi
 
+  # Tabella phyN (191-196) del canale fisico diretto: e' l'UNICO posto dove il
+  # gateway fisico e' legittimo. Ci arriva solo il traffico della VLAN 9x
+  # dedicata (rule 109x, networkd-owned): la scelta di usare il canale fisico
+  # la fa mwan3 su OpenWrt coi membri di riserva, mai questo script di nascosto.
+  phy_table=$((191 + idx))
+  if wan_usable "$dev" && [ -n "$gw" ]; then
+    safe_ip ip route replace default via "$gw" dev "$dev" table "$phy_table"
+  else
+    safe_ip ip route replace blackhole default table "$phy_table"
+  fi
+
   # TS-020: add-if-absent, la rule statica non si tocca se c'e' gia'
   ip rule show | grep -q "^${prio}:" || safe_ip ip rule add from "$subnet" lookup "$table" priority "$prio"
 
