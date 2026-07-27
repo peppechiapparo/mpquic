@@ -141,12 +141,14 @@ safe_ip() { "$@" 2>/dev/null || true; }
 
 sleep "$WAIT_SECS"
 
-# ── ip rules: delete stale, re-add current ───────────────────────────────
-# Rules are deleted and re-added to pick up any source IP changes from DHCP.
-# The brief window where a rule is absent only affects new connections from
-# LAN subnets, not active tunnel sockets.
+# ── ip rules: delete+re-add SOLO quelle che dipendono dal DHCP ───────────
+# TS-020: la wan rule (prio 1001-1006, "from 172.16.N.0/30 lookup wanN") e'
+# statica: il vecchio del+add apriva una finestra in cui la rule mancava e il
+# /30 cadeva in main, uscendo dal default fisico in bypass del tunnel. Con il
+# watchdog in churn su tunnel morti la finestra restava quasi sempre aperta.
+# Le rule src/remote (1101-1106, 1201-1206) contengono IP presi dal DHCP e
+# restano su del+add per raccogliere i cambi di indirizzo.
 for idx in $(seq 0 5); do
-  safe_ip ip rule del from "${LAN_SUBNETS[$idx]}" priority "${RULE_PRIOS[$idx]}"
   safe_ip ip rule del priority "${SRC_RULE_PRIOS[$idx]}"
   safe_ip ip rule del priority "${REMOTE_RULE_PRIOS[$idx]}"
 done
@@ -224,7 +226,8 @@ for idx in $(seq 0 5); do
     safe_ip ip route replace blackhole default table "$table"
   fi
 
-  safe_ip ip rule add from "$subnet" lookup "$table" priority "$prio"
+  # TS-020: add-if-absent, la rule statica non si tocca se c'e' gia'
+  ip rule show | grep -q "^${prio}:" || safe_ip ip rule add from "$subnet" lookup "$table" priority "$prio"
 
   if [ "$ENFORCE_WAN_SOURCE" = "1" ]; then
     if [ -n "$src_ip" ]; then
