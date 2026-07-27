@@ -53,14 +53,15 @@ type stripeClientConn struct {
 	arqRx *arqRxTracker // RX gap detector + NACK generator
 
 	// TX state
-	txSeq      uint32 // atomic: next data sequence number
-	txPipe     uint32 // atomic: round-robin pipe selector
-	txGroup    [][]byte
-	txGrpSeq   uint32
-	txMu       sync.Mutex
-	txTimer    *time.Timer
-	txShardBuf []byte // reusable M=0 shard buffer (under txMu, avoids alloc/pkt)
-	txEncBuf   []byte // reusable encrypt output buffer (under txMu, client only)
+	txSeq        uint32 // atomic: next data sequence number
+	txPipe       uint32 // atomic: round-robin pipe selector
+	flowAffinity bool   // stripe_flow_affinity: flusso interno inchiodato a una pipe
+	txGroup      [][]byte
+	txGrpSeq     uint32
+	txMu         sync.Mutex
+	txTimer      *time.Timer
+	txShardBuf   []byte // reusable M=0 shard buffer (under txMu, avoids alloc/pkt)
+	txEncBuf     []byte // reusable encrypt output buffer (under txMu, client only)
 
 	// RX state
 	rxCh     chan []byte // decoded IP packets delivered here
@@ -284,21 +285,22 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	}
 
 	scc := &stripeClientConn{
-		serverAddr: serverAddr,
-		sessionID:  sessionID,
-		tunIPU32:   ipToUint32(tunIP),
-		dataK:      dataK,
-		parityM:    parityM,
-		enc:        enc,
-		fecMode:    fecMode,
-		fecType:    fecType,
-		txGroup:    make([][]byte, 0, dataK),
-		rxCh:       make(chan []byte, 512),
-		rxGroups:   make(map[uint32]*fecGroup),
-		closeCh:    make(chan struct{}),
-		logger:     logger,
-		txCipher:   txCipher,
-		rxCipher:   rxCipher,
+		serverAddr:   serverAddr,
+		sessionID:    sessionID,
+		tunIPU32:     ipToUint32(tunIP),
+		dataK:        dataK,
+		parityM:      parityM,
+		enc:          enc,
+		fecMode:      fecMode,
+		fecType:      fecType,
+		flowAffinity: cfg.StripeFlowAffinity,
+		txGroup:      make([][]byte, 0, dataK),
+		rxCh:         make(chan []byte, 512),
+		rxGroups:     make(map[uint32]*fecGroup),
+		closeCh:      make(chan struct{}),
+		logger:       logger,
+		txCipher:     txCipher,
+		rxCipher:     rxCipher,
 		// lastRxNsPtr is wired here (before any recv goroutine is spawned)
 		// so healthCheckLoop sees a stable, race-free pointer.
 		lastRxNsPtr: lastRxNsPtr,
@@ -557,8 +559,7 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 		if scc.pacer != nil {
 			scc.pacer.pace(len(wirePkt))
 		}
-		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
-		pipeIdx := int(idx) % len(scc.pipes)
+		pipeIdx := scc.dataPipeIdx(pkt)
 		if scc.gsoEnabled && atomic.LoadUint32(&scc.gsoDisabled) == 0 {
 			scc.gsoAccumLocked(pipeIdx, wirePkt)
 		} else {
@@ -722,8 +723,7 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 		if scc.pacer != nil {
 			scc.pacer.pace(len(wirePkt))
 		}
-		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
-		pipeIdx := int(idx) % len(scc.pipes)
+		pipeIdx := scc.dataPipeIdx(scc.txGroup[i][2:])
 		if gsoActive {
 			scc.gsoAccumLocked(pipeIdx, wirePkt)
 		} else {
@@ -1013,6 +1013,19 @@ func (scc *stripeClientConn) sendToPipe(pkt []byte) {
 	pipe := scc.pipes[int(idx)%len(scc.pipes)]
 	pkt = stripeEncrypt(scc.txCipher, pkt)
 	_, _ = pipe.WriteToUDP(pkt, scc.serverAddr)
+}
+
+// dataPipeIdx sceglie la pipe per uno shard DATA. Con flow-affinity attiva
+// usa l'hash del 5-tuple del pacchetto interno (ordine preservato per flusso);
+// altrimenti, o se il pacchetto non e' parsabile, round-robin classico.
+func (scc *stripeClientConn) dataPipeIdx(inner []byte) int {
+	if scc.flowAffinity && len(scc.pipes) > 1 {
+		if h, ok := innerFlowHash(inner); ok {
+			return int(h % uint32(len(scc.pipes)))
+		}
+	}
+	idx := atomic.AddUint32(&scc.txPipe, 1) - 1
+	return int(idx) % len(scc.pipes)
 }
 
 // ─── Client RX internals ──────────────────────────────────────────────────
