@@ -3,7 +3,7 @@ bind_ip: 0.0.0.0
 remote_addr: ""
 remote_port: 45003
 tun_name: mpq3
-tun_cidr: 10.200.3.2/30
+tun_cidr: 10.200.3.254/24
 log_level: info
 tls_cert_file: /etc/mpquic/tls/server.crt
 tls_key_file: /etc/mpquic/tls/server.key

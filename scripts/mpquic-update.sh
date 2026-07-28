@@ -51,7 +51,13 @@ list_instances() {
     systemctl list-units --type=service --all --no-legend 'mpquic@*' \
       | grep -oP 'mpquic@\K[a-zA-Z0-9_-]+(?=\.service)' || true
     list_enabled_instances || true
-  } | sort -u
+  } | sort -u | while read -r inst; do
+    # Le istanze mascherate sono ferme per scelta dell'operatore (su IBLEA-M
+    # mpquic@6): avviarle fallisce e, con set -e, l'update moriva a meta' lista
+    # lasciando gli altri tunnel giu' (visto il 2026-07-29).
+    [[ "$(systemctl is-enabled "mpquic@${inst}" 2>/dev/null)" == "masked" ]] && continue
+    echo "$inst"
+  done
 }
 
 # ── Pre-flight checks ─────────────────────────────────────────────────────
@@ -169,7 +175,9 @@ if [[ ${#INSTANCES[@]} -gt 0 ]]; then
   # with 0.5s delay eliminates this race.
   local_fail=0
   for inst in "${INSTANCES[@]}"; do
-    systemctl start "mpquic@${inst}"
+    # Mai far morire l'update qui: uno start fallito va segnalato, non deve
+    # lasciare gli altri tunnel fermi (set -e + unit mascherata, 2026-07-29).
+    systemctl start "mpquic@${inst}" || true
     sleep 0.5
     state="$(systemctl is-active "mpquic@${inst}" 2>/dev/null || echo 'unknown')"
     if [[ "$state" != "active" ]]; then
