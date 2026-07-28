@@ -1,6 +1,6 @@
 ---
 description: "Analizza il task richiesto e produce un piano tecnico dettagliato senza mai modificare il codice."
-model: ["Gemini 2.5 Pro (copilot)", "Claude Opus 4.8 (copilot)"]
+model: ["Claude Opus 5 (copilot)", "Claude Opus 4.8 (copilot)"]
 tools: ["codebase", "fetch", "problems", "usages", "findTestFiles", "githubRepo"]
 ---
 

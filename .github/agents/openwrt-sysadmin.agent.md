@@ -1,6 +1,6 @@
 ---
 description: "Sistemista Linux senior specializzato in OpenWrt. Gestisce configurazione di sistema, procd, UCI, networking stack, firewall, servizi e troubleshooting avanzato."
-model: ["GPT-5.2 (copilot)", "Claude Sonnet 4.6 (copilot)"]
+model: ["Claude Sonnet 5 (copilot)", "GPT-5.4 (copilot)"]
 tools: ["codebase", "fetch", "githubRepo", "problems", "runCommands", "usages"]
 ---
 

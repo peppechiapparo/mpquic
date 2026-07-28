@@ -1,4 +1,4 @@
-# Multipath stripe client — dual Starlink bonding (wan5 + wan6)
+# Multipath stripe client — single Starlink path
 # FEC adaptive + ARQ for Starlink resilience
 role: client
 multipath_enabled: true
@@ -25,17 +25,9 @@ stripe_arq: true
 # stripe_path_degraded_recovery: 1s
 # stripe_health_check_interval: 500ms
 multipath_paths:
-- name: wan5
-  bind_ip: if:enp7s7
-  remote_addr: 172.238.232.223
-  remote_port: 45017
-  priority: 1
-  weight: 1
-  pipes: 12
-  transport: stripe
 - name: wan6
   bind_ip: if:enp7s8
-  remote_addr: 172.238.232.223
+  remote_addr: VPS_PUBLIC_IP
   remote_port: 45017
   priority: 1
   weight: 1

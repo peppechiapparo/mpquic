@@ -1,6 +1,6 @@
 ---
 description: "Implementa il codice seguendo il piano tecnico prodotto dal planner, rispettando architettura e convenzioni del progetto."
-model: ["GPT-5.2 (copilot)", "Claude Haiku 4.5 (copilot)", "Claude Sonnet 4.6 (copilot)"]
+model: ["Claude Sonnet 5 (copilot)", "GPT-5.4 (copilot)"]
 tools: ["agent", "codebase", "editFiles", "fetch", "findTestFiles", "githubRepo", "problems", "runCommands", "usages"]
 ---
 

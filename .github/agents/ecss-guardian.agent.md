@@ -1,6 +1,6 @@
 ---
 description: "Scrittore e guardiano della documentazione tecnica ECSS per il progetto MPQUIC/STRIPES di Telespazio. Mantiene i documenti TDD, SRD, RTM e UM conformi agli standard ECSS-E-ST-40C e ECSS-Q-ST-80C ad ogni modifica software o sistemistica."
-model: ["Claude Sonnet 4.6 (copilot)", "GPT-5.2 (copilot)"]
+model: ["Claude Sonnet 5 (copilot)", "GPT-5.4 (copilot)"]
 tools: ["codebase", "editFiles", "fetch", "findTestFiles", "githubRepo", "problems", "readFile", "runCommands", "usages"]
 ---
 

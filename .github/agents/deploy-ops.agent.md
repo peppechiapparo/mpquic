@@ -1,6 +1,6 @@
 ---
 description: "Esegue operazioni di deploy procedurali: scp/rsync di file, restart di servizi systemd, run di script di update (mpquic-update.sh), check journalctl. USA QUESTO AGENT per deploy/restart invece di farli nel contesto principale per risparmiare token."
-model: ["GPT-5 mini (copilot)", "GPT-4.1 (copilot)"]
+model: ["Claude Haiku 4.5 (copilot)", "GPT-5.4 mini (copilot)"]
 tools: ["runCommands", "codebase"]
 user-invocable: true
 ---
