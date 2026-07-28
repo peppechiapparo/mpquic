@@ -16,6 +16,12 @@ case "$iface" in
   enp7s6) instance="4" ;;
   enp7s7) instance="5" ;;
   enp7s8) instance="6" ;;
+  mpq*|mp1|cr*|br*|df*)
+    # Evento su un TUN (creato/distrutto dal client a ogni connect/reconnect):
+    # nessuna istanza da gestire, ma il routing va rinfrescato subito, perche'
+    # il default della tabella wanN e' dello script e senza refresh il traffico
+    # resta sul pavimento blackhole anche a tunnel tornato su (2026-07-27).
+    instance="" ;;
   *) exit 0 ;;
 esac
 
@@ -67,14 +73,16 @@ recover_dhcp_ipv4() {
   wait_global_ipv4 15
 }
 
-if [[ "$state" == "up" || "$state" == "routable" || "$state" == "configured" || "$state" == "dhcp4-change" ]]; then
-  if recover_dhcp_ipv4; then
-    run_priv systemctl restart "$svc" || true
-  else
+if [ -n "$instance" ]; then
+  if [[ "$state" == "up" || "$state" == "routable" || "$state" == "configured" || "$state" == "dhcp4-change" ]]; then
+    if recover_dhcp_ipv4; then
+      run_priv systemctl restart "$svc" || true
+    else
+      run_priv systemctl stop "$svc" || true
+    fi
+  elif [[ "$state" == "down" || "$state" == "degraded" || "$state" == "off" || "$state" == "no-carrier" ]]; then
     run_priv systemctl stop "$svc" || true
   fi
-elif [[ "$state" == "down" || "$state" == "degraded" || "$state" == "off" || "$state" == "no-carrier" ]]; then
-  run_priv systemctl stop "$svc" || true
 fi
 
 if systemctl list-unit-files | grep -q '^mpquic-routing\.service'; then

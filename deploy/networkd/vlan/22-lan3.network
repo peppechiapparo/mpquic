@@ -1,27 +1,23 @@
-# Updated 23-lan4: adds VLAN trunk for multi-tunnel (cr1/br1/df1)
 [Match]
-Name=enp6s23
+Name=enp6s22
 
 [Network]
-Address=172.16.4.1/30
+Address=172.16.3.1/30
 LinkLocalAddressing=no
 IPv6AcceptRA=no
-VLAN=enp6s23.11
-VLAN=enp6s23.12
-VLAN=enp6s23.13
 
 # Wan rule statica del policy routing (TS-020/storm 2026-07-27):
 # di proprieta networkd, presente dal boot, immune allo sweep delle rule foreign.
 [RoutingPolicyRule]
-From=172.16.4.0/30
-Table=103
-Priority=1004
+From=172.16.3.0/30
+Table=102
+Priority=1003
 
-# Pavimento blackhole per wan4: se il default dinamico dev mpq4 sparisce
+# Pavimento blackhole per wan3: se il default dinamico dev mpq3 sparisce
 # (TUN distrutto, tunnel giu) il traffico del /30 muore qui invece di
 # scavalcare in main sul default fisico (bypass visto il 2026-07-27).
 [Route]
 Type=blackhole
 Destination=0.0.0.0/0
-Table=103
+Table=102
 Metric=9999

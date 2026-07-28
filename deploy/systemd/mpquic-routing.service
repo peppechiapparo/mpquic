@@ -6,7 +6,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/mpquic-policy-routing.sh
-RemainAfterExit=yes
+# RemainAfterExit deve restare "no": con "yes" la unit resta active (exited)
+# e il timer di riconciliazione non la rieseguirebbe mai (systemd avvia via
+# timer solo unit inattive). Lo script e' idempotente, rieseguirlo e' gratis.
+RemainAfterExit=no
 
 [Install]
 WantedBy=multi-user.target

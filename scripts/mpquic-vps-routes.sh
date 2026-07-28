@@ -1,30 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Return-route per-/30 dei client, DERIVATE dai file d'istanza.
+# Ogni /etc/mpquic/instances/<i>.env dichiara la sua RETURN_SUBNETS (le subnet
+# LAN del client il cui ritorno de-mascherato va instradato dentro il tunnel).
+# Prima questa era una lista scritta a mano qui dentro, che si disallineava dai
+# tunnel reali (es. mp1 e mt1 mancanti). Ora la fonte di verità è l'env
+# dell'istanza: aggiungi un tunnel con la sua RETURN_SUBNETS e la rotta compare
+# da sola, senza toccare questo script.
+#
+# Uso:
+#   mpquic-vps-routes.sh            -> tutte le istanze (boot / keeper)
+#   mpquic-vps-routes.sh <istanza>  -> solo quella (ExecStartPost=... %i)
+#
+# Nota: i tunnel di test senza LAN dietro (es. mt1, che maschera la propria
+# /24 10.200.10.0/24) non dichiarano RETURN_SUBNETS: il loro ritorno è la
+# rotta connessa del TUN, gia' creata da ensure_tun.sh.
+
+INSTANCES_DIR=/etc/mpquic/instances
+
 safe() { "$@" 2>/dev/null || true; }
 
-# Single-link tunnels (1:1 WAN↔tunnel)
-safe ip route replace 172.16.1.0/30 dev mpq1
-safe ip route replace 172.16.2.0/30 dev mpq2
-safe ip route replace 172.16.3.0/30 dev mpq3
-safe ip route replace 172.16.4.0/30 dev mpq4
-safe ip route replace 172.16.5.0/30 dev mpq5
-safe ip route replace 172.16.6.0/30 dev mpq6
+install_for() {
+  local env_file="$1"
+  [ -f "$env_file" ] || return 0
 
-# Multi-tunnel per link (Step 2.5: VLAN transit subnets → mt tunnels)
-# WAN4 classes: cr4/br4/df4 via mt4
-safe ip route replace 172.16.11.0/30 dev mt4
-safe ip route replace 172.16.12.0/30 dev mt4
-safe ip route replace 172.16.13.0/30 dev mt4
+  local tun subs
+  tun="$(grep -E '^TUN_NAME=' "$env_file" | cut -d= -f2- || true)"
+  subs="$(grep -E '^RETURN_SUBNETS=' "$env_file" | cut -d= -f2- | tr -d '"' || true)"
 
-# WAN5 classes: cr5/br5/df5 via mt5
-safe ip route replace 172.16.21.0/30 dev mt5
-safe ip route replace 172.16.22.0/30 dev mt5
-safe ip route replace 172.16.23.0/30 dev mt5
+  [ -n "$tun" ] || return 0
+  [ -n "$subs" ] || return 0
 
-# WAN6 classes: cr6/br6/df6 via mt6
-safe ip route replace 172.16.31.0/30 dev mt6
-safe ip route replace 172.16.32.0/30 dev mt6
-safe ip route replace 172.16.33.0/30 dev mt6
+  local sub
+  for sub in $subs; do
+    safe ip route replace "$sub" dev "$tun"
+  done
+}
+
+if [ "$#" -ge 1 ] && [ -n "${1:-}" ]; then
+  install_for "$INSTANCES_DIR/$1.env"
+else
+  for f in "$INSTANCES_DIR"/*.env; do
+    install_for "$f"
+  done
+fi
 
 exit 0

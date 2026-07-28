@@ -4,8 +4,25 @@ Name=enp7s2
 
 [Network]
 Address=172.16.6.1/30
+VLAN=enp7s2.96
 LinkLocalAddressing=no
 IPv6AcceptRA=no
 VLAN=enp7s2.31
 VLAN=enp7s2.32
 VLAN=enp7s2.33
+
+# Wan rule statica del policy routing (TS-020/storm 2026-07-27):
+# di proprieta networkd, presente dal boot, immune allo sweep delle rule foreign.
+[RoutingPolicyRule]
+From=172.16.6.0/30
+Table=105
+Priority=1006
+
+# Pavimento blackhole per wan6: se il default dinamico dev mpq6 sparisce
+# (TUN distrutto, tunnel giu) il traffico del /30 muore qui invece di
+# scavalcare in main sul default fisico (bypass visto il 2026-07-27).
+[Route]
+Type=blackhole
+Destination=0.0.0.0/0
+Table=105
+Metric=9999

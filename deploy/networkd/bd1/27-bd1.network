@@ -10,3 +10,9 @@ IPv6AcceptRA=no
 From=172.16.17.0/30
 Table=200
 Priority=1017
+
+[Route]
+Type=blackhole
+Destination=0.0.0.0/0
+Table=200
+Metric=9999

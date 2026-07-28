@@ -10,6 +10,10 @@ EnvironmentFile=/etc/mpquic/instances/%i.env
 ExecStartPre=/bin/sh -c '/usr/local/lib/mpquic/ensure_tun.sh "$TUN_NAME" "$TUN_CIDR" "${TUN_MTU:-1300}"'
 ExecStartPre=/bin/sh -c '/usr/local/lib/mpquic/render_config.sh "%i"'
 ExecStart=/usr/local/bin/mpquic --config /run/mpquic/%i.yaml
+# Ripristina la return-route /30 del client all'up del tunnel (event-driven):
+# ensure_tun ricrea il TUN e ne flusha la rotta connessa, quindi va reinstallata
+# ad ogni start. Deriva le subnet da RETURN_SUBNETS nell'env dell'istanza (TS-012).
+ExecStartPost=-/usr/local/sbin/mpquic-vps-routes.sh %i
 ExecStopPost=-/bin/sh -c 'ip link set dev "$TUN_NAME" down 2>/dev/null || true'
 Restart=always
 RestartSec=2

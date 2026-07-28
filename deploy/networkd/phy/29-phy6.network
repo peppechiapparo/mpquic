@@ -1,0 +1,26 @@
+# VLAN 95: canale fisico STARLINK diretto (enp7s8), fallback esplicito governato da
+# mwan3 su OpenWrt (STARLINK_PHY su eth13.96). Il default dinamico della tabella phy6
+# (via gw DHCP di enp7s8) lo mantiene mpquic-policy-routing.sh.
+[Match]
+Name=enp7s2.96
+
+[Network]
+Address=172.16.96.1/30
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[RoutingPolicyRule]
+From=172.16.96.0/30
+Table=196
+Priority=1096
+
+[Route]
+Destination=172.16.96.0/30
+Scope=link
+Table=196
+
+[Route]
+Type=blackhole
+Destination=0.0.0.0/0
+Table=196
+Metric=9999

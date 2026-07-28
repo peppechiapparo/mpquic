@@ -1,0 +1,14 @@
+[Unit]
+Description=Riconciliazione periodica del policy routing MPQUIC
+# Rete di sicurezza per gli eventi persi: networkd-dispatcher puo' mancare
+# la creazione di un TUN (visto sul banco il 2026-07-27: "Unknown index seen,
+# reloading interface list" e il default dev mpqN mai reinstallato). Lo
+# script e' idempotente e atomico, la run periodica non disturba nulla.
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

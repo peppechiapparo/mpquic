@@ -42,6 +42,24 @@ TRANSIT_DEV="enp6s20"
 WAIT_SECS=2
 ENFORCE_WAN_SOURCE="${MPQUIC_ENFORCE_WAN_SOURCE:-0}"
 
+# RIMOSSO il meccanismo di bypass sul WAN fisico (era TS-017, MPQUIC_BYPASS_WANS).
+# Questo script non mette MAI il gateway fisico come default di una tabella wanN:
+# a tunnel giu' il traffico LAN muore in blackhole, sempre. Due ragioni (2026-07-27):
+# (1) il default della variabile (enp7s8) attivava il bypass in silenzio a ogni
+#     esecuzione fuori dalla unit (es. lancio manuale da shell), facendo credere
+#     di testare i tunnel mentre si testava il fisico nudo;
+# (2) il fallback sul canale fisico e' una decisione di policy e appartiene a
+#     mwan3 su OpenWrt, esplicita e osservabile, sulle VLAN dedicate ai canali
+#     fisici (91-96, stile BOND1/VLAN17), non a un ripiego nascosto nel client.
+
+lan_dev_for_subnet() {
+  # Return the local dev holding the .1 of the given /30 (the interface facing
+  # the OpenWrt router for that WAN), e.g. 172.16.6.0/30 -> enp7s2.
+  local base="${1%/*}"
+  local pfx="${base%.*}."
+  ip -4 -o addr show 2>/dev/null | awk -v p="$pfx" 'index($4, p)==1 {print $2; exit}'
+}
+
 have_ipv4() {
   ip -4 addr show dev "$1" 2>/dev/null | grep -q "inet "
 }
@@ -119,15 +137,49 @@ safe_ip() { "$@" 2>/dev/null || true; }
 
 sleep "$WAIT_SECS"
 
-# ── ip rules: delete stale, re-add current ───────────────────────────────
-# Rules are deleted and re-added to pick up any source IP changes from DHCP.
-# The brief window where a rule is absent only affects new connections from
-# LAN subnets, not active tunnel sockets.
-for idx in $(seq 0 5); do
-  safe_ip ip rule del from "${LAN_SUBNETS[$idx]}" priority "${RULE_PRIOS[$idx]}"
-  safe_ip ip rule del priority "${SRC_RULE_PRIOS[$idx]}"
-  safe_ip ip rule del priority "${REMOTE_RULE_PRIOS[$idx]}"
-done
+# ── ip rules ──────────────────────────────────────────────────────────────
+# TS-020: la wan rule (prio 1001-1006, "from 172.16.N.0/30 lookup wanN") e'
+# statica: il vecchio del+add apriva una finestra in cui la rule mancava e il
+# /30 cadeva in main, uscendo dal default fisico in bypass del tunnel. Con il
+# watchdog in churn su tunnel morti la finestra restava quasi sempre aperta.
+#
+# Le rule src/remote (1101-1106, 1201-1206) dipendono dal DHCP, ma anche per
+# loro il "cancella tutte in testa, riaggiungi in coda al giro" e' vietato:
+# lasciava le rule remote assenti per secondi a ogni run, i socket QUIC
+# attivi perdevano la route (EPERM su sendmsg), le istanze riconnettevano
+# ricreando il TUN e networkd, riconfigurando il link appena ricomparso,
+# spazzava anche le rule statiche (storm osservato sul banco, 2026-07-27).
+# replace_prio_rule confronta la rule esistente con quella voluta: se uguale
+# non tocca nulla; se diversa fa del+add adiacenti (finestra sub-ms).
+
+# replace_prio_rule <prio> <table> <table_name> <src_cidr> [<dst_cidr>]
+# Con src vuoto rimuove la rule alla priorita' data (stato "non deve esserci").
+replace_prio_rule() {
+  local rprio="$1" rtable="$2" rtname="$3" rsrc="$4" rdst="${5:-}"
+  local cur want_name want_num
+  cur="$(ip rule show priority "$rprio" 2>/dev/null | head -n1 | sed "s/^${rprio}:[[:space:]]*//")"
+  if [ -z "$rsrc" ]; then
+    [ -n "$cur" ] && safe_ip ip rule del priority "$rprio"
+    return 0
+  fi
+  # ip rule show stampa gli host senza /32 e la tabella per nome se mappata
+  if [ -n "$rdst" ]; then
+    want_name="from ${rsrc%/32} to ${rdst%/32} lookup ${rtname}"
+    want_num="from ${rsrc%/32} to ${rdst%/32} lookup ${rtable}"
+  else
+    want_name="from ${rsrc%/32} lookup ${rtname}"
+    want_num="from ${rsrc%/32} lookup ${rtable}"
+  fi
+  case "$cur" in
+    "$want_name"|"$want_num") return 0 ;;
+  esac
+  [ -n "$cur" ] && safe_ip ip rule del priority "$rprio"
+  if [ -n "$rdst" ]; then
+    safe_ip ip rule add from "$rsrc" to "$rdst" lookup "$rtable" priority "$rprio"
+  else
+    safe_ip ip rule add from "$rsrc" lookup "$rtable" priority "$rprio"
+  fi
+}
 
 # ── Route tables: use "replace" instead of "flush + add" ─────────────────
 # "ip route replace" atomically updates or inserts a route without creating
@@ -152,36 +204,78 @@ for idx in $(seq 0 5); do
   safe_ip ip route replace "${MGMT_NETS[0]}" dev "${MGMT_DEVS[0]}" table "$table"
   safe_ip ip route replace "${MGMT_NETS[1]}" dev "${MGMT_DEVS[1]}" table "$table"
   safe_ip ip route replace "$TRANSIT_SUPERNET" dev "$TRANSIT_DEV" table "$table"
+  # Specific /30 back to the router on its own bridge (more specific than the
+  # transit /16). Without this, return traffic to the router's per-WAN /30
+  # follows 172.16.0.0/16 dev enp6s20 onto the wrong bridge and is dropped
+  # -> heavy loss / mwan3 flapping. Mirrors table bd1.
+  lan_dev="$(lan_dev_for_subnet "$subnet")"
+  if [ -n "$lan_dev" ]; then
+    safe_ip ip route replace "$subnet" dev "$lan_dev" scope link table "$table"
+  fi
 
-  if wan_usable "$dev" && have_tun_up "$tun"; then
-    gw="$(gw_for_dev "$dev")"
+  gw="$(gw_for_dev "$dev")"
 
+  # VPS host route: tied to the WAN's own state only, NOT to the tunnel's.
+  # This table is per-WAN, not per-tunnel: other mpquic instances bound to
+  # the same physical interface (e.g. mp1 on enp7s8 pinned into wan6 via a
+  # remote ip rule) rely on this route to reach the VPS even while mpqN is
+  # down. Coupling it to have_tun_up caused a 18.4s stripe blackout on mp1
+  # during a `systemctl stop mpquic@6` test (IBLEA-M, 2026-07-22): the
+  # networkd-dispatcher hook re-ran this script, saw mpq6 down, and deleted
+  # the shared host route + set a blackhole default in wan6 out from under
+  # mp1's still-alive pipes.
+  if wan_usable "$dev"; then
     if [ -n "$gw" ] && is_ipv4_lit "$rip"; then
       # Atomically replaces any stale VPS host route (e.g. after DHCP gateway change)
       safe_ip ip route replace "${rip}/32" via "$gw" dev "$dev" table "$table"
     fi
-
-    # Atomically replaces blackhole default (if present) with tunnel default
-    safe_ip ip route replace default dev "$tun" table "$table"
   else
-    # WAN or TUN is down: replace default with blackhole (atomic)
-    safe_ip ip route replace blackhole default table "$table"
     # Remove stale VPS host route if present
     if is_ipv4_lit "$rip"; then
       safe_ip ip route del "${rip}/32" table "$table"
     fi
   fi
 
-  safe_ip ip rule add from "$subnet" lookup "$table" priority "$prio"
+  # Default route: dentro il tunnel se WAN e TUN sono su, altrimenti blackhole.
+  # MAI il gateway fisico qui: il fallback sul canale fisico e' di mwan3 (VLAN
+  # dedicate 91-96), non del client. Vedi commento in testa allo script.
+  if wan_usable "$dev" && have_tun_up "$tun"; then
+    # Atomically replaces blackhole default (if present) with tunnel default
+    safe_ip ip route replace default dev "$tun" table "$table"
+  else
+    # WAN or TUN is down: replace default with blackhole (atomic)
+    safe_ip ip route replace blackhole default table "$table"
+  fi
 
-  if [ "$ENFORCE_WAN_SOURCE" = "1" ]; then
-    if [ -n "$src_ip" ]; then
-      safe_ip ip rule add from "${src_ip}/32" lookup "$table" priority "$src_prio"
-    fi
+  # Tabella phyN (191-196) del canale fisico diretto: e' l'UNICO posto dove il
+  # gateway fisico e' legittimo. Ci arriva solo il traffico della VLAN 9x
+  # dedicata (rule 109x, networkd-owned): la scelta di usare il canale fisico
+  # la fa mwan3 su OpenWrt coi membri di riserva, mai questo script di nascosto.
+  phy_table=$((191 + idx))
+  if wan_usable "$dev" && [ -n "$gw" ]; then
+    safe_ip ip route replace default via "$gw" dev "$dev" table "$phy_table"
+  else
+    safe_ip ip route replace blackhole default table "$phy_table"
+  fi
+
+  # TS-020: add-if-absent, la rule statica non si tocca se c'e' gia'
+  ip rule show | grep -q "^${prio}:" || safe_ip ip rule add from "$subnet" lookup "$table" priority "$prio"
+
+  # Rule DHCP-dipendenti: aggiornate solo se cambiate davvero (vedi commento
+  # in testa alla sezione). Il nome tabella serve per il confronto con
+  # l'output di ip rule show, che stampa il nome quando rt_tables lo mappa.
+  tname="wan$((idx+1))"
+
+  if [ "$ENFORCE_WAN_SOURCE" = "1" ] && [ -n "$src_ip" ]; then
+    replace_prio_rule "$src_prio" "$table" "$tname" "${src_ip}/32"
+  else
+    replace_prio_rule "$src_prio" "$table" "$tname" ""
   fi
 
   if [ -n "$src_ip" ] && is_ipv4_lit "$rip"; then
-    safe_ip ip rule add from "${src_ip}/32" to "${rip}/32" lookup "$table" priority "$remote_prio"
+    replace_prio_rule "$remote_prio" "$table" "$tname" "${src_ip}/32" "${rip}/32"
+  else
+    replace_prio_rule "$remote_prio" "$table" "$tname" ""
   fi
 done
 
