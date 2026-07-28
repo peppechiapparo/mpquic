@@ -158,39 +158,39 @@ systemctl restart mpquic@mp1
 ### Architettura Fase 5
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  OpenWrt (10.10.11.254) — LuCI UI                                       │
-│                                                                         │
-│  luci-app-mpquic ──▶ rpcd plugin ──▶ HTTP ──┐                           │
-│  (JS views: dashboard, config, metrics)     │                           │
-└─────────────────────────────────────────────┼───────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│  OpenWrt (10.10.11.254) — LuCI UI                                     │
+│                                                                       │
+│  luci-app-mpquic ──▶ rpcd plugin ──▶ HTTP ──┐                         │
+│  (JS views: dashboard, config, metrics)     │                         │
+└─────────────────────────────────────────────┼─────────────────────────┘
                                               │
                                               ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  TBOX Client (10.10.11.100) — Management API                            │
-│                                                                         │
-│  mpquic-mgmt daemon (:8080)                                             │
-│  ├── /api/v1/tunnels          (instance CRUD + start/stop/restart)      │
-│  ├── /api/v1/tunnels/{n}/config  (YAML read/write + validation)         │
-│  ├── /api/v1/metrics          (aggregated from all instances)           │
-│  ├── /api/v1/health           (system overview)                         │
-│  └── /api/v1/system           (version, update, logs)                   │
-│                                                                         │
-│  Interfaces: systemctl (instance mgmt) + YAML files + metrics proxy     │
-│                                                                         │
-│  ┌──────────────────────────────────────────────────────────────┐       │
-│  │ mpquic@mp1  mpquic@cr4  mpquic@br4  mpquic@df4  ...          │       │
-│  │ (13 tunnel instances, each with own YAML + metrics endpoint) │       │
-│  └──────────────────────────────────────────────────────────────┘       │
-└─────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│  TBOX Client (10.10.11.100) — Management API                          │
+│                                                                       │
+│  mpquic-mgmt daemon (:8080)                                           │
+│  ├── /api/v1/tunnels          (instance CRUD + start/stop/restart)    │
+│  ├── /api/v1/tunnels/{n}/config  (YAML read/write + validation)       │
+│  ├── /api/v1/metrics          (aggregated from all instances)         │
+│  ├── /api/v1/health           (system overview)                       │
+│  └── /api/v1/system           (version, update, logs)                 │
+│                                                                       │
+│  Interfaces: systemctl (instance mgmt) + YAML files + metrics proxy   │
+│                                                                       │
+│  ┌──────────────────────────────────────────────────────────────┐     │
+│  │ mpquic@mp1  mpquic@cr4  mpquic@br4  mpquic@df4  ...          │     │
+│  │ (13 tunnel instances, each with own YAML + metrics endpoint) │     │
+│  └──────────────────────────────────────────────────────────────┘     │
+└───────────────────────────────────────────────────────────────────────┘
                                               │
                                               ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Server VPS (172.238.232.223) — Metrics read-only                       │
-│                                                                         │
-│  mpquic@mp1 metrics (:9090) — scraped by Prometheus (10.10.11.201)      │
-│  mt4/mt5/mt6 metrics — scraped via tunnel IPs                           │
-└─────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────┐
+│  Server VPS (172.238.232.223) — Metrics read-only                     │
+│                                                                       │
+│  mpquic@mp1 metrics (:9090) — scraped by Prometheus (10.10.11.201)    │
+│  mt4/mt5/mt6 metrics — scraped via tunnel IPs                         │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Classificazione parametri YAML per Management API
@@ -686,10 +686,10 @@ MAC/rekey, eliminati i parametri `stripe_auth_key` e `stripe_rekey_seconds`.
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Multi-link (Step 1 ✅)                                               │
 │   1 tunnel QUIC per ogni link WAN fisico                             │
-│   mpq4 ↔ WAN4, mpq5 ↔ WAN5, mpq6 ↔ WAN6                          │
+│   mpq4 ↔ WAN4, mpq5 ↔ WAN5, mpq6 ↔ WAN6                              │
 │   Ogni tunnel trasporta TUTTO il traffico della LAN associata        │
 ├──────────────────────────────────────────────────────────────────────┤
-│ Multi-tunnel per link (Step 1+2 ← PROSSIMO STEP)                    │
+│ Multi-tunnel per link (Step 1+2 ← PROSSIMO STEP)                     │
 │   N tunnel QUIC sullo STESSO link fisico                             │
 │   Ogni tunnel trasporta UNA classe di traffico (applicazione)        │
 │   "Many small pipes are faster than a single large tube"             │
@@ -752,18 +752,18 @@ di traffico. Il packet loss su un link impatta solo le applicazioni di quella cl
 ```
 CLIENT (VM MPQUIC)                                            SERVER (VPS)
                                                              
- LAN traffic ──▶ nftables classifier                         ┌─────────────────────┐
-                  │                                          │ porta 45015         │
-                  ├─ VoIP (UDP 5060) ──▶ tun-critical ─┐     │                     │
-                  │                     10.200.15.1/24  │     │  conn_1 ◄──────────┤
-                  ├─ HTTPS (TCP 443) ──▶ tun-default  ─┼QUIC─┤  conn_2 (same port)│──▶ tun-mt5
-                  │                     10.200.15.5/24  │WAN5 │  conn_3            │   10.200.15.0/24
-                  └─ Bulk (TCP 5001) ──▶ tun-bulk     ─┘     │                     │
-                                        10.200.15.9/24       │  routing table:     │──▶ NAT ──▶ Internet
-                                                             │  .1 → conn_1       │
-                                                             │  .5 → conn_2       │
-                                                             │  .9 → conn_3       │
-                                                             └─────────────────────┘
+ LAN traffic ──▶ nftables classifier                          ┌─────────────────────┐
+                  │                                           │ porta 45015         │
+                  ├─ VoIP (UDP 5060) ──▶ tun-critical  ─┐     │                     │
+                  │                     10.200.15.1/24  │     │  conn_1 ◄───────────┤
+                  ├─ HTTPS (TCP 443) ──▶ tun-default   ─┼QUIC─┤  conn_2 (same port) │──▶ tun-mt5
+                  │                     10.200.15.5/24  │WAN5 │  conn_3             │   10.200.15.0/24
+                  └─ Bulk (TCP 5001) ──▶ tun-bulk      ─┘     │                     │
+                                        10.200.15.9/24        │  routing table:     │──▶ NAT ──▶ Internet
+                                                              │  .1 → conn_1        │
+                                                              │  .5 → conn_2        │
+                                                              │  .9 → conn_3        │
+                                                              └─────────────────────┘
 ```
 
 **Porta condivisa**: N connessioni QUIC client (diverse porte sorgente) → stessa porta server →
