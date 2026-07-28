@@ -178,10 +178,10 @@ systemctl restart mpquic@mp1
 │                                                                         │
 │  Interfaces: systemctl (instance mgmt) + YAML files + metrics proxy     │
 │                                                                         │
-│  ┌──────────────────────────────────────────────────────────────┐        │
-│  │ mpquic@mp1  mpquic@cr4  mpquic@br4  mpquic@df4  ...         │        │
-│  │ (13 tunnel instances, each with own YAML + metrics endpoint) │        │
-│  └──────────────────────────────────────────────────────────────┘        │
+│  ┌──────────────────────────────────────────────────────────────┐       │
+│  │ mpquic@mp1  mpquic@cr4  mpquic@br4  mpquic@df4  ...          │       │
+│  │ (13 tunnel instances, each with own YAML + metrics endpoint) │       │
+│  └──────────────────────────────────────────────────────────────┘       │
 └─────────────────────────────────────────────────────────────────────────┘
                                               │
                                               ▼

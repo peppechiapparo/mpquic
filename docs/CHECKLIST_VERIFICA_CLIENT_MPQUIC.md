@@ -13,7 +13,7 @@ Prima di toccare qualsiasi cosa.
 
 ## 1. Binario e TLS allineati alla VPS
 
-- [ ] `md5sum /opt/mpquic/bin/mpquic` sul client uguale a quello sulla VPS. Un binario in drift dà regressioni silenziose (TS-016).
+- [ ] `md5sum /opt/mpquic/bin/mpquic` sul client uguale a quello sulla VPS. Un binario in drift dà regressioni silenziose (TS-016). Dalla v5.1 le build sono riproducibili (`-trimpath` + `CGO_ENABLED=0` nel Makefile), quindi lo stesso commit DEVE dare lo stesso md5 su qualunque host: se differisce, o i commit sono diversi (`git rev-parse HEAD` sui due lati) o qualcuno ha compilato a mano fuori dal Makefile.
 - [ ] `/etc/mpquic/tls/ca.crt` sul client è la CA della VPS con cui deve parlare (`md5sum` uguale).
 
 ## 2. IP della VPS, nessun IP ereditato
