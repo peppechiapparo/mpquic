@@ -13,6 +13,8 @@ Prima di toccare qualsiasi cosa.
 
 ## 1. Binario e TLS allineati alla VPS
 
+- [ ] `md5sum /usr/local/bin/mpquic` sul client uguale a quello sulla VPS, e `sudo readlink -f /proc/$(systemctl show mpquic@mp1 -p MainPID --value)/exe` per confermare che sia davvero quello in esecuzione. Il binario in `/opt/mpquic/bin/` è il prodotto della build, non ciò che gira: su IBLEA-M il v5.1 è rimasto lì per un giorno mentre le unit eseguivano ancora il vecchio (TS-027).
+- [ ] Nota sull'md5: `go build` timbra la revisione git nel binario, quindi l'uguaglianza vale a parità di commit e con worktree pulito. Se i due lati sono su commit diversi l'md5 differisce anche a codice identico: prima si confronta `git rev-parse --short HEAD`, poi l'md5.
 - [ ] `md5sum /opt/mpquic/bin/mpquic` sul client uguale a quello sulla VPS. Un binario in drift dà regressioni silenziose (TS-016). Dalla v5.1 le build sono riproducibili (`-trimpath` + `CGO_ENABLED=0` nel Makefile), quindi lo stesso commit DEVE dare lo stesso md5 su qualunque host: se differisce, o i commit sono diversi (`git rev-parse HEAD` sui due lati) o qualcuno ha compilato a mano fuori dal Makefile.
 - [ ] `/etc/mpquic/tls/ca.crt` sul client è la CA della VPS con cui deve parlare (`md5sum` uguale).
 
@@ -68,6 +70,25 @@ Se il ping "funziona" ma la reply non torna verso `172.16.N.2`, o se i pacchetti
 
 - [ ] Il tunnel non fa flapping: `systemctl show mpquic@N -p NRestarts` stabile in una finestra di 40-60s.
 - [ ] Il watchdog non va in loop su tunnel permanentemente morti. Se le WAN fisiche `enp7s3-7` non hanno IP e i relativi mpqN non partiranno mai, il churn del watchdog amplifica ogni finestra di riconfigurazione del routing. Con lo script di routing idempotente (voce 4) il churn non fa più danni, ma resta rumore da tenere d'occhio.
+
+## 7. Deploy: sempre dallo script, su entrambi i lati
+
+La via ufficiale è `mpquic-update.sh` dal repo, prima sul server poi sul client. Nessuna copia manuale del binario: era una deroga d'emergenza e ha già prodotto un caso di v5.1 "deployato" che in realtà non girava (TS-027).
+
+- [ ] Entrambi gli host sono sullo stesso ramo e sullo stesso commit (`git -C /opt/mpquic rev-parse --short HEAD`), con worktree pulito.
+- [ ] Il ramo in produzione porta anche `deploy/` e `scripts/` aggiornati, non solo il codice: l'update installa `mpquic@.service` e gli script di libreria **dal repo**, quindi un ramo vecchio riporta indietro l'operatività.
+- [ ] Server: `sudo MPQUIC_UPDATE_SKIP_PULL=1 /opt/mpquic/scripts/mpquic-update.sh /opt/mpquic` (togliere `SKIP_PULL` dove il `git pull` passa).
+- [ ] Client di bordo: il `git fetch` dalla nave va in timeout, quindi il commit viaggia come **bundle git**:
+  ```bash
+  # dal dev box
+  git bundle create /tmp/delta.bundle <branch> --not <commit-gia-presente-sul-client>
+  scp -J vps-mpquic-it-tpz-<nave> /tmp/delta.bundle satcom@10.200.17.1:/tmp/
+  # sul client
+  cd /opt/mpquic && sudo git fetch /tmp/delta.bundle "<branch>:refs/remotes/bundle/delta" && sudo git merge --ff-only bundle/delta
+  ```
+  Sono pochi KB e il percorso resta quello standard: cambia solo come arrivano gli oggetti.
+- [ ] L'update sul client va lanciato **staccato dalla sessione** (`systemd-run --unit=... --setenv=HOME=/root --setenv=MPQUIC_UPDATE_SKIP_PULL=1 ...`) con un dead-man armato: lo script ferma tutte le istanze, mp1 compreso, e quella è la via d'accesso.
+- [ ] A fine update: `md5sum /usr/local/bin/mpquic` uguale sui due lati, `ExecStartPost` presente nella unit, istanze attive, ping al peer del tunnel.
 
 ## Note
 

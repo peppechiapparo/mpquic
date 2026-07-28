@@ -1,5 +1,7 @@
 # Analisi comparata degli interventi sul banco TBOX-EVO (27-28 luglio)
 
+> **Erratum del 2026-07-29 sullo strato 3.** L'A/B rifatto in produzione su IBLEA-M dice l'opposto del banco: con `stripe_flow_affinity` attiva lato server il download single-stream nel tunnel stava a 0.3-0.7 Mbit contro 73.5 Mbit del fisico misurato nello stesso minuto; spenta la flag, 21-39 Mbit. Su IBLEA la flag è ora **false** e il rollback di config previsto qui sotto è stato eseguito. Il fix vale sul banco e non sul CGNAT di bordo, quindi è una scelta per-installazione, non un default. Dettagli in [TS-027](TROUBLESHOOTING_HISTORY.md).
+
 Scopo: metterti in condizione di **misurare di persona** ogni risultato dichiarato e decidere, strato per strato, se tenere o tornare indietro. Ogni claim ha la sua evidenza, le condizioni di misura (contano: il banco vive su una Starlink condivisa che di notte faceva 294 Mbit e stamattina ~1) e il comando di rollback.
 
 Avvertenza operativa: **al momento della scrittura il fisico Starlink del banco è degradato (~1 Mbit TCP, ICMP ingannevolmente a 0%)**. Qualunque misura fatta prima della ripresa non vale nulla: il guardiano attivo avvisa quando il pavimento risale sopra i 50 Mbit. Regola numero uno imparata (due volte) in queste 24 ore: prima di ogni sessione di misure, misurare il pavimento fisico nello stesso minuto.

@@ -4,6 +4,15 @@
 
 ---
 
+## Addendum — TS-027: IBLEA-M in pari col template, deploy di nuovo dallo script, flow-affinity spenta in produzione (2026-07-29)
+
+Chiusi i residui di TS-025/TS-026. Il dettaglio è in TROUBLESHOOTING_HISTORY TS-027; qui cosa cambia per il progetto.
+
+- **Addressing `/24` peer `.254` completato** su tutte le istanze 1-6, client e VPS, e finalmente anche nei template del repo: la forma `/30` con peer `.2` (flapping-prone, TS-020) non esiste più da nessuna parte.
+- **La malattia TS-021 era ancora viva in produzione**. Ogni rinnovo DHCP dei GEO fa riconfigurare il link a networkd, che spazza le `ip rule` non sue: le 1201-1206 sparivano per ~27 secondi alla volta e le pipe restavano senza percorso (`sendmsg: operation not permitted`, 18 eventi in 2 minuti su mpq4, 81% di loss nel tunnel). Rimedio applicato: wan rule dichiarate nei file networkd, pavimenti blackhole per tabella, timer di riconciliazione da 30s (su IBLEA non era mai stato installato) e hook di evento aggiornato. Resta da attivare il drop-in `ManageForeignRoutingPolicyRules=no`, che richiede un riavvio di `systemd-networkd` in finestra concordata.
+- **Il v5.1 non era mai entrato in esercizio**: il binario copiato stava in `/opt/mpquic/bin/` mentre le unit eseguivano ancora il vecchio, su entrambi i lati. Quindi i guadagni misurati il 28/07 su IBLEA venivano dalla bonifica del routing, non dall'algoritmo nuovo. Ora client e VPS girano lo stesso commit `3a31bf9` con md5 identico, installato **da `mpquic-update.sh`**, che torna a essere l'unica via di deploy: sul link nave il commit viaggia come bundle git da 15 KB, ma il percorso resta quello standard.
+- **Flow-affinity spenta su IBLEA-M dopo A/B sul campo**: con la flag attiva il download single-stream nel tunnel faceva 0.3-0.7 Mbit contro i 73.5 del fisico misurato nello stesso minuto; spegnendola, 21-39 Mbit, upload 61.5, aggregato P10 249 Mbit. Sul banco l'affinity aveva risolto il riordino, qui il flusso resta inchiodato su una pipe sola e sul CGNAT di bordo quella pipe non vale un dodicesimo della capacità. **La flag resta nel codice, default spenta, e va decisa per installazione**: è la prima evidenza che il fix del riordino dipende dal substrato, e va ripensato in una forma che non sacrifichi la banda del singolo flusso (per esempio affinity a gruppi di pipe, o riordino al ricevitore con finestra limitata).
+
 ## Addendum — TS-021/TS-024: rollback pre-CAL per il riordino che comprometteva l'algoritmo, e fix flow-affinity (2026-07-27/28)
 
 Il passo indietro che ha permesso due passi avanti. Sequenza completa in TROUBLESHOOTING_HISTORY TS-021...TS-024; qui la sintesi decisionale.
@@ -2536,6 +2545,6 @@ ss -lunp | egrep '4500[1-6]'
 # Client
 for i in 4 5 6; do
   printf "mpq%d: " "$i"
-  ping -I "10.200.${i}.1" -c 2 -W 2 "10.200.${i}.2" 2>&1 | tail -1
+  ping -I "10.200.${i}.1" -c 2 -W 2 "10.200.${i}.254" 2>&1 | tail -1
 done
 ```
