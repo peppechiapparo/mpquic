@@ -76,6 +76,7 @@ type stripeClientConn struct {
 
 	// Peer-reported loss (loss on data WE send, reported BY server → we adjust our TX M)
 	peerLossRate uint32 // atomic: 0-100
+	arqRetxSent  uint64 // atomic: pacchetti ritrasmessi su NACK del server (segnale di loss upload per l'AIMD)
 	lastPeerLoss int64  // atomic: unix-nano of last nonzero peer loss report
 
 	// Loss computation: previous window values (updated each keepalive cycle)
@@ -1767,6 +1768,7 @@ func (scc *stripeClientConn) handleNack(hdr stripeHdr, payload []byte) {
 	}
 
 	if retxCount > 0 {
+		atomic.AddUint64(&scc.arqRetxSent, uint64(retxCount))
 		scc.logger.Debugf("stripe ARQ: retransmitted %d packets (base=%d)", retxCount, baseSeq)
 	}
 }
@@ -1821,30 +1823,57 @@ func (scc *stripeClientConn) dynamicPacingLoop(ctx context.Context, baseRate int
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
-	// Il gap di riferimento è quello calcolato alla setup (byte-corretto,
-	// per-pipe). Il vecchio stub ricalcolava 1e9/rate = 20ms a rate 50:
-	// finché l'EDT era ignorato (niente sch_fq sulle NIC) il danno non si
-	// vedeva, con fq installato avrebbe cappato i data-shard a ~0.5 Mbit
-	// per pipe. Qui si scala solo il gap iniziale in base alla loss
-	// riportata dal peer (fino a 2x più lento).
-	baseNs := atomic.LoadInt64(&scc.txtimeGapNs)
-	if baseNs <= 0 {
+	// Controller AIMD sul rate di pacing. Il rate statico funziona solo
+	// finché sta sotto la capacità istantanea del link: su Starlink la
+	// capacità di uplink oscilla anche di 3x nell'arco di minuti (misurato
+	// 44↔76 Mbit sul banco), e un pacing sopra capacità ripristina proprio
+	// i burst persi che il pacing doveva evitare. Il segnale di loss più
+	// diretto per l'upload sono i NACK del server: arqRetxSent conta i
+	// pacchetti ritrasmessi su richiesta, il rapporto con i pacchetti dati
+	// del periodo è la stima di loss. Sopra il 2%: rate *= 0.7; sotto lo
+	// 0.5%: +1 Mbit per tick, fino al cap di config (pacing_rate).
+	// Il gap EDT scala inversamente al rate sul valore byte-corretto
+	// della setup.
+	baseGap := atomic.LoadInt64(&scc.txtimeGapNs)
+	if baseGap <= 0 {
 		return
 	}
+	maxRate := float64(baseRate)
+	rate := maxRate
+	const minRate = 2.0
+
+	var lastTx, lastRetx uint64
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			targetNs := baseNs
+			tx := atomic.LoadUint64(&scc.txPkts)
+			retx := atomic.LoadUint64(&scc.arqRetxSent)
+			dTx := tx - lastTx
+			dRetx := retx - lastRetx
+			lastTx, lastRetx = tx, retx
 
-			loss := atomic.LoadUint32(&scc.peerLossRate)
-			if loss > 0 && loss < 255 {
-				targetNs += targetNs * int64(loss) / 100 // fino a 2x più lento
+			if dTx < 20 {
+				// Quasi idle: nessun segnale utile, risali piano verso il cap.
+				rate += 0.5
+			} else {
+				lossPct := float64(dRetx) * 100 / float64(dTx+dRetx)
+				switch {
+				case lossPct > 2:
+					rate *= 0.7
+				case lossPct < 0.5:
+					rate++
+				}
 			}
-
-			atomic.StoreInt64(&scc.txtimeGapNs, targetNs)
+			if rate > maxRate {
+				rate = maxRate
+			}
+			if rate < minRate {
+				rate = minRate
+			}
+			atomic.StoreInt64(&scc.txtimeGapNs, int64(float64(baseGap)*maxRate/rate))
 		}
 	}
 }
