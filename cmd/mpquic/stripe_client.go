@@ -932,7 +932,7 @@ func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
 	if gb.count == 1 {
 		// Single segment — no GSO overhead.
 		if scc.txtimeEnabled {
-			edt := scc.txtimeNextEDT(pipeIdx, 1)
+			edt := scc.txtimeNextEDT(pipeIdx, len(gb.buf))
 			oob := stripeTxtimeBuildOOB(edt)
 			_, _, _ = pipe.WriteMsgUDP(gb.buf, oob, scc.serverAddr)
 		} else {
@@ -942,7 +942,7 @@ func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
 		// GSO: single sendmsg, kernel splits at segSize boundaries.
 		oob := stripeGSOBuildOOB(uint16(gb.segSize))
 		if scc.txtimeEnabled {
-			edt := scc.txtimeNextEDT(pipeIdx, gb.count)
+			edt := scc.txtimeNextEDT(pipeIdx, len(gb.buf))
 			oob = stripeTxtimeAppendOOB(oob, edt)
 		}
 		_, _, err := pipe.WriteMsgUDP(gb.buf, oob, scc.serverAddr)
@@ -966,16 +966,22 @@ func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
 }
 
 // txtimeNextEDT returns the next Earliest Departure Time for a pipe and
-// advances the per-pipe EDT counter by numPkts * txtimeGapNs.
+// advances the per-pipe EDT counter in proporzione ai BYTE trasmessi
+// (gap pieno = un pacchetto da stripePacedRefBytes). L'avanzamento per
+// pacchetto spaziava un ACK da 90B come un data-shard da 1402B: il ritorno
+// ACK di un download veniva cappato in pps e strozzava il TCP interno
+// (misurato sul banco: download 271→128 Mbit). Il cap deve restare in
+// byte/s, non in pacchetti/s.
 // Ensures the EDT is never in the past (clamps to now + small delta).
 // Caller must hold txMu.
-func (scc *stripeClientConn) txtimeNextEDT(pipeIdx int, numPkts int) int64 {
+func (scc *stripeClientConn) txtimeNextEDT(pipeIdx int, nbytes int) int64 {
 	now := monoNowNs()
 	edt := scc.txtimeEDT[pipeIdx]
 	if edt < now {
 		edt = now + 1000 // 1 µs ahead to avoid immediate delivery
 	}
-	scc.txtimeEDT[pipeIdx] = edt + int64(numPkts)*scc.txtimeGapNs
+	gap := atomic.LoadInt64(&scc.txtimeGapNs)
+	scc.txtimeEDT[pipeIdx] = edt + gap*int64(nbytes)/stripePacedRefBytes
 	return edt
 }
 
@@ -985,7 +991,7 @@ func (scc *stripeClientConn) txtimeNextEDT(pipeIdx int, numPkts int) int64 {
 func (scc *stripeClientConn) writePacedUDP(pipeIdx int, pkt []byte) {
 	pipe := scc.pipes[pipeIdx]
 	if scc.txtimeEnabled {
-		edt := scc.txtimeNextEDT(pipeIdx, 1)
+		edt := scc.txtimeNextEDT(pipeIdx, len(pkt))
 		oob := stripeTxtimeBuildOOB(edt)
 		_, _, _ = pipe.WriteMsgUDP(pkt, oob, scc.serverAddr)
 	} else {

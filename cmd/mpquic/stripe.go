@@ -73,6 +73,7 @@ const (
 	stripeDefaultParityShards = 2
 	stripeMaxPayload          = 1500
 	stripeFlushInterval       = 5 * time.Millisecond
+	stripePacedRefBytes       = 1402 // shard tipico su filo: riferimento per l'EDT a byte del pacing
 	stripeKeepaliveInterval   = 1 * time.Second
 	stripeReregisterInterval  = 30 * time.Second // periodic REGISTER refresh in keepaliveLoop
 	stripeSessionTimeout      = 30 * time.Second
