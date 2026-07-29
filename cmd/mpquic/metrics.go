@@ -28,13 +28,13 @@ import (
 var globalMetrics metricsRegistry
 
 type metricsRegistry struct {
-	mu           sync.RWMutex
-	startTime    time.Time
-	role         string // "server" or "client"
-	server       *stripeServer
-	client       *multipathConn
-	clientPaths  func() []*multipathPathState // snapshot under lock
-	singlePath   *countingConn // non-nil for single-path client/server tunnels
+	mu          sync.RWMutex
+	startTime   time.Time
+	role        string // "server" or "client"
+	server      *stripeServer
+	client      *multipathConn
+	clientPaths func() []*multipathPathState // snapshot under lock
+	singlePath  *countingConn                // non-nil for single-path client/server tunnels
 }
 
 // countingConn wraps a datagramConn and counts TX/RX bytes and packets
@@ -169,34 +169,34 @@ type SessionStats struct {
 	PeerIP    string `json:"peer_ip"`
 	Pipes     int    `json:"pipes"`
 
-	TxBytes  uint64 `json:"tx_bytes"`
-	TxPkts   uint64 `json:"tx_pkts"`
-	RxBytes  uint64 `json:"rx_bytes"`
-	RxPkts   uint64 `json:"rx_pkts"`
+	TxBytes uint64 `json:"tx_bytes"`
+	TxPkts  uint64 `json:"tx_pkts"`
+	RxBytes uint64 `json:"rx_bytes"`
+	RxPkts  uint64 `json:"rx_pkts"`
 
 	FECMode     string `json:"fec_mode"`
 	FECType     string `json:"fec_type,omitempty"`
 	AdaptiveM   int    `json:"adaptive_m"`
-	XorActive   int    `json:"xor_active"`                   // 1=XOR TX on, 0=off (adaptive gate)
-	FECEncoded  uint64 `json:"fec_encoded"`  // FEC groups encoded (TX)
+	XorActive   int    `json:"xor_active"`  // 1=XOR TX on, 0=off (adaptive gate)
+	FECEncoded  uint64 `json:"fec_encoded"` // FEC groups encoded (TX)
 	FECRecov    uint64 `json:"fec_recovered"`
 	TxtimeGapNs int64  `json:"txtime_gap_ns,omitempty"`
 
-	XorEmitted      uint64 `json:"xor_emitted,omitempty"`       // XOR repair packets sent
-	XorRecovered    uint64 `json:"xor_recovered,omitempty"`     // packets recovered via XOR
-	XorUnrecoverable uint64 `json:"xor_unrecoverable,omitempty"` // multi-loss windows (fell back to ARQ)
+	XorEmitted          uint64  `json:"xor_emitted,omitempty"`       // XOR repair packets sent
+	XorRecovered        uint64  `json:"xor_recovered,omitempty"`     // packets recovered via XOR
+	XorUnrecoverable    uint64  `json:"xor_unrecoverable,omitempty"` // multi-loss windows (fell back to ARQ)
 	XorEffectivenessPct float64 `json:"xor_effectiveness_pct,omitempty"`
-	XorWindow       int    `json:"xor_window,omitempty"`
-	XorStride       int    `json:"xor_stride,omitempty"`
-	XorRxCapacity   int    `json:"xor_rx_capacity,omitempty"`
-	RLCActive       int    `json:"rlc_active,omitempty"`
-	RLCEmitted      uint64 `json:"rlc_emitted,omitempty"`
-	RLCRecovered    uint64 `json:"rlc_recovered,omitempty"`
-	RLCDecodeFailures uint64 `json:"rlc_decode_failures,omitempty"`
+	XorWindow           int     `json:"xor_window,omitempty"`
+	XorStride           int     `json:"xor_stride,omitempty"`
+	XorRxCapacity       int     `json:"xor_rx_capacity,omitempty"`
+	RLCActive           int     `json:"rlc_active,omitempty"`
+	RLCEmitted          uint64  `json:"rlc_emitted,omitempty"`
+	RLCRecovered        uint64  `json:"rlc_recovered,omitempty"`
+	RLCDecodeFailures   uint64  `json:"rlc_decode_failures,omitempty"`
 	RLCEffectivenessPct float64 `json:"rlc_effectiveness_pct,omitempty"`
-	RLCWindow       int    `json:"rlc_window,omitempty"`
-	RLCStride       int    `json:"rlc_stride,omitempty"`
-	RLCRxCapacity   int    `json:"rlc_rx_capacity,omitempty"`
+	RLCWindow           int     `json:"rlc_window,omitempty"`
+	RLCStride           int     `json:"rlc_stride,omitempty"`
+	RLCRxCapacity       int     `json:"rlc_rx_capacity,omitempty"`
 
 	RSILEmitted          uint64  `json:"rsil_emitted,omitempty"`
 	RSILRecovered        uint64  `json:"rsil_recovered,omitempty"`
@@ -215,7 +215,7 @@ type SessionStats struct {
 	ARQMaxOOO      uint32 `json:"arq_max_ooo,omitempty"`
 	ARQPendingSpan uint32 `json:"arq_pending_span,omitempty"`
 
-	LossRate  uint32 `json:"loss_rate_pct"` // peer-reported 0-100
+	LossRate  uint32  `json:"loss_rate_pct"` // peer-reported 0-100
 	UptimeSec float64 `json:"uptime_sec"`
 
 	DecryptFail uint64 `json:"decrypt_fail"`
@@ -223,48 +223,50 @@ type SessionStats struct {
 
 // PathStats holds a point-in-time snapshot of one multipath path (client).
 type PathStats struct {
-	Name      string `json:"name"`
-	BindIP    string `json:"bind_ip"`
-	Alive     bool   `json:"alive"`
+	Name   string `json:"name"`
+	BindIP string `json:"bind_ip"`
+	Alive  bool   `json:"alive"`
 
 	// Fast failover health-check (combo A+E).
-	Degraded             bool    `json:"degraded"`
-	LastRxMs             int64   `json:"last_rx_ms,omitempty"`
-	DegradedSinceMs      int64   `json:"degraded_since_ms,omitempty"`
-	DegradedTotal        uint64  `json:"degraded_total"`
+	Degraded              bool    `json:"degraded"`
+	LastRxMs              int64   `json:"last_rx_ms,omitempty"`
+	DegradedSinceMs       int64   `json:"degraded_since_ms,omitempty"`
+	DegradedTotal         uint64  `json:"degraded_total"`
 	BlackholeSecondsTotal float64 `json:"blackhole_seconds_total"`
-	FailoverTotal        uint64  `json:"failover_total"`
-	FailbackTotal        uint64  `json:"failback_total"`
+	FailoverTotal         uint64  `json:"failover_total"`
+	FailbackTotal         uint64  `json:"failback_total"`
 
 	TxBytes uint64 `json:"tx_bytes"`
 	TxPkts  uint64 `json:"tx_pkts"`
 	RxBytes uint64 `json:"rx_bytes"`
 	RxPkts  uint64 `json:"rx_pkts"`
 
-	StripeTxBytes uint64 `json:"stripe_tx_bytes,omitempty"`
-	StripeTxPkts  uint64 `json:"stripe_tx_pkts,omitempty"`
-	StripeRxBytes uint64 `json:"stripe_rx_bytes,omitempty"`
-	StripeRxPkts  uint64 `json:"stripe_rx_pkts,omitempty"`
-	StripeFECRecov uint64 `json:"stripe_fec_recovered,omitempty"`
-	StripeAdaptiveM      int    `json:"stripe_adaptive_m,omitempty"`
-	StripePeerLossRate   uint32 `json:"stripe_peer_loss_rate_pct,omitempty"`
-	StripeTxtimeGapNs    int64  `json:"stripe_txtime_gap_ns,omitempty"`
-	StripeXorActive      int    `json:"stripe_xor_active,omitempty"`
-	StripeXorEmitted     uint64 `json:"stripe_xor_emitted,omitempty"`
-	StripeXorRecovered   uint64 `json:"stripe_xor_recovered,omitempty"`
-	StripeXorUnrecoverable uint64 `json:"stripe_xor_unrecoverable,omitempty"`
-	StripeXorEffectivenessPct float64 `json:"stripe_xor_effectiveness_pct,omitempty"`
-	StripeXorWindow      int    `json:"stripe_xor_window,omitempty"`
-	StripeXorStride      int    `json:"stripe_xor_stride,omitempty"`
-	StripeXorRxCapacity  int    `json:"stripe_xor_rx_capacity,omitempty"`
-	StripeRLCActive      int    `json:"stripe_rlc_active,omitempty"`
-	StripeRLCEmitted     uint64 `json:"stripe_rlc_emitted,omitempty"`
-	StripeRLCRecovered   uint64 `json:"stripe_rlc_recovered,omitempty"`
-	StripeRLCDecodeFailures uint64 `json:"stripe_rlc_decode_failures,omitempty"`
-	StripeRLCEffectivenessPct float64 `json:"stripe_rlc_effectiveness_pct,omitempty"`
-	StripeRLCWindow      int    `json:"stripe_rlc_window,omitempty"`
-	StripeRLCStride      int    `json:"stripe_rlc_stride,omitempty"`
-	StripeRLCRxCapacity  int    `json:"stripe_rlc_rx_capacity,omitempty"`
+	StripeTxBytes              uint64  `json:"stripe_tx_bytes,omitempty"`
+	StripeTxPkts               uint64  `json:"stripe_tx_pkts,omitempty"`
+	StripeRxBytes              uint64  `json:"stripe_rx_bytes,omitempty"`
+	StripeRxPkts               uint64  `json:"stripe_rx_pkts,omitempty"`
+	StripeFECRecov             uint64  `json:"stripe_fec_recovered,omitempty"`
+	StripeAdaptiveM            int     `json:"stripe_adaptive_m,omitempty"`
+	StripePeerLossRate         uint32  `json:"stripe_peer_loss_rate_pct,omitempty"`
+	StripeTxtimeGapNs          int64   `json:"stripe_txtime_gap_ns,omitempty"`
+	StripeKexGroup             string  `json:"stripe_kex_group,omitempty"`
+	StripeKexPQ                bool    `json:"stripe_kex_pq,omitempty"`
+	StripeXorActive            int     `json:"stripe_xor_active,omitempty"`
+	StripeXorEmitted           uint64  `json:"stripe_xor_emitted,omitempty"`
+	StripeXorRecovered         uint64  `json:"stripe_xor_recovered,omitempty"`
+	StripeXorUnrecoverable     uint64  `json:"stripe_xor_unrecoverable,omitempty"`
+	StripeXorEffectivenessPct  float64 `json:"stripe_xor_effectiveness_pct,omitempty"`
+	StripeXorWindow            int     `json:"stripe_xor_window,omitempty"`
+	StripeXorStride            int     `json:"stripe_xor_stride,omitempty"`
+	StripeXorRxCapacity        int     `json:"stripe_xor_rx_capacity,omitempty"`
+	StripeRLCActive            int     `json:"stripe_rlc_active,omitempty"`
+	StripeRLCEmitted           uint64  `json:"stripe_rlc_emitted,omitempty"`
+	StripeRLCRecovered         uint64  `json:"stripe_rlc_recovered,omitempty"`
+	StripeRLCDecodeFailures    uint64  `json:"stripe_rlc_decode_failures,omitempty"`
+	StripeRLCEffectivenessPct  float64 `json:"stripe_rlc_effectiveness_pct,omitempty"`
+	StripeRLCWindow            int     `json:"stripe_rlc_window,omitempty"`
+	StripeRLCStride            int     `json:"stripe_rlc_stride,omitempty"`
+	StripeRLCRxCapacity        int     `json:"stripe_rlc_rx_capacity,omitempty"`
 	StripeRSILEmitted          uint64  `json:"stripe_rsil_emitted,omitempty"`
 	StripeRSILRecovered        uint64  `json:"stripe_rsil_recovered,omitempty"`
 	StripeRSILAttempts         uint64  `json:"stripe_rsil_attempts,omitempty"`
@@ -274,26 +276,26 @@ type PathStats struct {
 	StripeRSILK                int     `json:"stripe_rsil_k,omitempty"`
 	StripeRSILM                int     `json:"stripe_rsil_m,omitempty"`
 	StripeRSILDepth            int     `json:"stripe_rsil_depth,omitempty"`
-	StripeARQNackSent    uint64 `json:"stripe_arq_nack_sent,omitempty"`
-	StripeARQRetxRecv    uint64 `json:"stripe_arq_retx_recv,omitempty"`
-	StripeARQDupFiltered uint64 `json:"stripe_arq_dup_filtered,omitempty"`
-	StripeARQNackThresh  uint32 `json:"stripe_arq_nack_thresh,omitempty"`
-	StripeARQMaxOOO      uint32 `json:"stripe_arq_max_ooo,omitempty"`
-	StripeARQPendingSpan uint32 `json:"stripe_arq_pending_span,omitempty"`
+	StripeARQNackSent          uint64  `json:"stripe_arq_nack_sent,omitempty"`
+	StripeARQRetxRecv          uint64  `json:"stripe_arq_retx_recv,omitempty"`
+	StripeARQDupFiltered       uint64  `json:"stripe_arq_dup_filtered,omitempty"`
+	StripeARQNackThresh        uint32  `json:"stripe_arq_nack_thresh,omitempty"`
+	StripeARQMaxOOO            uint32  `json:"stripe_arq_max_ooo,omitempty"`
+	StripeARQPendingSpan       uint32  `json:"stripe_arq_pending_span,omitempty"`
 }
 
 // GlobalStats is the top-level JSON response.
 type GlobalStats struct {
-	Role       string         `json:"role"` // "server" or "client"
-	Version    string         `json:"version"`
-	UptimeSec  float64        `json:"uptime_sec"`
-	Sessions   []SessionStats `json:"sessions,omitempty"`
-	Paths      []PathStats    `json:"paths,omitempty"`
-	Dispatch   []DispatchPathStats `json:"dispatch,omitempty"`
-	TotalTxBytes uint64       `json:"total_tx_bytes"`
-	TotalRxBytes uint64       `json:"total_rx_bytes"`
-	TotalTxPkts  uint64       `json:"total_tx_pkts"`
-	TotalRxPkts  uint64       `json:"total_rx_pkts"`
+	Role         string              `json:"role"` // "server" or "client"
+	Version      string              `json:"version"`
+	UptimeSec    float64             `json:"uptime_sec"`
+	Sessions     []SessionStats      `json:"sessions,omitempty"`
+	Paths        []PathStats         `json:"paths,omitempty"`
+	Dispatch     []DispatchPathStats `json:"dispatch,omitempty"`
+	TotalTxBytes uint64              `json:"total_tx_bytes"`
+	TotalRxBytes uint64              `json:"total_rx_bytes"`
+	TotalTxPkts  uint64              `json:"total_tx_pkts"`
+	TotalRxPkts  uint64              `json:"total_rx_pkts"`
 }
 
 // DispatchPathStats holds aggregated dispatch metrics for a path index.
@@ -323,23 +325,23 @@ func snapshotServerSessions(ss *stripeServer) []SessionStats {
 			}
 		}
 		s := SessionStats{
-			SessionID: fmt.Sprintf("%08x", sess.sessionID),
-			PeerIP:    sess.peerIP.String(),
-			Pipes:     activePipes,
-			TxBytes:   atomic.LoadUint64(&sess.txBytes),
-			TxPkts:    atomic.LoadUint64(&sess.txPkts),
-			RxBytes:   atomic.LoadUint64(&sess.rxBytes),
-			RxPkts:    atomic.LoadUint64(&sess.rxPkts),
-			FECMode:   sess.fecMode,
-			FECType:   sess.fecType,
-			AdaptiveM: int(atomic.LoadInt32(&sess.adaptiveM)),
-			XorActive: int(atomic.LoadInt32(&sess.xorActive)),
-			RLCActive: int(atomic.LoadInt32(&sess.rlcActive)),
-			FECEncoded: atomic.LoadUint64(&sess.fecEncoded),
-			FECRecov:   atomic.LoadUint64(&sess.rxFECRecov),
+			SessionID:   fmt.Sprintf("%08x", sess.sessionID),
+			PeerIP:      sess.peerIP.String(),
+			Pipes:       activePipes,
+			TxBytes:     atomic.LoadUint64(&sess.txBytes),
+			TxPkts:      atomic.LoadUint64(&sess.txPkts),
+			RxBytes:     atomic.LoadUint64(&sess.rxBytes),
+			RxPkts:      atomic.LoadUint64(&sess.rxPkts),
+			FECMode:     sess.fecMode,
+			FECType:     sess.fecType,
+			AdaptiveM:   int(atomic.LoadInt32(&sess.adaptiveM)),
+			XorActive:   int(atomic.LoadInt32(&sess.xorActive)),
+			RLCActive:   int(atomic.LoadInt32(&sess.rlcActive)),
+			FECEncoded:  atomic.LoadUint64(&sess.fecEncoded),
+			FECRecov:    atomic.LoadUint64(&sess.rxFECRecov),
 			TxtimeGapNs: atomic.LoadInt64(&sess.txtimeGapNs),
-			LossRate:   atomic.LoadUint32(&sess.peerLossRate),
-			UptimeSec:  now.Sub(sess.createdAt).Seconds(),
+			LossRate:    atomic.LoadUint32(&sess.peerLossRate),
+			UptimeSec:   now.Sub(sess.createdAt).Seconds(),
 			DecryptFail: atomic.LoadUint64(&sess.securityDecryptFail),
 		}
 		if sess.xorTx != nil {
@@ -394,11 +396,11 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 	stats := make([]PathStats, 0, len(mc.paths))
 	for _, p := range mc.paths {
 		ps := PathStats{
-			Name:      p.cfg.Name,
-			BindIP:    p.cfg.BindIP,
-			Alive:     p.alive,
-			TxPkts:    atomic.LoadUint64(&p.txPackets),
-			RxPkts:    atomic.LoadUint64(&p.rxPackets),
+			Name:   p.cfg.Name,
+			BindIP: p.cfg.BindIP,
+			Alive:  p.alive,
+			TxPkts: atomic.LoadUint64(&p.txPackets),
+			RxPkts: atomic.LoadUint64(&p.rxPackets),
 		}
 		// Combo A+E health-check fields (atomic-only reads).
 		ps.Degraded = atomic.LoadUint32(&p.degraded) == 1
@@ -421,6 +423,8 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 			ps.StripeAdaptiveM = int(atomic.LoadInt32(&p.stripeConn.adaptiveM))
 			ps.StripePeerLossRate = atomic.LoadUint32(&p.stripeConn.peerLossRate)
 			ps.StripeTxtimeGapNs = atomic.LoadInt64(&p.stripeConn.txtimeGapNs)
+			ps.StripeKexGroup = p.stripeConn.kexGroup
+			ps.StripeKexPQ = p.stripeConn.kexPQ
 			ps.StripeXorActive = int(atomic.LoadInt32(&p.stripeConn.xorActive))
 			ps.StripeRLCActive = int(atomic.LoadInt32(&p.stripeConn.rlcActive))
 			if p.stripeConn.xorTx != nil {
@@ -483,12 +487,12 @@ func snapshotDispatchStats(ss *stripeServer) []DispatchPathStats {
 
 	// Aggregate per remoteAddr across all groups.
 	type agg struct {
-		idx      int
-		remote   string
-		hit      uint64
-		drop     uint64
-		qLen     int
-		flows    int
+		idx    int
+		remote string
+		hit    uint64
+		drop   uint64
+		qLen   int
+		flows  int
 	}
 	byRemote := make(map[string]*agg)
 
@@ -965,6 +969,16 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_peer_loss_rate_pct gauge\n")
 		for _, p := range gs.Paths {
 			fmt.Fprintf(w, "mpquic_path_stripe_peer_loss_rate_pct{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripePeerLossRate)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_kex_pq 1 se il key exchange TLS della sessione stripe e' ibrido post-quantum (X25519MLKEM768).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_kex_pq gauge\n")
+		for _, p := range gs.Paths {
+			v := 0
+			if p.StripeKexPQ {
+				v = 1
+			}
+			fmt.Fprintf(w, "mpquic_path_stripe_kex_pq{path=%q,bind=%q,group=%q} %d\n", p.Name, p.BindIP, p.StripeKexGroup, v)
 		}
 
 		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_txtime_gap_ns Current kernel pacing gap in nanoseconds per client stripe path.\n")

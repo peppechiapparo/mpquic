@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -13,6 +14,36 @@ import (
 )
 
 // ── Stripe Key Exchange (QUIC TLS Exporter) ───────────────────────────────
+
+// applyKexPQPolicy imposta le CurvePreferences del client KX secondo
+// stripe_kex_pq. Il client controlla l'offerta: con "require" propone SOLO
+// il gruppo ibrido post-quantum e l'handshake fallisce se il server non lo
+// supporta (fail-closed: nessun downgrade silenzioso a classico). Con Go
+// ≥1.24 il default già preferisce X25519MLKEM768: "" non tocca nulla,
+// "prefer" lo rende esplicito, "off" forza il classico (solo per A/B).
+func applyKexPQPolicy(tlsCfg *tls.Config, mode string) error {
+	switch mode {
+	case "", "default":
+		return nil
+	case "require":
+		tlsCfg.CurvePreferences = []tls.CurveID{tls.X25519MLKEM768}
+	case "prefer":
+		tlsCfg.CurvePreferences = []tls.CurveID{tls.X25519MLKEM768, tls.X25519}
+	case "off":
+		tlsCfg.CurvePreferences = []tls.CurveID{tls.X25519}
+	default:
+		return fmt.Errorf("stripe_kex_pq: valore %q non valido (require|prefer|off)", mode)
+	}
+	return nil
+}
+
+// kexGroupName rende leggibile il gruppo TLS negoziato.
+func kexGroupName(id tls.CurveID) string {
+	if id == tls.X25519MLKEM768 {
+		return "X25519MLKEM768"
+	}
+	return id.String()
+}
 
 // stripeNegotiateKey establishes a temporary QUIC connection to the server's
 // QUIC port using ALPN "mpquic-stripe-kx", exports keying material from the
@@ -56,6 +87,10 @@ func stripeNegotiateKey(ctx context.Context, cfg *Config, pathCfg MultipathPathC
 		return nil, fmt.Errorf("stripe KX: TLS config: %w", err)
 	}
 	tlsCfg.NextProtos = []string{stripeKXALPN}
+	if err := applyKexPQPolicy(tlsCfg, cfg.StripeKexPQ); err != nil {
+		udpConn.Close()
+		return nil, err
+	}
 
 	// Dial QUIC for key exchange
 	tr := &quic.Transport{Conn: udpConn}
@@ -118,7 +153,15 @@ func stripeNegotiateKey(ctx context.Context, cfg *Config, pathCfg MultipathPathC
 		return nil, err
 	}
 
-	logger.Infof("stripe KX: session=%08x key negotiated via TLS exporter", sessionID)
+	group := state.TLS.CurveID
+	km.kexGroup = kexGroupName(group)
+	km.kexPQ = group == tls.X25519MLKEM768
+	if cfg.StripeKexPQ == "require" && !km.kexPQ {
+		return nil, fmt.Errorf("stripe KX: stripe_kex_pq=require ma il gruppo negoziato è %s", km.kexGroup)
+	}
+
+	logger.Infof("stripe KX: session=%08x key negotiated via TLS exporter group=%s post-quantum=%v",
+		sessionID, km.kexGroup, km.kexPQ)
 	return km, nil
 }
 
@@ -147,6 +190,8 @@ func handleStripeKeyExchange(conn quic.Connection, pendingKeys *stripePendingKey
 	// Export same keying material (TLS session is shared → same output)
 	state := conn.ConnectionState()
 	material, err := state.TLS.ExportKeyingMaterial(stripeKXLabel, sessBytes[:], 64)
+	logger.Infof("stripe KX (server): session=%08x group=%s post-quantum=%v",
+		sessionID, kexGroupName(state.TLS.CurveID), state.TLS.CurveID == tls.X25519MLKEM768)
 	if err != nil {
 		logger.Errorf("stripe KX: export key material session=%08x: %v", sessionID, err)
 		conn.CloseWithError(0, "kx done")

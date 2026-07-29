@@ -90,7 +90,10 @@ type stripeClientConn struct {
 
 	edtClamped      uint64 // atomic: volte in cui il debito EDT ha toccato l'orizzonte (pacer saturo)
 	pacedExemptByte uint64 // atomic: byte spediti senza stampa EDT (ACK puri) ma addebitati al budget
-	lastPeerLoss    int64  // atomic: unix-nano of last nonzero peer loss report
+
+	kexGroup     string // gruppo TLS del key exchange (es. X25519MLKEM768) — solo lettura post-init
+	kexPQ        bool   // true se il KEX della sessione è ibrido post-quantum
+	lastPeerLoss int64  // atomic: unix-nano of last nonzero peer loss report
 
 	// Loss computation: previous window values (updated each keepalive cycle)
 	rxLossPrevSeqHigh    uint64
@@ -305,6 +308,8 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		fecMode:      fecMode,
 		fecType:      fecType,
 		flowAffinity: cfg.StripeFlowAffinity,
+		kexGroup:     keys.kexGroup,
+		kexPQ:        keys.kexPQ,
 		txGroup:      make([][]byte, 0, dataK),
 		rxCh:         make(chan []byte, 512),
 		rxGroups:     make(map[uint32]*fecGroup),

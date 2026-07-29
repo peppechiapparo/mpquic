@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	mpquiccrypto "mpquic/internal/mpquic/crypto"
 )
 
 type Config struct {
@@ -65,6 +67,14 @@ type Config struct {
 	StripeHealthCheckInterval   time.Duration `yaml:"stripe_health_check_interval"`
 	// CryptoSession: layer crypto avanzato su stripe (Fase G).
 	StripeCryptoEnabled bool `yaml:"stripe_crypto_enabled"` // default false
+
+	// Policy post-quantum del KX TLS di stripe (lato client): ""=default Go
+	// (già ibrido da Go 1.24), "require" = solo X25519MLKEM768 fail-closed,
+	// "prefer" = esplicito con fallback, "off" = classico (solo A/B).
+	StripeKexPQ string `yaml:"stripe_kex_pq"`
+
+	// Sezione crypto: profilo CAL e rekey per la CryptoSession (Fase G).
+	Crypto *mpquiccrypto.CryptoConfig `yaml:"crypto"`
 }
 
 type MultipathPathConfig struct {
@@ -160,6 +170,16 @@ func loadConfig(path string) (*Config, error) {
 		}
 		if err := loadAndValidateDataplaneConfig(path, cfg); err != nil {
 			return nil, err
+		}
+	}
+	switch cfg.StripeKexPQ {
+	case "", "default", "require", "prefer", "off":
+	default:
+		return nil, fmt.Errorf("stripe_kex_pq must be one of: require, prefer, off (got %q)", cfg.StripeKexPQ)
+	}
+	if cfg.Crypto != nil {
+		if err := cfg.Crypto.Validate(); err != nil {
+			return nil, fmt.Errorf("crypto section: %w", err)
 		}
 	}
 	if cfg.TunName == "" {

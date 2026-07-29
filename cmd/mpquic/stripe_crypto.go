@@ -34,8 +34,8 @@ const (
 	stripeKXLabel = "mpquic-stripe-v1"
 
 	// Wire overhead constants.
-	stripeCryptoSeqLen   = 8  // explicit 8-byte sequence number
-	stripeCryptoTagLen   = 16 // AES-GCM authentication tag
+	stripeCryptoSeqLen   = 8                                       // explicit 8-byte sequence number
+	stripeCryptoTagLen   = 16                                      // AES-GCM authentication tag
 	stripeCryptoOverhead = stripeCryptoSeqLen + stripeCryptoTagLen // 24 bytes total
 )
 
@@ -46,6 +46,8 @@ type stripeKeyMaterial struct {
 	c2sKey     [32]byte
 	s2cKey     [32]byte
 	quicSecret []byte // 64 byte TLS Exporter output — immutabile per la sessione
+	kexGroup   string // gruppo TLS negoziato nel KX (es. X25519MLKEM768)
+	kexPQ      bool   // true se il KEX è ibrido post-quantum
 }
 
 // stripeDeriveKeys splits 64 bytes of TLS-exported material into c2s / s2c keys.
@@ -270,14 +272,21 @@ func newStripeCiphers(cfg *Config, keys *stripeKeyMaterial, isServer bool) (tx *
 		if len(keys.quicSecret) < 64 {
 			return nil, nil, fmt.Errorf("stripe: StripeCryptoEnabled=true but quicSecret len=%d (need ≥64)", len(keys.quicSecret))
 		}
-		return newStripeCiphersFromCryptoSession(keys, isServer)
+		return newStripeCiphersFromCryptoSession(cfg, keys, isServer)
 	}
 	return newStripeCiphersLegacy(keys, isServer)
 }
 
-func newStripeCiphersFromCryptoSession(keys *stripeKeyMaterial, isServer bool) (*stripeCipher, *stripeCipher, error) {
+func newStripeCiphersFromCryptoSession(cfg *Config, keys *stripeKeyMaterial, isServer bool) (*stripeCipher, *stripeCipher, error) {
+	// La sezione `crypto:` dello YAML comanda profilo e rekey; in sua assenza
+	// si resta sul default conservativo (performance, rekey spento). I due
+	// lati DEVONO usare lo stesso profilo: la derivazione delle chiavi di
+	// epoca dipende dal profilo e un mismatch produce decrypt_fail.
 	cryptoCfg := mpquiccrypto.DefaultCryptoConfig()
 	cryptoCfg.Rekey.Enabled = false
+	if cfg.Crypto != nil {
+		cryptoCfg = cfg.Crypto
+	}
 
 	var sessionIDBytes [4]byte
 	copy(sessionIDBytes[:], keys.quicSecret[:4])
