@@ -71,6 +71,7 @@ type MultipathPathConfig struct {
 	Priority   int    `yaml:"priority"`
 	Weight     int    `yaml:"weight"`
 	Pipes      int    `yaml:"pipes"`
+	PacingRate int    `yaml:"pacing_rate"` // Mbps per questo path; 0 = usa stripe_pacing_rate globale
 	BasePath   string `yaml:"-"`         // original path name before pipe expansion
 	Transport  string `yaml:"transport"` // "quic" (default), "stripe", or "auto"
 }

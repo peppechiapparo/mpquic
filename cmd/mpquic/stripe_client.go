@@ -307,7 +307,14 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	}
 	atomic.StoreInt32(&scc.adaptiveM, initialAdaptiveM)
 	atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
-	scc.pacer = newStripePacer(cfg.StripePacingRate)
+	// Rate di pacing per questo path: l'override per-path vince sul globale,
+	// così due WAN con uplink diversi (es. 50 e 15 Mbit) non condividono un
+	// unico rate sbagliato per una delle due.
+	pacingRate := cfg.StripePacingRate
+	if pathCfg.PacingRate > 0 {
+		pacingRate = pathCfg.PacingRate
+	}
+	scc.pacer = newStripePacer(pacingRate)
 	if cfg.StripeFastKeepaliveInterval > 0 {
 		scc.keepaliveInterval = cfg.StripeFastKeepaliveInterval
 	} else {
@@ -397,11 +404,11 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	// If supported, enable SO_TXTIME on ALL pipes and compute inter-packet gap.
 	// Kernel pacing replaces the software stripePacer with nanosecond-precision
 	// sch_fq scheduling, eliminating burst-induced retransmits.
-	if cfg.StripePacingRate > 0 && len(scc.pipes) > 0 && stripeTxtimeProbe(scc.pipes[0]) {
+	if pacingRate > 0 && len(scc.pipes) > 0 && stripeTxtimeProbe(scc.pipes[0]) {
 		numPipes := len(scc.pipes)
-		rateBytesPerPipe := uint64(cfg.StripePacingRate) * 1e6 / 8 / uint64(numPipes)
+		rateBytesPerPipe := uint64(pacingRate) * 1e6 / 8 / uint64(numPipes)
 		// Typical shard: stripeHdrLen + 2 + MTU + AES-GCM overhead ≈ 1402 bytes
-		scc.txtimeGapNs = int64(float64(1402*8) / (float64(cfg.StripePacingRate) * 1e6 / float64(numPipes)) * 1e9)
+		scc.txtimeGapNs = int64(float64(1402*8) / (float64(pacingRate) * 1e6 / float64(numPipes)) * 1e9)
 		scc.txtimeEDT = make([]int64, numPipes)
 		allOK := true
 		for i, pipe := range scc.pipes {
@@ -477,8 +484,8 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	}
 
 	// Start dynamic pacing adaptation (Step 4.29)
-	if scc.txtimeEnabled && cfg.StripePacingRate > 0 {
-		go scc.dynamicPacingLoop(ctx, cfg.StripePacingRate)
+	if scc.txtimeEnabled && pacingRate > 0 {
+		go scc.dynamicPacingLoop(ctx, pacingRate)
 	}
 
 	// Flush timer for partial FEC groups
@@ -486,9 +493,9 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 
 	pacingStr := "off"
 	if scc.txtimeEnabled {
-		pacingStr = fmt.Sprintf("kernel@%dMbps(gap=%dns)", cfg.StripePacingRate, scc.txtimeGapNs)
-	} else if cfg.StripePacingRate > 0 {
-		pacingStr = fmt.Sprintf("sw@%dMbps", cfg.StripePacingRate)
+		pacingStr = fmt.Sprintf("kernel@%dMbps(gap=%dns)", pacingRate, scc.txtimeGapNs)
+	} else if pacingRate > 0 {
+		pacingStr = fmt.Sprintf("sw@%dMbps", pacingRate)
 	}
 	arqStr := "off"
 	if cfg.StripeARQ {

@@ -359,9 +359,15 @@ func (m *multipathConn) SendDatagram(pkt []byte) error {
 		return m.sendDuplicate(pkt, className, classPolicy)
 	}
 
+	// Path-stickiness per flusso: i pacchetti dello stesso flusso interno
+	// escono sempre dallo stesso path. L'alternanza per-pacchetto tra path
+	// con RTT diversi consegna al peer un riordino che il TCP interno paga
+	// in ritrasmissioni spurie (misurato: upload dimezzato sul banco dual-WAN).
+	flowHash, flowOK := innerFlowHash(pkt)
+
 	deadline := time.Now().Add(1200 * time.Millisecond)
 	for {
-		idx, conn := m.selectBestPath(classPolicy, nil)
+		idx, conn := m.selectBestPath(classPolicy, nil, flowHash, flowOK)
 		if idx < 0 || conn == nil {
 			if time.Now().After(deadline) {
 				m.markClassError(className)
@@ -393,7 +399,7 @@ func (m *multipathConn) sendDuplicate(pkt []byte, className string, classPolicy 
 	deadline := time.Now().Add(1200 * time.Millisecond)
 
 	for sent < copies {
-		idx, conn := m.selectBestPath(classPolicy, skip)
+		idx, conn := m.selectBestPath(classPolicy, skip, 0, false)
 		if idx < 0 || conn == nil {
 			if sent > 0 || time.Now().After(deadline) {
 				break
@@ -425,7 +431,7 @@ func (m *multipathConn) sendDuplicate(pkt []byte, className string, classPolicy 
 	return nil
 }
 
-func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip map[int]struct{}) (int, datagramConn) {
+func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip map[int]struct{}, flowHash uint32, flowOK bool) (int, datagramConn) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -456,9 +462,12 @@ func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip ma
 	}
 	preferredOnly := len(preferred) > 0
 
+	var tieCands []int // candidati a punteggio minimo, in ordine di indice stabile
+
 	for pass := 0; pass < 2; pass++ {
 		bestIdx = -1
 		bestScore = int(^uint(0) >> 1)
+		tieCands = tieCands[:0]
 
 		for i := 0; i < len(m.paths); i++ {
 			idx := (start + i) % len(m.paths)
@@ -502,10 +511,21 @@ func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip ma
 			if score < bestScore {
 				bestScore = score
 				bestIdx = idx
+				tieCands = tieCands[:0]
+				tieCands = append(tieCands, idx)
+			} else if score == bestScore {
+				tieCands = append(tieCands, idx)
 			}
 		}
 
 		if bestIdx >= 0 {
+			// A parità di punteggio la scelta è per-flusso, non per-pacchetto:
+			// l'hash del 5-tuple interno inchioda il flusso a un path finché
+			// l'insieme dei candidati non cambia (path morto/degradato → rehash).
+			if flowOK && len(tieCands) > 1 {
+				sort.Ints(tieCands)
+				bestIdx = tieCands[int(flowHash)%len(tieCands)]
+			}
 			break
 		}
 		if !preferredOnly {
