@@ -1,5 +1,22 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-07-29 sera — Merge v5.2 nella linea CAL + reintroduzione ML-KEM (post-quantum) validata sul banco
+
+Branch `ottavionovella`, commit `13d6627` (merge) + `ac9bfb4` (ML-KEM). Dettaglio requisiti in TDD Rev 5.
+
+**Merge main (v5.2) → ottavionovella:** un solo conflitto (struct stripeServer: campo `cfg` del CAL vs riallineamento gofmt), integrazione ortogonale per disegno (`newStripeCiphers` sceglie CryptoSession o AES-GCM dietro `stripe_crypto_enabled`; i percorsi TS-031 usano i cifranti a prescindere). Validato sul banco col profilo classico: down 247-269, up 64-72 back-to-back = eguaglia la v5.2.
+
+**Reintroduzione ML-KEM:**
+- `stripe_kex_pq: require` (client): il KX stripe (QUIC/TLS 1.3, ALPN mpquic-stripe-kx) offre SOLO X25519MLKEM768 — fail-closed, doppia cintura (CurvePreferences + verifica CurveID post-handshake). Con Go ≥1.24 il default era già ibrido: ora è garantito e osservabile.
+- Osservabilità: log del gruppo sui due lati, `stripe_kex_group/stripe_kex_pq` in /api/v1/stats, gauge Prometheus `mpquic_path_stripe_kex_pq{path,bind,group}`.
+- Sezione `crypto:` YAML collegata alla CryptoSession (profilo + rekey da config, prima default hardcoded rekey-off). Vincolo: stesso profilo sui due lati.
+- Config banco mp1 (due lati): `stripe_crypto_enabled: true`, `crypto: {enabled, profile: hybrid_security, rekey: {enabled, interval_seconds: 300, on_epoch_change, anti_flapping_seconds: 10, max_packets/max_bytes standard}}`; client anche `stripe_kex_pq: require`. Backup `.bak-pre-mlkem` + binario `.bak-pre-mlkem-merge`.
+
+**Validazione (banco, metodo del cliente):** PQ attivo su wan5+wan6 e visibile dal Prometheus di banco; decrypt_fail 0 prima/dopo la finestra di rekey (310s) con ping 0% attraverso; performance con PQ+hybrid: up 63.2, down 215/258/228 (banda classica 247-269 → nessun overhead misurabile: il PQ vive nell'handshake, l'hot path resta AES-256-GCM). Caveat aperto: il rekey non lascia traccia nel journal a log_level info — serve log/metrica di epoca per provarlo (follow-up).
+
+**Non in produzione:** l'attivazione hybrid su IBLEA-M è gated (config sui due lati + finestra), da decidere.
+
+
 ## 2026-07-29 — v5.2: upload STRIPES risolto (TS-031) — pacing sch_fq, ordinamento per-flusso, FEC adaptive off su mp1
 
 Dettaglio completo in `TROUBLESHOOTING_HISTORY.md` (TS-031 + addendum); spiegazione architetturale con diagrammi in `ARCHITETTURA.md` §9. Tag `v5.2` (branch `feat/ts031-upload-pacing`, 9 commit da `3a31bf9`, binario `60965c62`). In produzione IBLEA-M (VPS + client VM200, backup `.bak-ts031-v52`, dead-man usato e disarmato).

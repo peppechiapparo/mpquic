@@ -9,7 +9,7 @@
 |-------|--------|
 | Document ID | TPZ-MPQUIC-TDD-001 |
 | Issue | 1 |
-| Revision | 4 |
+| Revision | 5 |
 | Status | Draft |
 | Author | Telespazio Engineering Team |
 | Reviewed by | Tech Lead |
@@ -106,12 +106,14 @@ This document does **not** cover: OpenWrt mwan3 configuration, nftables firewall
 | RD-13 | Client kernel TX pacing (SO_TXTIME/EDT) | `cmd/mpquic/stripe_txtime_linux.go` |
 | RD-14 | Multipath client scheduler and per-flow path stickiness | `cmd/mpquic/client.go`, `cmd/mpquic/stripe_affinity.go` |
 | RD-15 | Troubleshooting record for release v5.2 (TS-031) | `docs/TROUBLESHOOTING_HISTORY.md` |
+| RD-16 | Stripe key exchange — post-quantum policy | `cmd/mpquic/stripe_keyex.go` |
 
 ### 1.4 Acronyms and Abbreviations
 
 | Term | Definition |
 |------|------------|
 | AIMD | Additive Increase / Multiplicative Decrease (adaptive rate control) |
+| ALPN | Application-Layer Protocol Negotiation (TLS extension, RFC 7301) |
 | ARQ | Automatic Repeat reQuest |
 | AES-GCM | Advanced Encryption Standard — Galois/Counter Mode |
 | BBR | Bottleneck Bandwidth and RTT (congestion control algorithm) |
@@ -311,6 +313,8 @@ Operator runs `mpquic-update.sh`. The script performs: git pull, binary rebuild,
 
 **[REQ-MPQUIC-SEC-017]** Cryptographic key material (`quicSecret`, derived session keys, shared secrets) shall not be written to log output at any severity level; when `stripe_crypto_enabled: true`, the system shall return a hard error (not a silent downgrade to the legacy path) if `len(quicSecret) < 64`.
 
+**[REQ-MPQUIC-SEC-018]** When the client-side `stripe_kex_pq` policy is set to `require`, the stripe key exchange TLS client shall restrict its `CurvePreferences` to the single group `X25519MLKEM768` and shall abort the key exchange with an error if the negotiated `CurveID` reported by the completed TLS 1.3 handshake is not `X25519MLKEM768`, without falling back to a classical key-exchange group.
+
 ### 3.3 Networking Requirements
 
 **[REQ-MPQUIC-NET-001]** The `ensure_tun.sh` script, executed as `ExecStartPre` by the systemd service, shall create the TUN interface if absent and shall configure the IP address and MTU idempotently, without failing if the interface already exists and is correctly configured.
@@ -381,6 +385,12 @@ Operator runs `mpquic-update.sh`. The script performs: git pull, binary rebuild,
 
 **[REQ-MPQUIC-CONF-012]** Kernel TX pacing via `SO_TXTIME` shall require the `fq` (`sch_fq`) queuing discipline configured on the egress WAN interface; the deployment procedure shall document that `fq_codel` and other non-EDT-aware queuing disciplines cause the kernel to silently ignore `SO_TXTIME`/`SCM_TXTIME` and `SO_MAX_PACING_RATE`.
 
+**[REQ-MPQUIC-CONF-013]** The `stripe_kex_pq` YAML field (client-side, string) shall accept only the values `require`, `prefer`, `off`, or the empty string; the configuration loader shall reject any other value with a fatal error at process start; the empty string (or field omission) shall leave the Go TLS runtime's default group preference unchanged (`X25519MLKEM768` preferred, `X25519` fallback, from Go 1.24 onward).
+
+**[REQ-MPQUIC-CONF-014]** When the `crypto:` YAML section is present, `loadConfig` shall validate it and the data plane shall instantiate the `CryptoSession` cipher profile and re-key policy from its content (`newStripeCiphersFromCryptoSession`); when the `crypto:` section is absent, the system shall fall back to the `performance` profile with re-key disabled (`DefaultCryptoConfig`).
+
+**[REQ-MPQUIC-CONF-015]** The `crypto.profile` value configured on the client side and on the server side of the same tunnel instance shall be identical; a profile mismatch between the two sides is not detected at configuration-validation time and shall be treated as a deployment error, since the epoch key derivation performed by `CryptoSession` depends on the selected profile and a mismatch produces decryption failures rather than a rejected handshake.
+
 ### 3.6 Operational Requirements
 
 **[REQ-MPQUIC-OPS-001]** Each tunnel instance shall be managed by a systemd service unit instantiated from the `mpquic@.service` template, following the naming convention `mpquic@<instance>.service`.
@@ -416,6 +426,10 @@ Operator runs `mpquic-update.sh`. The script performs: git pull, binary rebuild,
 **[REQ-MPQUIC-API-005]** The Control API shall expose the following HTTP endpoints on `127.0.0.1:<control_api_listen_port>`: `GET /healthz`, `GET /dataplane`, `POST /dataplane/validate`, `POST /dataplane/apply`, `POST /dataplane/reload`; all state-modifying endpoints (`POST`) shall require a valid Bearer token when `control_api_auth_token` is configured.
 
 **[REQ-MPQUIC-API-006]** The `POST /dataplane/validate` endpoint shall validate the submitted dataplane policy (JSON or YAML) without applying it, returning HTTP 200 with a validation summary on success, or HTTP 400 with structured error details on validation failure.
+
+**[REQ-MPQUIC-API-007]** Each entry of the `paths[]` array returned by `GET /api/v1/stats` on a client instance shall include the fields `stripe_kex_group` (string, negotiated TLS group name, e.g. `X25519MLKEM768`) and `stripe_kex_pq` (boolean, `true` when the negotiated group is the post-quantum hybrid group).
+
+**[REQ-MPQUIC-API-008]** The metrics HTTP server shall expose a Prometheus gauge `mpquic_path_stripe_kex_pq{path,bind,group}` with value `1` when the stripe key exchange negotiated for that path used the post-quantum hybrid group, and `0` otherwise.
 
 ---
 
@@ -760,8 +774,9 @@ The `quicSecret` derivation is unchanged from pre-CAL (QUIC TLS Exporter per REQ
 | E | External provider plugin loader | ✅ Complete | combined E+F | — |
 | F | Rekey engine | ✅ Complete | combined E+F | — |
 | G | Full wire integration + hardening | ✅ Complete | `418d7b6` | **58/58 PASS + 3 SKIP** |
+| I | Stripe KX fail-closed PQ policy + `crypto:` section wired to `CryptoSession` | ✅ Complete | `ac9bfb4` (branch `ottavionovella`, after merge `13d6627`) | `go build`, `go test`, `go test -race` green (`cmd/mpquic`, `internal/mpquic/crypto`); bench validation TBOX-EVO 2026-07-29 |
 
-**Release tag**: `v5.0` — deployed on both production nodes (2026-06-04).
+**Release tag**: `v5.0` — deployed on both production nodes (2026-06-04). Phase I (`ac9bfb4`) is validated on the TBOX-EVO bench as of 2026-07-29 and not yet tagged or deployed to IBLEA-M production; see §4.4.8 and §6.2 for the ML-KEM reintroduction validation.
 **Go version**: 1.26 (upgraded from 1.22 in Phase D — required by `crypto/mlkem`).
 **Race detector**: 0 data races across all 58 passing tests.
 
@@ -777,6 +792,50 @@ The `quicSecret` derivation is unchanged from pre-CAL (QUIC TLS Exporter per REQ
 | SEC-G02 | Duplicate epoch registration — silent overwrite | Medium | ✅ Fixed in Phase G |
 | SEC-G03 | `stripeKeyMaterial` not zeroed after consumption | Low | 📝 Phase H debt |
 | SEC-G04 | Short `quicSecret` caused silent legacy downgrade | Medium | ✅ Fixed in Phase G |
+
+#### 4.4.8 Post-quantum key exchange policy — stripe KX layer (v5.3, ML-KEM reintroduction)
+
+The system carries **two independent, complementary post-quantum surfaces**, and this subsection concerns only the first one:
+
+1. **Stripe KX layer** (`cmd/mpquic/stripe_keyex.go`) — a dedicated QUIC/TLS 1.3 connection, ALPN `mpquic-stripe-kx`, whose sole purpose is to export 64 bytes of keying material (`quicSecret`, TLS Exporter RFC 5705, label `mpquic-stripe-v1`) that seeds session-key derivation for either the legacy cipher path or the CAL path (§4.4.5). Since Go 1.24, the TLS 1.3 ECDHE group negotiated on this connection can itself be the hybrid post-quantum group `X25519MLKEM768` — but until this revision that was an unenforced, unobserved default: neither side verified which group had been negotiated, and a peer without post-quantum support would silently negotiate classical `X25519` instead.
+2. **CAL `hybrid_security` profile** (§4.4.3, §4.4.5) — CryptoSession's own explicit X25519 + ML-KEM-768 KEX, layered on top of `quicSecret` to derive the AES-256-GCM session keys.
+
+The two are orthogonal: the KX-layer policy governs the TLS group used to establish `quicSecret`; the CAL profile governs a second, independent KEX used to derive the AES-256-GCM keys from `quicSecret`. Full post-quantum protection of the key-derivation chain requires both: `stripe_kex_pq: require` on the outer connection and `crypto.profile: hybrid_security` on the inner one, as used together in the verification bench (§6.2). In every configuration, the hot-path AEAD remains AES-256-GCM (§4.4.3) — the post-quantum protection covers the key-derivation channel against harvest-now-decrypt-later (store ciphertext today, decrypt once a cryptographically relevant quantum computer exists), not the per-packet cipher itself, which has no such exposure.
+
+`stripe_kex_pq` is a client-side YAML field ([REQ-MPQUIC-CONF-013]) with four possible values:
+
+| Value | Behaviour |
+|-------|-----------|
+| `""` / `default` | Go TLS runtime default group preference is left untouched (Go 1.24+: `X25519MLKEM768` preferred, `X25519` fallback) |
+| `require` | Client offers **only** `X25519MLKEM768` in `CurvePreferences`; fail-closed — the handshake fails if the server does not support it, with no downgrade to a classical group ([REQ-MPQUIC-SEC-018]) |
+| `prefer` | Client offers `X25519MLKEM768` first, `X25519` second; downgrades to classical if the server lacks post-quantum support |
+| `off` | Client offers only `X25519` (classical); reserved for A/B comparison |
+
+Under `require`, enforcement is double-belted: the offer itself is restricted to the post-quantum group (`CurvePreferences`), and the negotiated `CurveID` is re-checked against `X25519MLKEM768` after the handshake completes, before the KX result is accepted (`stripeNegotiateKey`, `cmd/mpquic/stripe_keyex.go`). Both client and server log the negotiated group and its post-quantum status at handshake completion (`kexGroupName`); on the client this group and status are also carried forward into the running session (`stripeClientConn.kexGroup`/`kexPQ`) and surfaced via `/api/v1/stats` ([REQ-MPQUIC-API-007]) and the Prometheus gauge `mpquic_path_stripe_kex_pq` ([REQ-MPQUIC-API-008]).
+
+**KX handshake sequence under `stripe_kex_pq: require`:**
+
+```mermaid
+sequenceDiagram
+    participant C as Client (stripeNegotiateKey)
+    participant S as Server (handleStripeKeyExchange)
+    Note over C: stripe_kex_pq = require
+    C->>C: applyKexPQPolicy(tlsCfg, "require")\nCurvePreferences = [X25519MLKEM768]
+    C->>S: QUIC/TLS 1.3 ClientHello (ALPN=mpquic-stripe-kx)\nsupported_groups = [X25519MLKEM768]
+    alt server supports X25519MLKEM768
+        S->>C: ServerHello (group = X25519MLKEM768)
+        C->>C: state.TLS.CurveID == X25519MLKEM768 -> kexPQ=true
+        C->>S: ExportKeyingMaterial("mpquic-stripe-v1", 64B)
+        S->>S: ExportKeyingMaterial("mpquic-stripe-v1", 64B)
+        Note over C,S: quicSecret established (64B, identical on both sides)\nAES-256-GCM session keys derived from it (§4.4.5)
+    else server has no group in common with the client's offer
+        S--xC: TLS handshake failure (no shared supported_groups entry)
+        C->>C: stripeNegotiateKey returns error\n"stripe_kex_pq=require ma il gruppo negoziato e <group>"
+        Note over C: fail-closed: no downgrade to a classical group,\nno stripe session is established
+    end
+```
+
+**Crypto section plumbing (`crypto:` YAML block):** prior to `ac9bfb4`, the `crypto:` YAML section was parsed but never consumed by the data plane — `newStripeCiphersFromCryptoSession` always instantiated `DefaultCryptoConfig()` (profile `performance`, re-key disabled) regardless of what was configured. `cfg.Crypto` is now passed through when the section is present and validated in `loadConfig` ([REQ-MPQUIC-CONF-014]). Because epoch key derivation depends on the selected profile, the client and server sides of a tunnel instance must be configured with the same `crypto.profile` value; the software does not negotiate or cross-check this at connection time, so a mismatch is a deployment error that surfaces as `mpquic_session_decrypt_fail`, not as a rejected handshake ([REQ-MPQUIC-CONF-015]).
 
 ---
 
@@ -905,6 +964,7 @@ Each instance is configured by a YAML file rendered from a `.yaml.tpl` template 
 | `stripe_rate_mbps` | int | 0 | TX rate limiter (0 = disabled) |
 | `stripe_pacing_rate` | int | 0 | Kernel TX pacing (SO_TXTIME/EDT) rate cap in Mbps, session-global; 0 = disabled (v5.2, [REQ-MPQUIC-CONF-008]); requires `fq` qdisc on the WAN interface ([REQ-MPQUIC-CONF-012]) |
 | `stripe_pacing_adaptive` | bool | `false` | Enable the AIMD pacing-rate controller; `false` keeps the rate static at the configured cap (v5.2, [REQ-MPQUIC-CONF-011]) |
+| `stripe_kex_pq` | string | `""` | Post-quantum policy for the stripe KX TLS group: `""`/`default`, `require`, `prefer`, `off` (v5.3, [REQ-MPQUIC-CONF-013]); see §4.4.8 |
 
 #### Multipath fields
 
@@ -1010,6 +1070,8 @@ VPS_PUBLIC_IP=172.238.232.223
 }
 ```
 
+Client `paths[]` entries additionally carry the fields `stripe_kex_group` (string, e.g. `"X25519MLKEM768"`) and `stripe_kex_pq` (bool), reflecting the TLS group negotiated on the stripe KX connection for that path (v5.3, [REQ-MPQUIC-API-007]; see §4.4.8).
+
 ### 5.4 Control API
 
 **Base URL:** `http://127.0.0.1:<control_api_port>`  
@@ -1086,12 +1148,17 @@ All metrics carry the prefix `mpquic_`. Metrics are scraped by Prometheus from `
 | `mpquic_path_stripe_tx_bytes` | counter |
 | `mpquic_path_stripe_rx_bytes` | counter |
 | `mpquic_path_stripe_fec_recovered` | counter |
+| `mpquic_path_stripe_kex_pq` | gauge (additional label: `group`) |
 
 ---
 
 ### 5.6 Crypto Section YAML Configuration
 
 The `crypto:` block is added to an instance YAML file when the Crypto Abstraction Layer is activated via `stripe_crypto_enabled: true`. When this flag is `false` (default), the legacy `stripe_crypto.go` path is used and this section is ignored.
+
+**Plumbing change (v5.3, [REQ-MPQUIC-CONF-014]):** prior to `ac9bfb4`, this section was parsed by `loadConfig` but discarded — the data plane always built the `CryptoSession` from a hardcoded `DefaultCryptoConfig()` (profile `performance`, re-key disabled), regardless of what was written here. The section is now validated and, when present, passed through to `newStripeCiphersFromCryptoSession`; when absent, the same conservative default (`performance`, re-key disabled) is used as before.
+
+For the post-quantum policy of the stripe KX TLS connection itself (`stripe_kex_pq`, a top-level field outside this block), see §5.1 and §4.4.8.
 
 #### Activation field
 
@@ -1106,7 +1173,8 @@ stripe_crypto_enabled: true          # false = pre-v5.0 legacy path (default)
 
 crypto:
   enabled: true
-  profile: performance               # performance | hybrid_security | custom_provider
+  profile: performance               # performance | hybrid_security | custom_provider — must match the peer (REQ-MPQUIC-CONF-015)
+  aad_version: 1                     # 1 = legacy AAD (default), 2 = extended AAD
 
   rekey:
     enabled: false                   # Phase H — disabled in v5.0
@@ -1114,6 +1182,7 @@ crypto:
     max_packets: 1000000000          # re-key after N packets
     max_bytes: 1073741824            # re-key after N bytes
     on_path_recovery: false          # re-key on WAN path recovery
+    on_epoch_change: false           # re-key on epoch-change event
     anti_flapping_seconds: 10        # minimum interval between re-keys
 
   # Required only when profile: custom_provider
@@ -1138,6 +1207,10 @@ crypto:
 | `profile: custom_provider` without `custom_provider.path` | Fatal config error at startup |
 | `profile: hybrid_security` without `goexperiment.mlkem` build | Compile-time error |
 | `rekey.anti_flapping_seconds < 0` | Config validation error |
+| `rekey.enabled: true` with `max_packets`, `max_bytes`, and `interval_seconds` all zero | Config validation error (no rekey trigger would ever fire) |
+| `aad_version` other than 1 or 2 | Config validation error |
+| `crypto.profile` differs between the two tunnel sides | Not detected at config-validation time on either side — surfaces at runtime as `mpquic_session_decrypt_fail` (REQ-MPQUIC-CONF-015) |
+| `stripe_kex_pq` value other than `""`, `default`, `require`, `prefer`, `off` | Fatal config error at process start (REQ-MPQUIC-CONF-013) |
 
 ---
 
@@ -1175,6 +1248,7 @@ Testing is performed at three levels:
 - Aggregate throughput ≥ 300 Mbps on 3-path stripe (validated: 303 Mbps)
 - ARQ improvement: ≥ 30% throughput gain on dual Starlink with ARQ enabled (validated: +48%, 239→354 Mbps)
 - v5.2 upload/download pacing and ordering, validated with the client's collaudo method (OpenWrt → public IP, back-to-back plus 30 s soak): see [TC-MPQUIC-PERF-004] (bench) and [TC-MPQUIC-PERF-005] (production)
+- v5.3 ML-KEM reintroduction: post-quantum KEX fail-closed enforcement, rekey integrity under `hybrid_security`, and hot-path performance impact, validated with the client's collaudo method on the TBOX-EVO bench (2026-07-29): see [TC-MPQUIC-SEC-004], [TC-MPQUIC-SEC-005], [TC-MPQUIC-PERF-006]
 
 ### 6.2 Test Cases
 
@@ -1324,6 +1398,33 @@ Testing is performed at three levels:
 
 ---
 
+**[TC-MPQUIC-SEC-004]** — Post-quantum KEX fail-closed enforcement and observability (bench TBOX-EVO)
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that with `stripe_kex_pq: require` the stripe KX negotiates the post-quantum hybrid group on every path, that this is correctly observable via `/api/v1/stats` and Prometheus, and that no session runs on a classical group under this policy |
+| Preconditions | Bench TBOX-EVO, binary `ac9bfb4` (branch `ottavionovella`) on client and VPS lab; both sides: `stripe_kex_pq: require`, `crypto.profile: hybrid_security`, `rekey.enabled: true` / `interval_seconds: 300`; two active paths (`wan5`, `wan6`); Prometheus scraping the bench from CT 10.10.11.201 |
+| Procedure | 1. Establish the tunnel on both paths; 2. Grep client and server journal for the `stripe KX` log lines and record the reported `group=`/`post-quantum=`; 3. `curl` the client's own `/api/v1/stats` and check `paths[].stripe_kex_group` / `stripe_kex_pq`; 4. Query the bench Prometheus (CT 10.10.11.201) for `mpquic_path_stripe_kex_pq{path=~"wan5\|wan6"}` |
+| Expected result | Both sessions report `group=X25519MLKEM768`, `post-quantum=true`; `/api/v1/stats` and the Prometheus gauge agree, value `1`, for both paths; no session negotiates a classical group |
+| Actual result (bench, 2026-07-29 evening, client's collaudo method: OpenWrt → public IP) | `group=X25519MLKEM768 post-quantum=true` on both sessions (`wan5`, `wan6`); gauge `mpquic_path_stripe_kex_pq` = 1 on both paths, confirmed both from the local `/api/v1/stats` endpoint and from the bench Prometheus (CT 10.10.11.201) |
+| Verifies | [REQ-MPQUIC-SEC-018], [REQ-MPQUIC-CONF-013], [REQ-MPQUIC-API-007], [REQ-MPQUIC-API-008] |
+
+---
+
+**[TC-MPQUIC-SEC-005]** — Rekey window integrity under `hybrid_security` profile with post-quantum KEX active
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that a periodic re-key transition under the `hybrid_security` profile, with `stripe_kex_pq: require` active on the KX layer, does not cause decryption failures or packet loss on the data path |
+| Preconditions | Same bench configuration as [TC-MPQUIC-SEC-004]: both sides `crypto.profile: hybrid_security`, `rekey.interval_seconds: 300` |
+| Procedure | 1. Record `mpquic_session_decrypt_fail` on client and server before the test; 2. Start a continuous `ping` to the peer over the tunnel; 3. Let the session run past the 300 s re-key interval for a total observation window of 310 s; 4. Record `mpquic_session_decrypt_fail` on both sides again and the `ping` loss count; 5. Inspect the journal at `log_level: info` on both sides for an explicit re-key event log line |
+| Expected result | `mpquic_session_decrypt_fail` unchanged (0) before and after the window; 0% ping loss across the transition; a re-key event is identifiable in the log |
+| Actual result (bench, 2026-07-29 evening) | `decrypt_fail = 0` on client and server both before and after the 310 s window; 0% ping loss across the entire window (lossless transition) |
+| Verifies | [REQ-MPQUIC-SEC-013], [REQ-MPQUIC-SEC-015], [REQ-MPQUIC-CONF-014], [REQ-MPQUIC-CONF-015] |
+| Known limitation | No explicit re-key event was found in the journal at `log_level: info` on either side during this run. The absence of decrypt failures and the lossless ping across the window are strong indirect evidence that the epoch transition happened correctly, but direct log-based proof of the re-key event itself remains an open item — candidates are a dedicated re-key log line or an exposed epoch-id metric (not blocking, tracked in `docs/TROUBLESHOOTING_HISTORY.md`) |
+
+---
+
 **[TC-MPQUIC-PERF-001]** — Aggregate throughput ≥ 300 Mbps (3-path stripe)
 
 | Field | Value |
@@ -1384,6 +1485,20 @@ Testing is performed at three levels:
 | Actual result (production, 2026-07-29) | Upload 42.9 and 43.5 Mbps back-to-back (every interval 40–58 Mbps, no stalls) against a physical ceiling of 65.4 Mbps (66%); download climbing 145 → 163 Mbps back-to-back against a physical ceiling of 277 Mbps (59%), with no decay across the run |
 | Verifies | [REQ-MPQUIC-PERF-008] .. [REQ-MPQUIC-PERF-013], [REQ-MPQUIC-OPS-009], [REQ-MPQUIC-OPS-010] |
 | Known limitation | Download efficiency (59% of physical ceiling) and single-flow (P1) throughput remain open tuning items; AIMD pacing reactivation is pending the server-side `computeSessionRxLoss` fix (open item "C2") — not blocking, tracked in `docs/TROUBLESHOOTING_HISTORY.md` |
+
+---
+
+**[TC-MPQUIC-PERF-006]** — Hot-path throughput impact with post-quantum KEX and `hybrid_security` profile active
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that enabling `stripe_kex_pq: require` together with `crypto.profile: hybrid_security` does not introduce a measurable throughput regression on the AES-256-GCM hot path, relative to the pre-ML-KEM classical baseline established on the same bench right after merging v5.2 into the CAL line |
+| Preconditions | Merge prerequisite satisfied: `main` (v5.2) merged into the CAL line at `13d6627`; classical pre-ML-KEM baseline recorded on the same bench: 247–269 Mbps download / 64–72 Mbps upload; test configuration otherwise identical to [TC-MPQUIC-SEC-004] (`stripe_kex_pq: require`, `crypto.profile: hybrid_security`, `rekey.interval_seconds: 300`) |
+| Procedure | From OpenWrt, run `iperf3` upload once and download three times against the VPS public IP (client's collaudo method), with post-quantum KEX and `hybrid_security` active on both sides; compare against the classical baseline recorded at the merge prerequisite |
+| Expected result | Upload and download throughput remain close to the classical baseline, with no large, systematic drop attributable to the post-quantum KEX or the hybrid profile |
+| Actual result (bench, 2026-07-29 evening) | Upload 63.2 Mbps, against a classical baseline of 64–72 Mbps (0.8 Mbps, ≈1%, below the baseline's lower bound); download 215, 258, 228 Mbps across three runs, against a classical baseline of 247–269 Mbps (two of the three runs, 215 and 228, fall below the baseline's lower bound by 5–13%; the third, 258, sits inside the baseline range) |
+| Verifies | [REQ-MPQUIC-SEC-013] (architectural note, §4.4.8: post-quantum protection covers the key-derivation channel; the hot-path AEAD remains AES-256-GCM and is unaffected) |
+| Known limitation | The measured samples are consistently at or slightly below the classical baseline's lower bound rather than centred on it (upload 1% below; 2 of 3 download runs 5–13% below). This is within the range of run-to-run variability already documented elsewhere on this bench on the same Starlink link (e.g. [TC-MPQUIC-PERF-004]: 163–232 Mbps download in a single soak), so it is not read as a clear regression from a single-upload, three-download sample; a larger, alternating A/B sample (classical vs. PQ+hybrid, same time window) is needed before claiming the post-quantum path is exactly cost-free on the hot path, and is recommended as a follow-up rather than blocking this validation |
 
 ---
 
@@ -1595,6 +1710,9 @@ Testing is performed at three levels:
 | REQ-MPQUIC-CONF-010 | `multipath_flow_sticky` YAML field | §5.1 | `cmd/mpquic/config.go: MultipathFlowSticky` | TC-MPQUIC-SW-007 | Draft |
 | REQ-MPQUIC-CONF-011 | `stripe_pacing_adaptive` YAML field | §5.1 | `cmd/mpquic/config.go: StripePacingAdaptive` | — | Draft |
 | REQ-MPQUIC-CONF-012 | `sch_fq` prerequisite for SO_TXTIME | §5.1, §4.2.7 | `cmd/mpquic/stripe_txtime_linux.go` | TC-MPQUIC-PERF-004 | Draft |
+| REQ-MPQUIC-CONF-013 | `stripe_kex_pq` YAML field (require/prefer/off/default) | §5.1, §4.4.8 | `cmd/mpquic/config.go: StripeKexPQ` | TC-MPQUIC-SEC-004 | Draft |
+| REQ-MPQUIC-CONF-014 | `crypto:` section wired to `CryptoSession` (was hardcoded default) | §5.6, §4.4.8 | `cmd/mpquic/config.go: Crypto`, `cmd/mpquic/stripe_crypto.go: newStripeCiphersFromCryptoSession` | TC-MPQUIC-SEC-005 | Draft |
+| REQ-MPQUIC-CONF-015 | `crypto.profile` must match on both tunnel sides | §5.6, §4.4.8 | `internal/mpquic/crypto/config.go: CryptoConfig` | TC-MPQUIC-SEC-005 | Draft |
 | REQ-MPQUIC-OPS-001 | systemd template service | §5.2 | `deploy/systemd/mpquic@.service` | TC-MPQUIC-OPS-001 | Draft |
 | REQ-MPQUIC-OPS-002 | Restart=always RestartSec=2 | §5.2 | `deploy/systemd/mpquic@.service` | TC-MPQUIC-OPS-001 | Draft |
 | REQ-MPQUIC-OPS-003 | TUN idempotent ExecStartPre | §5.2 | `scripts/ensure_tun.sh` | TC-MPQUIC-SW-001 | Draft |
@@ -1611,13 +1729,16 @@ Testing is performed at three levels:
 | REQ-MPQUIC-API-004 | Client path metrics labels | §5.5 | `cmd/mpquic/main.go: registerMetrics` | TC-MPQUIC-API-002 | Draft |
 | REQ-MPQUIC-API-005 | Control API 5 endpoints | §5.4 | `cmd/mpquic/main.go: controlAPIServer` | — | Draft |
 | REQ-MPQUIC-API-006 | /dataplane/validate no side-effects | §5.4 | `cmd/mpquic/main.go: validateHandler` | — | Draft |
+| REQ-MPQUIC-API-007 | `/api/v1/stats` paths[] carries `stripe_kex_group`/`stripe_kex_pq` | §5.3, §4.4.8 | `cmd/mpquic/metrics.go: PathStats` | TC-MPQUIC-SEC-004 | Draft |
+| REQ-MPQUIC-API-008 | Prometheus gauge `mpquic_path_stripe_kex_pq{path,bind,group}` | §5.5, §4.4.8 | `cmd/mpquic/metrics.go` | TC-MPQUIC-SEC-004 | Draft |
 | REQ-MPQUIC-SEC-011 | CAL exclusive crypto dependency (when enabled) | §4.4.2, §5.6 | `cmd/mpquic/stripe_crypto.go: newStripeCiphers` | TC-MPQUIC-CAL-001, TC-MPQUIC-CAL-004 | Draft |
 | REQ-MPQUIC-SEC-012 | Performance profile: X25519 + AES-256-GCM + HKDF-SHA-256 | §4.4.3, §4.4.5 | `internal/mpquic/crypto/kex_classical.go` | TC-MPQUIC-CAL-001 | Draft |
-| REQ-MPQUIC-SEC-013 | Hybrid profile: X25519 + ML-KEM-768 + HKDF-SHA-256 | §4.4.3, §4.4.5 | `internal/mpquic/crypto/kex_hybrid.go` | TC-MPQUIC-CAL-006 | Draft |
+| REQ-MPQUIC-SEC-013 | Hybrid profile: X25519 + ML-KEM-768 + HKDF-SHA-256 | §4.4.3, §4.4.5 | `internal/mpquic/crypto/kex_hybrid.go` | TC-MPQUIC-CAL-006, TC-MPQUIC-SEC-005, TC-MPQUIC-PERF-006 | Draft |
 | REQ-MPQUIC-SEC-014 | custom_provider: plugin.Open + ExternalCryptoAdapter | §4.4.2, §5.6 | `internal/mpquic/crypto/external.go` | TC-MPQUIC-CAL-005 | Draft |
-| REQ-MPQUIC-SEC-015 | Epoch fallback: retain current N and previous N-1 | §4.4.4 | `internal/mpquic/crypto/crypto.go: Open` | TC-MPQUIC-CAL-002 | Draft |
+| REQ-MPQUIC-SEC-015 | Epoch fallback: retain current N and previous N-1 | §4.4.4 | `internal/mpquic/crypto/crypto.go: Open` | TC-MPQUIC-CAL-002, TC-MPQUIC-SEC-005 | Draft |
 | REQ-MPQUIC-SEC-016 | Duplicate epoch → ErrRekeyBadEpoch, no overwrite | §4.4.4 | `internal/mpquic/crypto/crypto.go: addEpochLocked` | TC-MPQUIC-CAL-003 | Draft |
 | REQ-MPQUIC-SEC-017 | No key logging; hard error on short quicSecret | §4.4.5, §5.6 | `cmd/mpquic/stripe_crypto.go: newStripeCiphers` | TC-MPQUIC-CAL-004 | Draft |
+| REQ-MPQUIC-SEC-018 | Stripe KX fail-closed post-quantum policy (`require`) | §4.4.8 | `cmd/mpquic/stripe_keyex.go: applyKexPQPolicy, stripeNegotiateKey` | TC-MPQUIC-SEC-004 | Draft |
 
 ---
 
@@ -1630,7 +1751,8 @@ Testing is performed at three levels:
 | 1 | 2 | 2026-07-23 | Incident TS-014 closure — per-WAN policy routing shared-resource fix. Added: §2.2 in-scope component `mpquic-policy-routing.sh`; §4.2.6 new component description with design invariant (per-WAN host route vs. per-tunnel default/blackhole route); §3.3 REQ-MPQUIC-NET-007 (host route decoupled from single-TUN state); §6.2 TC-MPQUIC-NET-001 with field validation numbers (IBLEA-M, 2026-07-22: host route present 38/38 samples post-fix, max 1 consecutive FAIL vs 14/18.4 s pre-fix); §7 RTM row for NET-007. Root cause: `mpquic-policy-routing.sh` conditioned the shared VPS host route in table `wan6` on `have_tun_up(mpq6)`, so stopping the WAN-owning tunnel blackholed the co-located `mp1` tunnel. Open technical debt (non-blocking, tracked outside this document): bats regression test for the TS-014 scenario, `flock` guard on the script. | Telespazio Engineering Team |
 | 1 | 3 | 2026-07-29 | Release `v5.2` (incident TS-031) — client upload pacing and per-flow ordering, in production on IBLEA-M since 2026-07-29. Added: §4.2.7 new component description for the client kernel TX pacing/flow-ordering subsystem (SO_TXTIME/EDT with 15 ms horizon clamp, byte-proportional and per-path-shared pacing budget, pure-ACK exemption with byte charge, per-flow path stickiness, per-pipe health-gated flow affinity, ARQ retransmission dedup); §4.5 three Mermaid diagrams (TX pipeline flowchart, keepalive/health-gating sequence, pacing-rate state diagram); §4.3.1 data flow updated for path/pipe selection and EDT/exempt/clamp/`sch_fq` steps; §3.1 REQ-MPQUIC-SW-021..024 (flow stickiness, sticky fallback, health-gated affinity, ARQ dedup); §3.4 REQ-MPQUIC-PERF-008..013 (SO_TXTIME pacing, byte-proportional and per-path-shared EDT budget, horizon clamp, pure-ACK exemption and byte charge); §3.5 REQ-MPQUIC-CONF-008..012 (`stripe_pacing_rate`, per-path `pacing_rate`, `multipath_flow_sticky`, `stripe_pacing_adaptive`, `sch_fq` prerequisite); §3.6 REQ-MPQUIC-OPS-009/010 (`sch_fq` + `net.core.default_qdisc=fq` persistence, `stripe_fec_mode: off` recommendation on bursty downlinks); §5.1 four new YAML fields; §6.2 TC-MPQUIC-SW-007..009, TC-MPQUIC-PERF-002..005 with bench (TBOX-EVO) and production (IBLEA-M) validation numbers; §7 RTM rows for all of the above; §1.3 RD-13..RD-15; acronyms EDT, AIMD. Root cause (TS-031): the client TX path had neither pacing nor per-flow ordering, so per-packet round-robin across 12–24 pipes and unpaced GSO bursts on a narrow uplink (~50 Mbps) were read by the tunnelled TCP as loss (measured 2,180–5,975 spurious retransmissions against near-zero transport-level loss). Root cause of the initial fix regression (same-day addendum): an unbounded EDT debt saturated the `sch_fq` per-pipe `flow_limit`, causing silent local qdisc drops (479 dropped + 95 `horizon_drops` measured on one WAN) that any loss-based control loop read as congestion; fixed by the 15 ms horizon clamp. A pre-existing but previously latent defect — `stripe_fec_mode: adaptive` forming a positive-feedback loop with downlink congestion (256→132→79 Mbps decay across back-to-back runs) — was uncovered during validation and closed operationally via [REQ-MPQUIC-OPS-010] (`stripe_fec_mode: off` on `mp1`, both sides). Validated on the TBOX-EVO bench with the client's own collaudo method (download 232 Mbps / upload 65 Mbps average over a 30 s soak, zero sessions at 0) and in IBLEA-M production post-deploy (upload 42.9/43.5 Mbps against a 65.4 Mbps physical ceiling — 66%; download 145→163 Mbps against 277 Mbps — 59%). Open, non-blocking: server-side `computeSessionRxLoss` fix ("C2") required before the AIMD pacing controller (`stripe_pacing_adaptive`) can be enabled; download efficiency and single-flow (P1) throughput remain tuning items. | Telespazio Engineering Team |
 | 1 | 4 | 2026-07-29 | Editorial: legacy ASCII architecture diagrams converted to Mermaid, no technical content change. The six remaining box-drawing diagrams predating the v5.2 Mermaid adoption are now Mermaid too: §4.1 component overview (client VM / VPS server, two subgraphs), §4.3.1 client TX data flow, §4.3.2 server RX data flow, §4.3.3 return path data flow, §4.4.1 CAL package file tree, §4.4.2 CAL component interaction. Same components, same arrows, same labels as the ASCII originals — this is a rendering change only, verified by compiling every Mermaid block in the document with mermaid-cli. Left untouched: the key-derivation pseudocode in §4.4.5 (formulas, not diagrams) and all YAML/JSON/ini examples and CLI output elsewhere in the document. | Telespazio Engineering Team |
+| 1 | 5 | 2026-07-29 | ML-KEM reintroduction (commit `ac9bfb4`, branch `ottavionovella`, after merging `main`/v5.2 at `13d6627`) — post-quantum policy for the stripe KX layer, made mandatory and observable, plus the `crypto:` YAML section wired to the live `CryptoSession` instead of a hardcoded default. Added: §4.4.8 new subsection (two independent PQ surfaces — stripe KX TLS group vs. CAL `hybrid_security` profile — with a Mermaid sequence diagram of the KX handshake under `stripe_kex_pq: require`); §4.4.6 Phase I row; §3.2 REQ-MPQUIC-SEC-018 (KX fail-closed enforcement); §3.5 REQ-MPQUIC-CONF-013..015 (`stripe_kex_pq` field, `crypto:` section plumbing, same-profile constraint across tunnel sides); §3.7 REQ-MPQUIC-API-007/008 (`stripe_kex_group`/`stripe_kex_pq` in `/api/v1/stats`, Prometheus gauge `mpquic_path_stripe_kex_pq`); §5.1 new `stripe_kex_pq` field; §5.6 updated `crypto:` schema (`on_epoch_change`, `aad_version` fields now documented) and validation rules; §5.3/§5.5 stats/metrics updates; §6.1 system test scope; §6.2 TC-MPQUIC-SEC-004/005 and TC-MPQUIC-PERF-006 with bench validation numbers; §7 RTM rows for all of the above; §1.3 RD-16; acronym ALPN. Verified on the TBOX-EVO bench (2026-07-29 evening, client's collaudo method: OpenWrt → public IP) with `stripe_kex_pq: require` + `crypto.profile: hybrid_security` + 300 s rekey active on both sides: `group=X25519MLKEM768 post-quantum=true` on both sessions (`wan5`, `wan6`); Prometheus gauge and `/api/v1/stats` agree (value 1) on both paths, confirmed against the bench Prometheus (CT 10.10.11.201); `decrypt_fail = 0` on client and server before and after the 310 s rekey window, with 0% ping loss across the transition (lossless); upload 63.2 Mbps and download 215/258/228 Mbps across three runs against a classical pre-ML-KEM baseline of 64–72 Mbps up / 247–269 Mbps down recorded on the same bench right after the v5.2 merge — samples sit at or slightly below the classical baseline's lower bound (upload ≈1% below, 2 of 3 download runs 5–13% below), within the range of run-to-run variability already documented on this bench, but not yet confirmed by an alternating A/B sample large enough to rule out a small regression on the AES-256-GCM hot path (open item, see [TC-MPQUIC-PERF-006]). Open, non-blocking: no explicit re-key event was found in the journal at `log_level: info` on either side during the rekey-window test; the absence of decrypt failures and the lossless ping are strong indirect evidence but not a direct log-based proof of the re-key event — tracked in `docs/TROUBLESHOOTING_HISTORY.md` (candidates: dedicated re-key log line or exposed epoch-id metric). Not yet tagged or deployed to IBLEA-M production. | Telespazio Engineering Team |
 
 ---
 
-*End of Document — TPZ-MPQUIC-TDD-001 Issue 1, Rev 4*
+*End of Document — TPZ-MPQUIC-TDD-001 Issue 1, Rev 5*

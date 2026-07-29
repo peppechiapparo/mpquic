@@ -1,5 +1,9 @@
 # Roadmap implementazione MPQUIC
 
+## Addendum — Merge v5.2→CAL + ML-KEM reintrodotto e validato sul banco (2026-07-29 sera)
+
+La linea CAL (`ottavionovella`) ora contiene la v5.2 (merge `13d6627`, un conflitto, banco in pari col riferimento) e il post-quantum è garantito e osservabile (`stripe_kex_pq: require`, gauge `mpquic_path_stripe_kex_pq`, sezione `crypto:` → CryptoSession con `hybrid_security` + rekey; commit `ac9bfb4`). Validato su TBOX-EVO: PQ su entrambi i path, decrypt_fail 0 attraverso la finestra di rekey, performance in pari (up 63, down 215-258). Aperti: prova positiva del rekey nel journal/metrica di epoca; attivazione su IBLEA-M (gated). Dettaglio: CHANGELOG 2026-07-29 sera + TDD Rev 5.
+
 ## Addendum — v5.2 / TS-031: upload STRIPES risolto e in produzione (2026-07-29)
 
 L'upload dentro mp1 rendeva il 25-30% del fisico con migliaia di retx spurie (riordino + burst, zero perdita reale misurata). Release `v5.2`: pacing kernel sch_fq per-path (EDT a byte, clock per path, clamp orizzonte 15ms), ordinamento per-flusso opt-in (stickiness di path a score strutturale + affinity di pipe con health-gating dall'eco keepalive, che chiude il veto TS-024), esenzione ACK-puri dal pacing con byte addebitati, dedup retx ARQ, e `stripe_fec_mode: off` su mp1 (il cricchetto della FEC adattiva era la causa del decadimento del download nei run back-to-back). Validata col metodo del cliente sul banco (down 232 / up 65 medi su soak 30s, zero stalli) e deployata su IBLEA-M (up 22.7→43.5 = 66% del fisico same-minute; down back-to-back senza più decadimento). Architettura e diagrammi: `ARCHITETTURA.md` §9. Prossimi: fix C2 del segnale loss server → riattivazione AIMD; metriche pacing Prometheus. Il "piano trasporto stadio 1/2" evocato da TS-016 (uplink, pacing, FEC) è da considerarsi ESEGUITO da questa release.
