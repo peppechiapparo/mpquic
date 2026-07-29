@@ -92,6 +92,18 @@ gw_for_dev() {
   local gw=""
   # Primary: kernel routing table (works with systemd-networkd and dhclient)
   gw="$(ip -4 route show dev "$dev" default 2>/dev/null | awk '/default via/{print $3}' | tail -n 1)"
+  # Fallback: stato lease di systemd-networkd. Indispensabile con UseGateway=no
+  # (TS-028: il default fisico non sta piu' in main, ma il router del lease
+  # resta noto a networkd), e comunque piu' fresco del file dhclient.
+  if [ -z "$gw" ]; then
+    local idx_file="/sys/class/net/${dev}/ifindex"
+    if [ -r "$idx_file" ]; then
+      local nd_lease="/run/systemd/netif/leases/$(cat "$idx_file")"
+      if [ -r "$nd_lease" ]; then
+        gw="$(awk -F= '/^ROUTER=/{print $2; exit}' "$nd_lease")"
+      fi
+    fi
+  fi
   # Fallback: dhclient lease file (legacy, may be stale after networkd migration)
   if [ -z "$gw" ]; then
     local lease="/var/lib/dhcp/dhclient.${dev}.leases"

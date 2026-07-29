@@ -15,5 +15,11 @@ UseRoutes=yes
 SendRelease=yes
 ClientIdentifier=mac
 
+# TS-028: come wan6 — niente default fisico in main, gateway dal lease
+# networkd verso la sola tabella phyN (vedi 15-wan6.network per il razionale
+# e per il gotcha della sezione [DHCPv4] vs [DHCP]).
+[DHCPv4]
+UseGateway=false
+
 [Link]
 RequiredForOnline=no
