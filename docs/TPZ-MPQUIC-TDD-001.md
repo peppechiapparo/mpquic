@@ -9,7 +9,7 @@
 |-------|--------|
 | Document ID | TPZ-MPQUIC-TDD-001 |
 | Issue | 1 |
-| Revision | 3 |
+| Revision | 4 |
 | Status | Draft |
 | Author | Telespazio Engineering Team |
 | Reviewed by | Tech Lead |
@@ -425,61 +425,38 @@ Operator runs `mpquic-update.sh`. The script performs: git pull, binary rebuild,
 
 The MPQUIC/STRIPES system is composed of the following components:
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│  VM MPQUIC (10.10.11.100) — CLIENT SIDE                              │
-│                                                                      │
-│  ┌─────────────┐   ┌─────────────────────────────────────────────┐   │
-│  │ OpenWrt     │   │ mpquic binary (client role)                 │   │
-│  │ Router      │   │                                             │   │
-│  │ (mwan3,     │   │  ┌───────────┐  ┌────────────────────────┐  │   │
-│  │  nftables)  │   │  │ TUN read  │  │  Stripe Engine         │  │   │
-│  └──────┬──────┘   │  │ TUN write │  │  (stripe.go)           │  │   │
-│         │ LAN      │  │ mpq1–mpq6 │  │  FEC + ARQ + AES-GCM   │  │   │
-│         │ transit  │  │ mp1, cr/* │  │  Batch I/O (GSO/mmsg)  │  │   │
-│         ▼          │  └─────┬─────┘  └──────────┬─────────────┘  │   │
-│  enp6s20–23        │        │ IP pkts             │ UDP pipes    │   │
-│  enp7s1–2          │        └─────────────────────┘              │   │
-│                    │                                             │   │
-│                    │  WAN interfaces: enp7s3–enp7s8              │   │
-│                    │  SO_BINDTODEVICE per pipe                   │   │
-│                    └─────────────────────────────────────────────┘   │
-│                                                                      │
-│  ┌────────────────────────────────────────┐                          │
-│  │ mpquic-mgmt REST daemon (:8080)        │                          │
-│  │ Tunnel lifecycle API (start/stop/stats)│                          │
-│  └────────────────────────────────────────┘                          │
-│                                                                      │
-│  ┌────────────────────────────────────────┐                          │
-│  │ mpquic-watchdog (systemd timer)        │                          │
-│  │ Periodic health check + auto-recovery  │                          │
-│  └────────────────────────────────────────┘                          │
-└──────────────────────────────────────────────────────────────────────┘
-                             │  UDP (WAN5, WAN6)
-                             │  Multiple pipes (e.g., 12 per path)
-                             ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  VPS Server (172.238.232.223) — SERVER SIDE                          │
-│                                                                      │
-│  ┌─────────────────────────────────────────────────────────────┐     │
-│  │ mpquic binary (server role)                                 │     │
-│  │                                                             │     │
-│  │  ┌─────────────────────┐  ┌────────────────────────────┐    │     │
-│  │  │ UDP Listener        │  │ Stripe Session (per path)  │    │     │
-│  │  │ :46017 (mp1)        │  │ AES-GCM decrypt            │    │     │
-│  │  │ :45001–:45006       │  │ FEC Decoder                │    │     │
-│  │  │ recvmmsg batch      │  │ ARQ RX Tracker             │    │     │
-│  │  └──────────┬──────────┘  └──────────┬─────────────────┘    │     │
-│  │             │ demux by session ID    │                      │     │
-│  │             └────────────────────────┘                      │     │
-│  │                         │                                   │     │
-│  │                    TUN write/read                           │     │
-│  │                 mp1 (10.200.17.254/24)                      │     │
-│  │                 mpq1–mpq6 (10.200.1-6.2/30)                 │     │
-│  └─────────────────────────────────────────────────────────────┘     │
-│                                                                      │
-│  Prometheus metrics: tunnel_ip:9090 (not exposed on WAN)             │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph CLIENT["VM MPQUIC (10.10.11.100) — CLIENT SIDE"]
+        direction TB
+        OWRT["OpenWrt Router\n(mwan3, nftables)"]
+        subgraph MPQC["mpquic binary (client role)"]
+            direction LR
+            TUNC["TUN read / TUN write\nmpq1–mpq6, mp1, cr/*"]
+            SE["Stripe Engine (stripe.go)\nFEC + ARQ + AES-GCM\nBatch I/O (GSO/mmsg)"]
+            TUNC -- "IP pkts" --> SE
+        end
+        WANIF["WAN interfaces: enp7s3–enp7s8\nSO_BINDTODEVICE per pipe"]
+        MGMT["mpquic-mgmt REST daemon (:8080)\nTunnel lifecycle API (start/stop/stats)"]
+        WATCHDOG["mpquic-watchdog (systemd timer)\nPeriodic health check + auto-recovery"]
+        OWRT -- "LAN transit\nenp6s20–23, enp7s1–2" --> MPQC
+        SE -- "UDP pipes" --> WANIF
+    end
+
+    subgraph SERVER["VPS Server (172.238.232.223) — SERVER SIDE"]
+        direction TB
+        subgraph MPQS["mpquic binary (server role)"]
+            direction LR
+            UDPL["UDP Listener\n:46017 (mp1), :45001–:45006\nrecvmmsg batch"]
+            SS["Stripe Session (per path)\nAES-GCM decrypt\nFEC Decoder\nARQ RX Tracker"]
+            UDPL -- "demux by session ID" --> SS
+        end
+        TUNS["TUN write/read\nmp1 (10.200.17.254/24)\nmpq1–mpq6 (10.200.1-6.2/30)"]
+        PROM["Prometheus metrics: tunnel_ip:9090\n(not exposed on WAN)"]
+        MPQS --> TUNS
+    end
+
+    WANIF -- "UDP (WAN5, WAN6)\nMultiple pipes (e.g., 12 per path)" --> UDPL
 ```
 
 ### 4.2 Component Descriptions
@@ -627,98 +604,56 @@ An earlier version of the EDT scheduler allowed the debt (scheduled transmit tim
 
 #### 4.3.1 Client TX path (LAN → WAN)
 
-```
-LAN host packet
-  │
-  ▼
-OpenWrt (nftables DSCP mark + fwmark → policy routing table)
-  │
-  ▼
-TUN interface mpq{i} or mp1 (10.200.x.y/24 or /30)
-  │ TUN read (syscall)
-  ▼
-mpquic dataplane (main.go: tunReadLoop)
-  │ IP packet buffer (MTU ≤ 1300 bytes)
-  ▼
-[if multipath_enabled] multipathConn.SendDatagram (client.go)
-  │
-  ├─ [multipath_flow_sticky=true] selectBestPath: 5-tuple hash tie-break
-  │    on minimum STRUCTURAL score (priority/weight only)      §4.2.7
-  └─ [multipath_flow_sticky=false, or retry after TX error] selectBestPath:
-       classic score (priority + weight + consecutiveFails)
-  │
-  ▼
-[if transport_mode == stripe]
-Stripe Engine (stripe_client.go: stripeClientConn.SendDatagram)
-  │
-  ├─ FEC Encoder (Reed-Solomon K=10, effective_M shards; stripe_fec_mode)
-  │    → produces 1 DATA shard + M PARITY shards per group
-  │    (production mp1, v5.2: stripe_fec_mode=off, ARQ-only — §4.2.3)
-  │
-  ├─ AES-256-GCM Encrypt (stripe_crypto.go)
-  │    → 16B stripe header + ciphertext + 16B GCM tag
-  │
-  ├─ ARQ TX ring buffer store (plaintext, for future retransmission;
-  │    shouldRetx dedup ≤ 1 retx / 100 ms per GroupSeq)              §4.2.7
-  │
-  ├─ Pipe selection (dataPipeIdx)
-  │    ├─ [stripe_flow_affinity=true, pipeHealthyMask≠0] hash on healthy pipes only
-  │    └─ [otherwise] round-robin over txActivePipes
-  │
-  ├─ EDT pacing decision per packet (stripe_txtime_linux.go)          §4.2.7
-  │    ├─ [isPureAck(inner)=true] no SCM_TXTIME stamp; txtimeChargeLocked
-  │    │    still advances the budget by the packet's byte length
-  │    └─ [isPureAck=false] next EDT = max(now, budget); clamp to
-  │         now + 15 ms (stripeEDTHorizonNs) if exceeded; edtClamped++
-  │
-  └─ TX dispatch
-       │
-       ├─ [Linux] UDP GSO: coalesce N shards → 1 sendmsg per pipe,
-       │    carrying SCM_TXTIME where applicable
-       └─ Socket (SO_BINDTODEVICE=enp7s7, buf=7MB, SO_MAX_PACING_RATE backstop)
-            │ sch_fq qdisc (required — REQ-MPQUIC-OPS-009)
-            │ UDP datagrams → Internet → VPS :46017
+```mermaid
+flowchart TD
+    A["LAN host packet"] --> B["OpenWrt (nftables DSCP mark + fwmark → policy routing table)"]
+    B --> C["TUN interface mpq{i} or mp1 (10.200.x.y/24 or /30)"]
+    C -- "TUN read (syscall)" --> D["mpquic dataplane (main.go: tunReadLoop)"]
+    D -- "IP packet buffer (MTU ≤ 1300 bytes)" --> E["[if multipath_enabled]\nmultipathConn.SendDatagram (client.go)"]
+    E --> F{"multipath_flow_sticky?"}
+    F -- "true, tie on structural score" --> G["selectBestPath: 5-tuple hash tie-break\non minimum STRUCTURAL score (priority/weight only) §4.2.7"]
+    F -- "false, or retry after TX error" --> H["selectBestPath: classic score\n(priority + weight + consecutiveFails)"]
+    G --> I["[if transport_mode == stripe]\nStripe Engine (stripe_client.go: stripeClientConn.SendDatagram)"]
+    H --> I
+    I --> J["FEC Encoder (Reed-Solomon K=10, effective_M shards; stripe_fec_mode)\n→ produces 1 DATA shard + M PARITY shards per group\n(production mp1, v5.2: stripe_fec_mode=off, ARQ-only — §4.2.3)"]
+    J --> K["AES-256-GCM Encrypt (stripe_crypto.go)\n→ 16B stripe header + ciphertext + 16B GCM tag"]
+    K --> L["ARQ TX ring buffer store (plaintext, for future retransmission;\nshouldRetx dedup ≤ 1 retx / 100 ms per GroupSeq) §4.2.7"]
+    L --> M{"Pipe selection (dataPipeIdx)"}
+    M -- "stripe_flow_affinity=true, pipeHealthyMask≠0" --> N["hash on healthy pipes only"]
+    M -- "otherwise" --> O["round-robin over txActivePipes"]
+    N --> P{"EDT pacing decision per packet\n(stripe_txtime_linux.go) §4.2.7"}
+    O --> P
+    P -- "isPureAck(inner)=true" --> Q["no SCM_TXTIME stamp; txtimeChargeLocked\nstill advances the budget by the packet's byte length"]
+    P -- "isPureAck=false" --> R["next EDT = max(now, budget); clamp to\nnow + 15 ms (stripeEDTHorizonNs) if exceeded; edtClamped++"]
+    Q --> S{"TX dispatch"}
+    R --> S
+    S -- "Linux" --> T["UDP GSO: coalesce N shards → 1 sendmsg per pipe,\ncarrying SCM_TXTIME where applicable"]
+    S --> U["Socket (SO_BINDTODEVICE=enp7s7, buf=7MB,\nSO_MAX_PACING_RATE backstop)"]
+    U --> V["sch_fq qdisc (required — REQ-MPQUIC-OPS-009)"]
+    V --> W["UDP datagrams → Internet → VPS :46017"]
 ```
 
 #### 4.3.2 Server RX path (WAN → server TUN)
 
-```
-UDP datagrams arrive at VPS :46017 (all 24 client pipes → 1 socket)
-  │ recvmmsg batch (8 datagrams per syscall)
-  ▼
-Session demultiplexing (session ID = ipToUint32(tunIP) XOR fnv32a(path))
-  │
-  ▼
-Stripe Session RX (per-session goroutine)
-  │
-  ├─ AES-256-GCM Decrypt + AEAD verify
-  │    → reject + increment decrypt_fail on failure
-  │
-  ├─ ARQ RX bitmap: mark received; generate NACK if gap detected
-  │
-  ├─ Dedup check: drop if sequence already delivered
-  │
-  ├─ FEC Decoder: buffer DATA/PARITY shards; reconstruct when M shards missing
-  │
-  └─ Deliver IP packet to TUN write queue (rxCh → tunWriter goroutine)
-       │
-       ▼
-TUN write → mp1 (10.200.17.254/24) → routing → internet egress
+```mermaid
+flowchart TD
+    A["UDP datagrams arrive at VPS :46017\n(all 24 client pipes → 1 socket)"] -- "recvmmsg batch (8 datagrams per syscall)" --> B["Session demultiplexing\n(session ID = ipToUint32(tunIP) XOR fnv32a(path))"]
+    B --> C["Stripe Session RX (per-session goroutine)"]
+    C --> D["AES-256-GCM Decrypt + AEAD verify\n→ reject + increment decrypt_fail on failure"]
+    C --> E["ARQ RX bitmap: mark received;\ngenerate NACK if gap detected"]
+    C --> F["Dedup check: drop if sequence already delivered"]
+    C --> G["FEC Decoder: buffer DATA/PARITY shards;\nreconstruct when M shards missing"]
+    C --> H["Deliver IP packet to TUN write queue\n(rxCh → tunWriter goroutine)"]
+    H --> I["TUN write → mp1 (10.200.17.254/24) → routing → internet egress"]
 ```
 
 #### 4.3.3 Return path (VPS TUN → client)
 
-```
-Reply IP packet arrives at VPS TUN (mp1, 10.200.17.254/24)
-  │ TUN read
-  ▼
-Connection table lookup: dstIP → stripe session (flow-hash FNV-1a on 5-tuple)
-  │
-  ▼
-FEC Encode → AES-256-GCM Encrypt → sendmmsg TX → client pipe addresses
-  │
-  ▼
-Client recvmmsg → decrypt → FEC decode → dedup → TUN write → OpenWrt → LAN host
+```mermaid
+flowchart TD
+    A["Reply IP packet arrives at VPS TUN\n(mp1, 10.200.17.254/24)"] -- "TUN read" --> B["Connection table lookup: dstIP → stripe session\n(flow-hash FNV-1a on 5-tuple)"]
+    B --> C["FEC Encode"] --> D["AES-256-GCM Encrypt"] --> E["sendmmsg TX → client pipe addresses"]
+    E --> F["Client recvmmsg"] --> G["decrypt"] --> H["FEC decode"] --> I["dedup"] --> J["TUN write"] --> K["OpenWrt"] --> L["LAN host"]
 ```
 
 ---
@@ -729,42 +664,38 @@ The Crypto Abstraction Layer (`internal/mpquic/crypto/`) decouples STRIPES crypt
 
 #### 4.4.1 Package architecture
 
-```
-internal/mpquic/crypto/
-├── crypto.go           # CryptoSession — implements cipher.AEAD; epoch-aware encrypt/decrypt
-├── aead.go             # AEADProvider interface + AESGCMProvider
-├── kex.go              # KeyExchangeProvider interface + KemProvider sub-interface
-├── kex_classical.go    # ClassicalKEXProvider (X25519 + HKDF-SHA-256)
-├── kex_hybrid.go       # HybridKEXProvider (X25519 + ML-KEM-768 + HKDF-SHA-256)
-├── kex_factory.go      # NewKeyExchangeProvider(profile) factory
-├── nonce.go            # NonceManager interface + ContextualNonceManager (per-worker, lock-free)
-├── rekey.go            # RekeyManager (threshold + event triggers, anti-flap 10 s)
-├── external.go         # ExternalCryptoAdapter interface + plugin loader (plugin.Open)
-├── config.go           # CryptoConfig (YAML mapping), Validate()
-├── errors.go           # Domain errors (ErrAuthFailed, ErrRekeyBadEpoch, ErrNonceExhausted, …)
-├── types.go            # CryptoProfile, SessionKeys, EpochID, CryptoMetrics
-└── metrics.go          # Prometheus metrics registration
+```mermaid
+flowchart TD
+    ROOT["internal/mpquic/crypto/"]
+    ROOT --> F1["crypto.go\nCryptoSession — implements cipher.AEAD; epoch-aware encrypt/decrypt"]
+    ROOT --> F2["aead.go\nAEADProvider interface + AESGCMProvider"]
+    ROOT --> F3["kex.go\nKeyExchangeProvider interface + KemProvider sub-interface"]
+    ROOT --> F4["kex_classical.go\nClassicalKEXProvider (X25519 + HKDF-SHA-256)"]
+    ROOT --> F5["kex_hybrid.go\nHybridKEXProvider (X25519 + ML-KEM-768 + HKDF-SHA-256)"]
+    ROOT --> F6["kex_factory.go\nNewKeyExchangeProvider(profile) factory"]
+    ROOT --> F7["nonce.go\nNonceManager interface + ContextualNonceManager (per-worker, lock-free)"]
+    ROOT --> F8["rekey.go\nRekeyManager (threshold + event triggers, anti-flap 10 s)"]
+    ROOT --> F9["external.go\nExternalCryptoAdapter interface + plugin loader (plugin.Open)"]
+    ROOT --> F10["config.go\nCryptoConfig (YAML mapping), Validate()"]
+    ROOT --> F11["errors.go\nDomain errors (ErrAuthFailed, ErrRekeyBadEpoch, ErrNonceExhausted, …)"]
+    ROOT --> F12["types.go\nCryptoProfile, SessionKeys, EpochID, CryptoMetrics"]
+    ROOT --> F13["metrics.go\nPrometheus metrics registration"]
 ```
 
 #### 4.4.2 Component interaction
 
-```
-cmd/mpquic/stripe.go  (data plane)
-        │  cipher.AEAD interface only
-        ▼
-cmd/mpquic/stripe_crypto.go  newStripeCiphers()
-        │
-        │  (StripeCryptoEnabled=true → CAL path)
-        ▼
-internal/mpquic/crypto/  CryptoSession  ─── implements cipher.AEAD
-        │
-        ├── AEADProvider  ──► AESGCMProvider  (crypto/aes, AES-256-GCM)
-        ├── KeyExchangeProvider
-        │     ├── ClassicalKEXProvider   (X25519 + HKDF-SHA-256)
-        │     └── HybridKEXProvider      (X25519 + ML-KEM-768 + HKDF-SHA-256)
-        │           └── KemProvider sub-interface  (ClientEncapsulate)
-        ├── RekeyManager   ── epoch 0..255; threshold + event triggers
-        └── ExternalCryptoAdapter  (plugin.Open → vendor .so)
+```mermaid
+flowchart TD
+    A["cmd/mpquic/stripe.go (data plane)"] -- "cipher.AEAD interface only" --> B["cmd/mpquic/stripe_crypto.go\nnewStripeCiphers()"]
+    B -- "StripeCryptoEnabled=true → CAL path" --> C["internal/mpquic/crypto/ CryptoSession\nimplements cipher.AEAD"]
+    C --> D["AEADProvider"]
+    D --> E["AESGCMProvider\n(crypto/aes, AES-256-GCM)"]
+    C --> F["KeyExchangeProvider"]
+    F --> G["ClassicalKEXProvider\n(X25519 + HKDF-SHA-256)"]
+    F --> H["HybridKEXProvider\n(X25519 + ML-KEM-768 + HKDF-SHA-256)"]
+    H --> I["KemProvider sub-interface\n(ClientEncapsulate)"]
+    C --> J["RekeyManager\nepoch 0..255; threshold + event triggers"]
+    C --> K["ExternalCryptoAdapter\n(plugin.Open → vendor .so)"]
 ```
 
 #### 4.4.3 Cipher profiles
@@ -1698,7 +1629,8 @@ Testing is performed at three levels:
 | 1 | 1 | 2026-06-04 | Crypto Abstraction Layer (CAL) — v5.0. Added: §4.4 CAL architecture (phases A–G, tag v5.0, 58/58 PASS); §5.6 crypto YAML schema; §6.3 six CAL test cases (TC-MPQUIC-CAL-001..006); §3.2 security requirements REQ-MPQUIC-SEC-011..017 (crypto profiles, epoch management, key zeroization); §7 RTM rows for SEC-011..017; §1.3 RD-11 (CIFRANTE_STRIPES.md) and RD-12 (External Provider Spec); acronyms CAL/KEX/KEM/ML-KEM/PQC/HKDF. Security audit (Fasi A–G): SEC-G02 and SEC-G04 fixed; SEC-D01 and SEC-D03 fixed in Phase D; SEC-G01/G03 and SEC-D02/D04 accepted as Phase H deferred items. | Telespazio Engineering Team |
 | 1 | 2 | 2026-07-23 | Incident TS-014 closure — per-WAN policy routing shared-resource fix. Added: §2.2 in-scope component `mpquic-policy-routing.sh`; §4.2.6 new component description with design invariant (per-WAN host route vs. per-tunnel default/blackhole route); §3.3 REQ-MPQUIC-NET-007 (host route decoupled from single-TUN state); §6.2 TC-MPQUIC-NET-001 with field validation numbers (IBLEA-M, 2026-07-22: host route present 38/38 samples post-fix, max 1 consecutive FAIL vs 14/18.4 s pre-fix); §7 RTM row for NET-007. Root cause: `mpquic-policy-routing.sh` conditioned the shared VPS host route in table `wan6` on `have_tun_up(mpq6)`, so stopping the WAN-owning tunnel blackholed the co-located `mp1` tunnel. Open technical debt (non-blocking, tracked outside this document): bats regression test for the TS-014 scenario, `flock` guard on the script. | Telespazio Engineering Team |
 | 1 | 3 | 2026-07-29 | Release `v5.2` (incident TS-031) — client upload pacing and per-flow ordering, in production on IBLEA-M since 2026-07-29. Added: §4.2.7 new component description for the client kernel TX pacing/flow-ordering subsystem (SO_TXTIME/EDT with 15 ms horizon clamp, byte-proportional and per-path-shared pacing budget, pure-ACK exemption with byte charge, per-flow path stickiness, per-pipe health-gated flow affinity, ARQ retransmission dedup); §4.5 three Mermaid diagrams (TX pipeline flowchart, keepalive/health-gating sequence, pacing-rate state diagram); §4.3.1 data flow updated for path/pipe selection and EDT/exempt/clamp/`sch_fq` steps; §3.1 REQ-MPQUIC-SW-021..024 (flow stickiness, sticky fallback, health-gated affinity, ARQ dedup); §3.4 REQ-MPQUIC-PERF-008..013 (SO_TXTIME pacing, byte-proportional and per-path-shared EDT budget, horizon clamp, pure-ACK exemption and byte charge); §3.5 REQ-MPQUIC-CONF-008..012 (`stripe_pacing_rate`, per-path `pacing_rate`, `multipath_flow_sticky`, `stripe_pacing_adaptive`, `sch_fq` prerequisite); §3.6 REQ-MPQUIC-OPS-009/010 (`sch_fq` + `net.core.default_qdisc=fq` persistence, `stripe_fec_mode: off` recommendation on bursty downlinks); §5.1 four new YAML fields; §6.2 TC-MPQUIC-SW-007..009, TC-MPQUIC-PERF-002..005 with bench (TBOX-EVO) and production (IBLEA-M) validation numbers; §7 RTM rows for all of the above; §1.3 RD-13..RD-15; acronyms EDT, AIMD. Root cause (TS-031): the client TX path had neither pacing nor per-flow ordering, so per-packet round-robin across 12–24 pipes and unpaced GSO bursts on a narrow uplink (~50 Mbps) were read by the tunnelled TCP as loss (measured 2,180–5,975 spurious retransmissions against near-zero transport-level loss). Root cause of the initial fix regression (same-day addendum): an unbounded EDT debt saturated the `sch_fq` per-pipe `flow_limit`, causing silent local qdisc drops (479 dropped + 95 `horizon_drops` measured on one WAN) that any loss-based control loop read as congestion; fixed by the 15 ms horizon clamp. A pre-existing but previously latent defect — `stripe_fec_mode: adaptive` forming a positive-feedback loop with downlink congestion (256→132→79 Mbps decay across back-to-back runs) — was uncovered during validation and closed operationally via [REQ-MPQUIC-OPS-010] (`stripe_fec_mode: off` on `mp1`, both sides). Validated on the TBOX-EVO bench with the client's own collaudo method (download 232 Mbps / upload 65 Mbps average over a 30 s soak, zero sessions at 0) and in IBLEA-M production post-deploy (upload 42.9/43.5 Mbps against a 65.4 Mbps physical ceiling — 66%; download 145→163 Mbps against 277 Mbps — 59%). Open, non-blocking: server-side `computeSessionRxLoss` fix ("C2") required before the AIMD pacing controller (`stripe_pacing_adaptive`) can be enabled; download efficiency and single-flow (P1) throughput remain tuning items. | Telespazio Engineering Team |
+| 1 | 4 | 2026-07-29 | Editorial: legacy ASCII architecture diagrams converted to Mermaid, no technical content change. The six remaining box-drawing diagrams predating the v5.2 Mermaid adoption are now Mermaid too: §4.1 component overview (client VM / VPS server, two subgraphs), §4.3.1 client TX data flow, §4.3.2 server RX data flow, §4.3.3 return path data flow, §4.4.1 CAL package file tree, §4.4.2 CAL component interaction. Same components, same arrows, same labels as the ASCII originals — this is a rendering change only, verified by compiling every Mermaid block in the document with mermaid-cli. Left untouched: the key-derivation pseudocode in §4.4.5 (formulas, not diagrams) and all YAML/JSON/ini examples and CLI output elsewhere in the document. | Telespazio Engineering Team |
 
 ---
 
-*End of Document — TPZ-MPQUIC-TDD-001 Issue 1, Rev 3*
+*End of Document — TPZ-MPQUIC-TDD-001 Issue 1, Rev 4*

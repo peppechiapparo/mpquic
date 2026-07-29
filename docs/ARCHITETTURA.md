@@ -87,10 +87,11 @@ Per la lista completa dei parametri YAML per istanza, vedere `docs/INSTALLAZIONE
 #### Livello 1: Multi-link (IMPLEMENTATO)
 Un tunnel QUIC per WAN link fisico. 1:1 mapping. Ogni tunnel trasporta tutto il traffico della LAN associata.
 
-```
-WAN4 (enp7s6) ──── mpq4 ──── 10.200.4.1/30 ↔ 10.200.4.2/30 (:45004)
-WAN5 (enp7s7) ──── mpq5 ──── 10.200.5.1/30 ↔ 10.200.5.2/30 (:45005)
-WAN6 (enp7s8) ──── mpq6 ──── 10.200.6.1/30 ↔ 10.200.6.2/30 (:45006)
+```mermaid
+flowchart LR
+    W4["WAN4 (enp7s6)"] --- Q4["mpq4"] --- T4["10.200.4.1/30 ↔ 10.200.4.2/30 (:45004)"]
+    W5["WAN5 (enp7s7)"] --- Q5["mpq5"] --- T5["10.200.5.1/30 ↔ 10.200.5.2/30 (:45005)"]
+    W6["WAN6 (enp7s8)"] --- Q6["mpq6"] --- T6["10.200.6.1/30 ↔ 10.200.6.2/30 (:45006)"]
 ```
 
 #### Livello 2: Multi-tunnel per link
@@ -98,16 +99,25 @@ N tunnel QUIC sullo STESSO link, ciascuno dedicato a una classe di traffico.
 Il classificatore è esterno (nftables + fwmark + policy routing).
 Tutti i tunnel convergono sulla STESSA porta server e sulla STESSA TUN server.
 
-```
-CLIENT (WAN5)                                         SERVER (:45015)
-  tun-cr5 (10.200.15.1) ─┐                            ┌─ conn_1 ──┐
-  tun-br5 (10.200.15.5) ─┼─── QUIC (diverse src port)─┼─ conn_2 ──┼─ mt5 (10.200.15.0/24)
-  tun-df5 (10.200.15.9) ─┘    same WAN, same dst port ┼─ conn_3 ──┘
-                                                        │
-                                                  routing table:
-                                                  .1 → conn_1
-                                                  .5 → conn_2
-                                                  .9 → conn_3
+```mermaid
+flowchart LR
+    subgraph CL["CLIENT (WAN5)"]
+        cr5["tun-cr5 (10.200.15.1)"]
+        br5["tun-br5 (10.200.15.5)"]
+        df5["tun-df5 (10.200.15.9)"]
+    end
+    subgraph SRV["SERVER (:45015)"]
+        c1["conn_1"]
+        c2["conn_2"]
+        c3["conn_3"]
+        MT["mt5 (10.200.15.0/24)<br/>routing: .1→conn_1 · .5→conn_2 · .9→conn_3"]
+    end
+    cr5 -- "QUIC — src port diversa,<br/>stessa WAN, stessa dst port" --> c1
+    br5 -- "QUIC" --> c2
+    df5 -- "QUIC" --> c3
+    c1 --> MT
+    c2 --> MT
+    c3 --> MT
 ```
 
 **Server multi-connessione**: accetta N connessioni sulla stessa porta.
@@ -130,10 +140,11 @@ Un singolo tunnel può usare N link per resilienza:
 Implementato con codice applicativo `multipathConn` + UDP Stripe + FEC.
 Testato su infra reale: 303 Mbps su 3 link Starlink (12 pipe UDP).
 
-```
-WAN4 (enp7s6) ─── 4 pipe stripe ───┐
-WAN5 (enp7s7) ─── 4 pipe stripe ───┼─── mp1 ─── 10.200.17.1/24 ↔ 10.200.17.254/24
-WAN6 (enp7s8) ─── 4 pipe stripe ───┘
+```mermaid
+flowchart LR
+    W4["WAN4 (enp7s6)"] -- "4 pipe stripe" --> MP1["mp1<br/>10.200.17.1/24 ↔ 10.200.17.254/24"]
+    W5["WAN5 (enp7s7)"] -- "4 pipe stripe" --> MP1
+    W6["WAN6 (enp7s8)"] -- "4 pipe stripe" --> MP1
 ```
 
 ### Architettura multipath applicativa (codice esistente, client)
@@ -249,118 +260,60 @@ Il diagramma seguente mostra il flusso dati completo del trasporto UDP Stripe
 con tutte le ottimizzazioni implementate (FEC adattivo, Hybrid ARQ v2,
 cifratura AES-256-GCM, batch I/O, socket buffer tuning, TX cache).
 
+**Lato client (VM MPQUIC):**
+
+```mermaid
+flowchart TD
+    subgraph ENG["Stripe Engine (stripe.go)"]
+        direction TB
+        FECE["FEC Encoder Reed-Solomon<br/>mode adaptive: M=0 passthrough, M>0 K+M shards"]
+        FECD["FEC Decoder Reed-Solomon<br/>ricostruisce fino a M shard persi"]
+        ENC["AES-256-GCM Encrypt<br/>key: TLS 1.3 Exporter (PFS)"]
+        DEC["AES-256-GCM Decrypt<br/>nonce monotono, anti-replay"]
+        ARQTX["ARQ TX Buffer (ring 4096)<br/>plaintext per re-encrypt+resend su NACK<br/>+ dedup retx per-seq (v5.2)"]
+        ARQRX["ARQ RX Tracker (bitmap 8192)<br/>gap detect, NACK check 5ms<br/>cooldown 30ms, soglia dinamica"]
+        WIRE["Wire Format — header 16B<br/>magic(2)+ver(1)+type(1)+session(4)<br/>+groupSeq(4)+shardIdx(1)+dataN(1)+dataLen(2)<br/>+ payload cifrato"]
+    end
+    TUN["TUN mp1<br/>10.200.17.1/24"] -- "TUN read" --> FECE
+    FECD -- "TUN write" --> TUN
+    FECE --> ENC --> ARQTX --> WIRE
+    DEC --> ARQRX
+    ARQRX --> FECD
+    WIRE --> DEC
+    subgraph W5["WAN5 (enp7s7, Starlink) — SO_BINDTODEVICE, socket buffer 7MB RX+TX"]
+        P0["Pipe 0..11 (UDP :rand)<br/>Starlink vede 12 sessioni UDP indipendenti<br/>(~80 Mbps cap ciascuna)"]
+    end
+    subgraph W6["WAN6 (enp7s8, Starlink) — struttura identica"]
+        P1["Pipe 0..11 (UDP :rand)"]
+    end
+    WIRE -- "TX: round-robin<br/>o per-flusso (v5.2)" --> W5
+    WIRE --> W6
+    W5 -- "RX batch I/O<br/>recvmmsg 8 dgram/syscall" --> WIRE
+    W6 --> WIRE
+    W5 -.->|"totale 24 pipe<br/>2 path × 12"| INET(("Internet<br/>Starlink LEO"))
+    W6 -.-> INET
 ```
-╔═════════════════════════════════════════════════════════════════════════════════╗
-║                          CLIENT (VM MPQUIC)                                     ║
-╠═════════════════════════════════════════════════════════════════════════════════╣
-║                                                                                 ║
-║  ┌──────────┐     ┌──────────────────────────────────────────────────┐          ║
-║  │ TUN mp1  │     │            Stripe Engine (stripe.go)             │          ║
-║  │ 10.200.  │     │                                                  │          ║
-║  │ 17.1/24  │     │  ┌─────────────────┐   ┌──────────────────────┐  │          ║
-║  │          │◄───▶│  │  FEC Encoder     │   │   FEC Decoder       │  │          ║
-║  │ TUN read │────▶│  │  (Reed-Solomon)  │   │   (Reed-Solomon)    │──┼──▶TUN    ║
-║  │          │     │  │                  │   │                     │  │   write  ║
-║  │          │     │  │  Mode: adaptive  │   │  Reconstruct if     │  │          ║
-║  │          │     │  │  M=0: passthrough│   │  shards missing     │  │          ║
-║  │          │     │  │  M>0: K+M shards │   │  (up to M losses)   │  │          ║
-║  │          │     │  └────────┬─────────┘   └──────────▲──────────┘  │          ║
-║  └──────────┘     │           │                        │             │          ║
-║                   │           ▼                        │             │          ║
-║                   │  ┌─────────────────┐   ┌──────────┴────────┐     │          ║
-║                   │  │  AES-256-GCM    │   │   AES-256-GCM     │     │          ║
-║                   │  │  Encrypt        │   │   Decrypt         │     │          ║
-║                   │  │                 │   │                   │     │          ║
-║                   │  │  Key: TLS 1.3   │   │  Nonce monotono   │     │          ║
-║                   │  │  Exporter (PFS) │   │  (anti-replay)    │     │          ║
-║                   │  └────────┬────────┘   └──────────▲────────┘     │          ║
-║                   │           │                        │             │          ║
-║                   │           ▼                        │             │          ║
-║                   │  ┌─────────────────┐   ┌──────────┴────────┐     │          ║
-║                   │  │  ARQ TX Buffer  │   │  ARQ RX Tracker   │     │          ║
-║                   │  │  (ring 4096)    │   │  (bitmap 8192)    │     │          ║
-║                   │  │                 │   │                   │     │          ║
-║                   │  │  Stores plain-  │   │  Detects gaps,    │     │          ║
-║                   │  │  text for re-   │   │  sends NACK every │     │          ║
-║                   │  │  encrypt+resend │   │  5ms (rate limit  │     │          ║
-║                   │  │  on NACK recv   │   │  30ms, thresh 96) │     │          ║
-║                   │  └────────┬────────┘   └──────────▲────────┘     │          ║
-║                   │           │                        │             │          ║
-║                   │           ▼              Dedup     │             │          ║
-║                   │  ┌────────────────────────────────────────┐      │          ║
-║                   │  │        Wire Format (16B header)        │      │          ║
-║                   │  │  magic(2)+ver(1)+type(1)+session(4)    │      │          ║
-║                   │  │  +groupSeq(4)+shardIdx(1)+dataN(1)     │      │          ║
-║                   │  │  +dataLen(2) + [encrypted payload]     │      │          ║
-║                   │  └────────────────┬───────────────────────┘      │          ║
-║                   └───────────────────┼──────────────────────────────┘          ║
-║                                       │ ▲                                       ║
-║                          TX round-    │ │  RX batch I/O                         ║
-║                          robin        │ │  (recvmmsg, 8 dgram/syscall)          ║
-║                                       ▼ │                                       ║
-║  ┌─── WAN5 (enp7s7, Starlink) ──────────────────────────────┐                   ║
-║  │  SO_BINDTODEVICE + Socket Buffers 7 MB (RX+TX)           │                   ║
-║  │                                                          │                   ║
-║  │  Pipe 0  (UDP :rand) ──────┐                             │                   ║
-║  │  Pipe 1  (UDP :rand) ──────┤                             │                   ║
-║  │  Pipe 2  (UDP :rand) ──────┤                             │                   ║
-║  │  Pipe 3  (UDP :rand) ──────┤                             │                   ║
-║  │  Pipe 4  (UDP :rand) ──────┤  ◀── Starlink vede 12       │                   ║
-║  │  Pipe 5  (UDP :rand) ──────┤      sessioni UDP           │                   ║
-║  │  Pipe 6  (UDP :rand) ──────┤      indipendenti           │                   ║
-║  │  Pipe 7  (UDP :rand) ──────┤      (~80 Mbps cap/each)    │                   ║
-║  │  Pipe 8  (UDP :rand) ──────┤                             │                   ║
-║  │  Pipe 9  (UDP :rand) ──────┤                             │                   ║
-║  │  Pipe 10 (UDP :rand) ──────┤                             │                   ║
-║  │  Pipe 11 (UDP :rand) ──────┘                             │                   ║
-║  └──────────────────────────────────────────────────────────┘                   ║
-║                                                                                 ║
-║  ┌─── WAN6 (enp7s8, Starlink) ────────────────────────────┐                     ║
-║  │  SO_BINDTODEVICE + Socket Buffers 7 MB (RX+TX)         │                     ║
-║  │                                                        │                     ║
-║  │  Pipe 0..11 (UDP :rand) ── identica struttura ──       │                     ║
-║  └────────────────────────────────────────────────────────┘                     ║
-║                                                                                 ║
-║  Totale: 24 pipe UDP ── 2 path × 12 pipe                                        ║
-╚═════════════════════════════════════════════════════════════════════════════════╝
-                              │ │                     ▲ ▲
-                              │ │    Internet         │ │
-                              ▼ ▼    (Starlink LEO)   │ │
-╔══════════════════════════════════════════════════════════════════════════════╗
-║                     SERVER VPS (172.238.232.223)                             ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║                                                                              ║
-║  ┌─── UDP Listener :46017 ────────────────────────────────────┐              ║
-║  │  Socket Buffers 7 MB (RX+TX) + Batch I/O (recvmmsg)        │              ║
-║  │                                                            │              ║
-║  │  Riceve da tutte le 24 pipe client su un unico socket      │              ║
-║  │  Demultiplex per session ID (ipToUint32 ^ fnv32a(path))    │              ║
-║  └───────────────────────────┬────────────────────────────────┘              ║
-║                              │                                               ║
-║                              ▼                                               ║
-║  ┌───────────────────────────────────────────────────────────┐               ║
-║  │               Stripe Session (per path)                   │               ║
-║  │                                                           │               ║
-║  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐    │               ║
-║  │  │ AES-256-GCM │  │ FEC Decoder  │  │ ARQ RX Tracker │    │               ║
-║  │  │ Decrypt     │  │ Reconstruct  │  │ NACK generator │    │               ║
-║  │  └──────┬──────┘  └──────┬───────┘  └───────┬────────┘    │               ║
-║  │         │               │                    │            │               ║
-║  │         ▼               ▼                    ▼            │               ║
-║  │  ┌─────────────────────────────────────────────────┐      │               ║
-║  │  │  TUN write ──▶ mp1 (10.200.17.254/24)           │      │               ║
-║  │  └─────────────────────────────────────────────────┘      │               ║
-║  │                                                           │               ║
-║  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐    │               ║
-║  │  │ TUN read    │  │ FEC Encoder  │  │ AES-256-GCM    │    │               ║
-║  │  │ mp1 ────────┼─▶│ (adaptive)  ─┼─▶│ Encrypt       ─┼────┼──▶ TX         ║
-║  │  └─────────────┘  └──────────────┘  └────────────────┘    │               ║
-║  │                                                           │               ║
-║  │  TX dispatch: txActivePipes cache (zero-alloc)            │               ║
-║  │  Flow-hash FNV-1a (5-tupla) → sessione per flusso TCP     │               ║
-║  └───────────────────────────────────────────────────────────┘               ║
-║                                                                              ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+
+**Lato server (VPS 172.238.232.223):**
+
+```mermaid
+flowchart TD
+    INET(("Internet")) --> L
+    L["UDP Listener :46017<br/>socket buffer 7MB + batch I/O recvmmsg<br/>riceve tutte le 24 pipe su un unico socket<br/>demux per session ID: ipToUint32 XOR fnv32a(path)"]
+    subgraph SESS["Stripe Session (per path)"]
+        SDEC["AES-256-GCM Decrypt"]
+        SFECD["FEC Decoder / Reconstruct"]
+        SARQ["ARQ RX Tracker / NACK generator"]
+        TUNW["TUN write → mp1 (10.200.17.254/24)"]
+        TUNR["TUN read mp1"]
+        SFECE["FEC Encoder (adaptive)"]
+        SENC["AES-256-GCM Encrypt"]
+        DISP["TX dispatch: cache txActivePipes (zero-alloc)<br/>flow-hash FNV-1a sul 5-tuple → sessione per flusso TCP"]
+    end
+    L --> SDEC
+    SDEC --> SARQ
+    SDEC --> SFECD --> TUNW
+    TUNR --> SFECE --> SENC --> DISP --> INET
 ```
 
 ##### Legenda componenti
@@ -542,33 +495,12 @@ usati nella demo; questo non indica un fault se pianificato.
 
 ### 4. Topologia di Rete
 
-```
-              Internet
-                 |
-         ┌────────────────┐
-         │  VPS Server    │
-         │ 172.238.232.223│
-         └───────┬────────┘
-                 │ QUIC tunnels (UDP)
-     ┌───────────┼───────────┐
-     │ WAN5      │ WAN6      │ ... WAN1-4
-     │ enp7s7    │ enp7s8    │
-┌────┴───────────┴───────────┴────┐
-│         VM MPQUIC               │
-│         10.10.11.100            │
-│  TUN: mpq1-6, mp1, cr/br/df     │
-│  Services: mpquic@*, mgmt, etc  │
-└────────────┬────────────────────┘
-             │ LAN transit 172.16.x.0/30
-             │ VLAN trunk (enp6s20.17 per mp1)
-┌────────────┴────────────────────┐
-│         OpenWrt Router          │
-│         10.10.11.254            │
-│  mwan3, nftables, VLAN, LuCI    │
-│  Interfaces: SL1-6, BOND1       │
-└────────────┬────────────────────┘
-             │ LAN
-         Rete locale
+```mermaid
+flowchart TD
+    NET(("Internet")) --- VPS["VPS Server<br/>172.238.232.223"]
+    VPS -- "QUIC tunnels (UDP)<br/>WAN5 enp7s7 · WAN6 enp7s8 · WAN1-4" --- VM["VM MPQUIC — 10.10.11.100<br/>TUN: mpq1-6, mp1, cr/br/df<br/>services: mpquic@*, mgmt"]
+    VM -- "LAN transit 172.16.x.0/30<br/>VLAN trunk (enp6s20.17 per mp1)" --- OWRT["OpenWrt Router — 10.10.11.254<br/>mwan3, nftables, VLAN, LuCI<br/>interfaces: SL1-6, BOND1"]
+    OWRT -- "LAN" --- LOC["Rete locale"]
 ```
 
 ---
@@ -960,44 +892,25 @@ Questo permette a un orchestrator di verificare che le policy QoS siano realment
 
 ### Panoramica architettura
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Layer 3: Consumer (Fase 5.2)                               │
-│  ┌───────────┐  ┌────────────┐  ┌─────────────────────────┐ │
-│  │  Grafana  │  │ Alerting   │  │  AI/ML Engine (Fase 6)  │ │
-│  │ Dashboard │  │ (rules)    │  │  Quality on Demand      │ │
-│  └─────┬─────┘  └─────┬──────┘  └──────────┬──────────────┘ │
-│        │              │                    │                │
-│        └──────────────┼────────────────────┘                │
-│                       │                                     │
-│              ┌────────▼────────┐                            │
-│              │   Prometheus    │                            │
-│              │  (scrape ogni   │                            │
-│              │   15s–30s)      │                            │
-│              └────────┬────────┘                            │
-├───────────────────────┼─────────────────────────────────────┤
-│  Layer 2: Export      │                                     │
-│  ┌────────────────────▼─────────────────────────────────┐   │
-│  │  HTTP Server (tunnel_ip:9090)                        │   │
-│  │                                                      │   │
-│  │  GET /metrics       → Prometheus text exposition     │   │
-│  │  GET /api/v1/stats  → JSON strutturato               │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                             │
-├─────────────────────────────────────────────────────────────┤
-│  Layer 1: Collection (nel dataplane hot path)               │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  sync/atomic counters — zero-alloc, zero-lock        │   │
-│  │                                                      │   │
-│  │  Server (per-session):                               │   │
-│  │    tx/rx bytes, tx/rx pkts, FEC encode/recover,      │   │
-│  │    ARQ nack/retx/dup, loss rate, decrypt failures    │   │
-│  │                                                      │   │
-│  │  Client (per-path):                                  │   │
-│  │    tx/rx pkts, stripe tx/rx bytes/pkts,              │   │
-│  │    stripe FEC recovered, path alive status           │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph L3["Layer 3: Consumer (Fase 5.2)"]
+        G["Grafana Dashboard"]
+        AL["Alerting (rules)"]
+        AI["AI/ML Engine (Fase 6)<br/>Quality on Demand"]
+    end
+    P["Prometheus<br/>scrape ogni 15-30s"]
+    subgraph L2["Layer 2: Export"]
+        H["HTTP Server (tunnel_ip:9090)<br/>GET /metrics → Prometheus text<br/>GET /api/v1/stats → JSON"]
+    end
+    subgraph L1["Layer 1: Collection (dataplane hot path)"]
+        C["contatori sync/atomic — zero-alloc, zero-lock<br/>Server per-session: tx/rx bytes+pkts, FEC encode/recover,<br/>ARQ nack/retx/dup, loss rate, decrypt failures<br/>Client per-path: tx/rx pkts, stripe bytes/pkts,<br/>FEC recovered, path alive"]
+    end
+    G --> P
+    AL --> P
+    AI --> P
+    P --> H
+    H --> C
 ```
 
 **Principi di design:**
@@ -1477,44 +1390,22 @@ L'obiettivo è consentire al NOC/SOC di monitorare in tempo reale:
 
 ### 2. Architettura di Integrazione
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  TBOX (Nave / Sito remoto)                                       │
-│                                                                  │
-│  ┌─────────────────────────────────────────────┐                 │
-│  │  mpquic client (dataplane)                  │                 │
-│  │                                             │                 │
-│  │  wan5 (VSAT)      wan6 (Starlink)           │                 │
-│  │    ▲                  ▲                     │                 │
-│  │    │  UDP stripe      │  UDP stripe         │                 │
-│  │    └──────┬───────────┘                     │                 │
-│  │           │                                 │                 │
-│  │  ┌────────▼────────────┐                    │                 │
-│  │  │  Metrics HTTP       │                    │                 │
-│  │  │  <tun_ip>:9090      │                    │                 │
-│  │  │                     │                    │                 │
-│  │  │  GET /metrics  ←────┼── Prometheus text  │                 │
-│  │  │  GET /api/v1/stats ─┼── JSON             │                 │
-│  │  └─────────────────────┘                    │                 │
-│  └─────────────────────────────────────────────┘                 │
-└──────────────────────┬───────────────────────────────────────────┘
-                       │  Tunnel IP / ZeroTier / VPN
-                       │
-┌──────────────────────▼───────────────────────────────────────────┐
-│  NOC / Data Center                                               │
-│                                                                  │
-│  ┌──────────────┐     ┌──────────────┐     ┌──────────────────┐ │
-│  │   Zabbix     │────▶│  HTTP Agent  │────▶│ /metrics         │ │
-│  │   Server     │     │  (scrape)    │     │ endpoint TBOX    │ │
-│  │              │     └──────────────┘     └──────────────────┘ │
-│  │              │                                               │
-│  │  ┌────────┐  │     ┌──────────────┐                          │
-│  │  │ Items  │◀─┼─────│ Preprocessing│                          │
-│  │  │Triggers│  │     │ Prometheus   │                          │
-│  │  │ Graphs │  │     │ pattern      │                          │
-│  │  └────────┘  │     └──────────────┘                          │
-│  └──────────────┘                                               │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph TBOX["TBOX (Nave / Sito remoto)"]
+        DP["mpquic client (dataplane)<br/>wan5 VSAT · wan6 Starlink<br/>UDP stripe"]
+        MH["Metrics HTTP tun_ip:9090<br/>GET /metrics → Prometheus text<br/>GET /api/v1/stats → JSON"]
+        DP --> MH
+    end
+    subgraph NOC["NOC / Data Center"]
+        Z["Zabbix Server<br/>Items · Triggers · Graphs"]
+        HA["HTTP Agent (scrape)"]
+        PP["Preprocessing<br/>pattern Prometheus"]
+        Z --> HA
+        PP --> Z
+        HA --> PP
+    end
+    HA -- "Tunnel IP / ZeroTier / VPN" --> MH
 ```
 
 #### Flusso dati
@@ -3355,34 +3246,20 @@ Per la lista completa delle metriche Prometheus (globali, per sessione, per path
 
 #### 22.1 Architettura
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Proxmox Host (10.10.11.2)                                  │
-│                                                             │
-│  ┌───────────────────┐    ┌─────────────────────────────┐   │
-│  │ CT 201 Prometheus │    │  CT 202 Grafana             │   │
-│  │ 10.10.11.201      │    │  10.10.11.202               │   │
-│  │ :9090 (web+scrape)│◄───│  :3000 (dashboard)          │   │
-│  └────────┬─────────┘     └─────────────────────────────┘   │
-│           │                                                 │
-│           │ scrape ogni 5s                                  │
-│           ▼                                                 │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  VM 200 (10.10.11.100) — Client MPQUIC               │   │
-│  │  Gateway per subnet tunnel 10.200.x.0/24             │   │
-│  │                                                      │   │
-│  │  10.200.17.1:9090  (mp1 client)                      │   │
-│  │  10.200.14.1:9090  (cr4)   10.200.15.1:9090 (cr5)    │   │
-│  │  10.200.16.1:9090  (cr5)   10.200.10.1:9090 (cr6)    │   │
-│  └──────────────────────────────────────────────────────┘   │
-│           │                                                 │
-│           │ tunnel QUIC/stripe                              │
-│           ▼                                                 │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  VPS Server (172.238.232.223)                        │   │
-│  │  10.200.17.254:9090 (mp1 server)                     │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph PX["Proxmox Host (10.10.11.2)"]
+        CT2["CT 202 Grafana<br/>10.10.11.202:3000"]
+        CT1["CT 201 Prometheus<br/>10.10.11.201:9090 (web+scrape)"]
+        subgraph VM200["VM 200 (10.10.11.100) — Client MPQUIC<br/>gateway per le subnet tunnel 10.200.x.0/24"]
+            E1["10.200.17.1:9090 — mp1 client"]
+            E2["10.200.14.1 / 10.200.15.1 / 10.200.16.1 / 10.200.10.1<br/>:9090 — istanze cr*"]
+        end
+    end
+    VPS["VPS Server (172.238.232.223)<br/>10.200.17.254:9090 — mp1 server"]
+    CT2 --> CT1
+    CT1 -- "scrape ogni 5s" --> VM200
+    VM200 -- "tunnel QUIC/stripe" --> VPS
 ```
 
 **Decisione chiave**: il gateway dei container è VM 200 (`10.10.11.100`), non il Proxmox host.
@@ -3923,17 +3800,17 @@ con i tunnel in esecuzione.
 
 #### 24.2 Architettura
 
-```
-┌────────────────────┐     ┌─────────────────────────────────────────────┐
-│ OpenWrt (LuCI)     │     │ TBOX (10.10.11.100)                         │
-│ 10.10.11.254       │────▶│                                             │
-│  rpcd → ubus       │     │  mpquic-mgmt :8080 ◀── Bearer token auth    │
-└────────────────────┘     │       │                                     │
-                           │       ├─▶ systemctl start/stop/restart      │
-┌────────────────────┐     │       ├─▶ /etc/mpquic/instances/*.yaml      │
-│ Operatore (curl)   │────▶│       ├─▶ mpquic@{name} journalctl          │
-└────────────────────┘     │       └─▶ {tunnel}:9090/api/v1/stats proxy  │
-                           └─────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    LUCI["OpenWrt LuCI — 10.10.11.254<br/>rpcd → ubus"] --> MGMT
+    OP["Operatore (curl)"] --> MGMT
+    subgraph TB["TBOX (10.10.11.100)"]
+        MGMT["mpquic-mgmt :8080<br/>Bearer token auth"]
+        MGMT --> A1["systemctl start/stop/restart"]
+        MGMT --> A2["/etc/mpquic/instances/*.yaml"]
+        MGMT --> A3["journalctl mpquic@{name}"]
+        MGMT --> A4["{tunnel}:9090/api/v1/stats proxy"]
+    end
 ```
 
 #### 24.3 Build
@@ -4953,23 +4830,23 @@ internal/mpquic/crypto/
 
 ### Separazione responsabilità KEX vs AEAD
 
-```
-┌────────────────────────────────────────────────────────────┐
-│                    Una volta per sessione                   │
-│                                                            │
-│  KeyExchangeProvider.GenerateKeyPair()                     │
-│  [+ KemProvider.ClientEncapsulate()] ← solo profilo hybrid │
-│  KeyExchangeProvider.DeriveSessionKeys()                   │
-│       → SessionKeys {ClientKey, ServerKey, ClientIV, ServerIV} │
-└───────────────────────┬────────────────────────────────────┘
-                        │ SessionKeys (88 byte totali)
-┌───────────────────────▼────────────────────────────────────┐
-│                  Per ogni pacchetto (hot path)              │
-│                                                            │
-│  NonceManager.NextNonce(workerID) → nonce[12]              │
-│  AEADProvider.NewAEAD(ClientKey/ServerKey) → cipher.AEAD   │
-│  aead.Seal(dst, nonce, plaintext, AAD)     → ciphertext    │
-└────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph ONCE["Una volta per sessione"]
+        K1["KeyExchangeProvider.GenerateKeyPair()"]
+        K2["KemProvider.ClientEncapsulate()<br/>(solo profilo hybrid)"]
+        K3["KeyExchangeProvider.DeriveSessionKeys()<br/>→ SessionKeys: ClientKey, ServerKey, ClientIV, ServerIV"]
+        K1 --> K3
+        K2 --> K3
+    end
+    subgraph HOT["Per ogni pacchetto (hot path)"]
+        N["NonceManager.NextNonce(workerID) → nonce[12]"]
+        A["AEADProvider.NewAEAD(ClientKey/ServerKey) → cipher.AEAD"]
+        SEAL["aead.Seal(dst, nonce, plaintext, AAD) → ciphertext"]
+        N --> SEAL
+        A --> SEAL
+    end
+    K3 -- "SessionKeys (88 byte totali)" --> HOT
 ```
 
 **Importante**: `encrypted=AES-256-GCM` nel log STRIPES indica il cifrante **per-pacchetto** (hot path). Cambiare il profilo da `performance` a `hybrid_security` non cambia questa dicitura — cambia il meccanismo di derivazione delle chiavi AES-256, non il cifrante stesso.
