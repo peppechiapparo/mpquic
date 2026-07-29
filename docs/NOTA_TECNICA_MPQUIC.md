@@ -2247,3 +2247,25 @@ multipath), consultare:
 ---
 
 *Nota commerciale estratta in: docs/NOTA_COMMERCIALE.md*
+
+---
+
+## Addendum 2026-07-29 — Campagna TS-031 e release v5.2 (upload STRIPES)
+
+I test di questa nota precedono la release `v5.2`. La campagna TS-031 (banco TBOX-EVO +
+produzione IBLEA-M) ha risolto il deficit strutturale della direzione in salita e il
+decadimento del download nei run consecutivi. Sintesi dei risultati col metodo di collaudo
+del cliente (router OpenWrt → `mwan3 use BOND1` → IP pubblico del VPS, tetto fisico misurato
+nello stesso minuto):
+
+| Ambiente | Download | Upload |
+|---|---|---|
+| Banco EVO (soak 30s) | 232 Mbit medi (min 163) | 65 Mbit medi (min 48, zero stalli) |
+| IBLEA-M (back-to-back) | 145→163 (prima: decadeva) | 42.9/43.5 = 66% del fisico 65.4 (prima: 22.7 → ~1) |
+
+Cause e rimedi (pacing `sch_fq` con clamp dell'orizzonte EDT, ordinamento per-flusso,
+esenzione ACK-puri, FEC adattiva off su mp1) sono documentati in `ARCHITETTURA.md` §9 (con
+diagrammi), `TROUBLESHOOTING_HISTORY.md` TS-031 e nel TDD ECSS `TPZ-MPQUIC-TDD-001.md`.
+I protocolli di test di questa nota restano validi; per i collaudi di throughput adottare
+in aggiunta il metodo TS-031: run back-to-back e sostenuti (≥30 s) dal punto di osservazione
+dell'utente, mai un singolo run dopo idle.

@@ -1,5 +1,31 @@
 # Changelog implementazione (replicabile TBOX)
 
+## 2026-07-29 — v5.2: upload STRIPES risolto (TS-031) — pacing sch_fq, ordinamento per-flusso, FEC adaptive off su mp1
+
+Dettaglio completo in `TROUBLESHOOTING_HISTORY.md` (TS-031 + addendum); spiegazione architetturale con diagrammi in `ARCHITETTURA.md` §9. Tag `v5.2` (branch `feat/ts031-upload-pacing`, 9 commit da `3a31bf9`, binario `60965c62`). In produzione IBLEA-M (VPS + client VM200, backup `.bak-ts031-v52`, dead-man usato e disarmato).
+
+**Modifiche (cmd/mpquic):**
+- `stripe_client.go` — pacing kernel SO_TXTIME: EDT avanzato a byte, clock condiviso per path, **clamp orizzonte 15ms** (`edtClamped`); esenzione stamp per ACK puri con byte comunque addebitati (`txtimeChargeLocked`, `pacedExemptByte`); `dynamicPacingLoop` AIMD su `peerLossRate` dietro flag `stripe_pacing_adaptive` (default off, segnale server da sistemare — C2); flow-affinity client con **health-gating per-pipe** (`pipeHealthyMask` dall'eco keepalive 1Hz, `refreshPipeHealthMask`); SO_MAX_PACING_RATE a rate pieno per socket (backstop dei non stampati).
+- `client.go` — `multipath_flow_sticky` (default off): tie-break per-flusso (FNV-1a 5-tuple) sui candidati a score **strutturale** (senza `consecutiveFails`); retry post-errore sulla selezione classica.
+- `stripe_arq.go` — dedup ritrasmissioni: stesso seq max 1 retx/100ms (`shouldRetx`).
+- `stripe.go` — `isPureAck()` (IPv4/IPv6, TCP, zero payload, no SYN/FIN/RST), costanti `stripeEDTHorizonNs`/`stripePacedRefBytes`.
+- `config.go` — nuove chiavi: `pacing_rate` per-path, `multipath_flow_sticky`, `stripe_pacing_adaptive`.
+
+**Config/sistema (replicabile):**
+- mp1.yaml ENTRAMBI i lati: `stripe_fec_mode: off` (la FEC adattiva su downlink bursty è un cricchetto: prova a tripletta fisico/adaptive/off — solo off è stabile back-to-back).
+- Client: `stripe_pacing_rate: 80` (IBLEA single-path); banco EVO dual-path: cap per-path 25/80 + `multipath_flow_sticky/stripe_flow_affinity: true`.
+- WAN: `tc qdisc replace dev <wan> root fq` + `net.core.default_qdisc=fq` in sysctl.d (SENZA sch_fq il pacing è un no-op silenzioso; `tc -s qdisc`: dropped/horizon_drops sono le spie del debito EDT).
+
+**Test/validazione (Verification Gate, metodo del cliente: OpenWrt → `mwan3 use BOND1` → IP pubblico, tetto fisico same-minute):**
+- Unit: `edt_pacing_test.go` (debito ≤ orizzonte a offerta 10x, addebito esenti, tabella isPureAck), `flow_path_affinity_test.go`, `pipe_health_test.go`; `go test -race` verde.
+- Banco EVO: down 232 medi su soak 30s (min 163), up 65 medi (min 48.2), zero sessioni a 0, ri-verificato in 3 finestre orarie.
+- IBLEA-M: up 42.9/43.5 back-to-back = 66% del fisico 65.4 (prima 22.7 → ~1 con 2180 retx); down 145→163 back-to-back (niente cricchetto) vs fisico 277.
+
+**Insidie di metodo documentate (per i prossimi collaudi):** validare SEMPRE dal punto di osservazione dell'utente (la prima chiusura di TS-031 era un falso successo: numeri veri, misurati dal posto sbagliato); run back-to-back e sostenuti, mai solo il primo run dopo idle (la FEC adaptive si rilassa in idle e maschera il cricchetto).
+
+**Aperti:** C2 (`computeSessionRxLoss` idempotente in finestra) per riattivare l'AIMD; maxOOO del tracker da depurare dei seq NACKati; retx sulla pipe originale; metriche pacing su Prometheus; single-flow P1; allineamento binario delle istanze non-mp1 (girano ancora col precedente in RAM).
+
+
 ## 2026-07-23 — IBLEA-M: revert regressione STRIPES aggregato (TS-016)
 
 Dettaglio completo in `TROUBLESHOOTING_HISTORY.md` (TS-016).

@@ -9,12 +9,12 @@
 |-------|--------|
 | Document ID | TPZ-MPQUIC-TDD-001 |
 | Issue | 1 |
-| Revision | 2 |
+| Revision | 3 |
 | Status | Draft |
 | Author | Telespazio Engineering Team |
 | Reviewed by | Tech Lead |
 | Approved by | — |
-| Date | 2026-07-23 |
+| Date | 2026-07-29 |
 | Classification | Internal |
 | Applicable standards | ECSS-E-ST-40C, ECSS-Q-ST-80C |
 
@@ -44,6 +44,7 @@
    - 4.2 [Component Descriptions](#42-component-descriptions)
    - 4.3 [Data Flow](#43-data-flow)
    - 4.4 [Crypto Abstraction Layer (CAL)](#44-crypto-abstraction-layer-cal)
+   - 4.5 [Client TX Pacing and Flow-Ordering Pipeline (v5.2)](#45-client-tx-pacing-and-flow-ordering-pipeline-v52)
 5. [Interface Design](#5-interface-design)
    - 5.1 [YAML Instance Configuration](#51-yaml-instance-configuration)
    - 5.2 [Systemd Service Interface](#52-systemd-service-interface)
@@ -102,17 +103,22 @@ This document does **not** cover: OpenWrt mwan3 configuration, nftables firewall
 | RD-10 | Systemd service template | `deploy/systemd/mpquic@.service` |
 | RD-11 | Crypto Abstraction Layer design document | `docs/CIFRANTE_STRIPES.md` |
 | RD-12 | STRIPES External Crypto Provider Specification | `docs/STRIPES_External_Crypto_Provider_Spec.md` |
+| RD-13 | Client kernel TX pacing (SO_TXTIME/EDT) | `cmd/mpquic/stripe_txtime_linux.go` |
+| RD-14 | Multipath client scheduler and per-flow path stickiness | `cmd/mpquic/client.go`, `cmd/mpquic/stripe_affinity.go` |
+| RD-15 | Troubleshooting record for release v5.2 (TS-031) | `docs/TROUBLESHOOTING_HISTORY.md` |
 
 ### 1.4 Acronyms and Abbreviations
 
 | Term | Definition |
 |------|------------|
+| AIMD | Additive Increase / Multiplicative Decrease (adaptive rate control) |
 | ARQ | Automatic Repeat reQuest |
 | AES-GCM | Advanced Encryption Standard — Galois/Counter Mode |
 | BBR | Bottleneck Bandwidth and RTT (congestion control algorithm) |
 | CAL | Crypto Abstraction Layer |
 | CC | Congestion Control |
 | ECSS | European Cooperation for Space Standardization |
+| EDT | Early Departure Time (kernel TX pacing timestamp, `SO_TXTIME`/`SCM_TXTIME`) |
 | FEC | Forward Error Correction |
 | GEO | Geostationary Earth Orbit |
 | GSO | Generic Segmentation Offload |
@@ -261,6 +267,14 @@ Operator runs `mpquic-update.sh`. The script performs: git pull, binary rebuild,
 
 **[REQ-MPQUIC-SW-020]** The system shall support a token-bucket rate limiter (`stripePacer`) per stripe session to spread TX writes over time and prevent burst-induced retransmissions; the pacer shall be disabled when `stripe_rate_mbps` is not configured.
 
+**[REQ-MPQUIC-SW-021]** When `multipath_flow_sticky: true`, the multipath client shall assign each internal flow, identified by a hash of the 5-tuple of the tunnelled packet, to a single path among the candidates sharing the minimum structural score (path `priority` and `weight`, excluding the transient `consecutiveFails` penalty), keeping that flow pinned to the same path for as long as the candidate set is unchanged.
+
+**[REQ-MPQUIC-SW-022]** When a TX send error occurs on the path selected for a sticky-pinned flow, the multipath client shall retry the send using the standard path-selection scoring (including the `consecutiveFails` penalty) for that attempt, without re-pinning the flow to the failed path.
+
+**[REQ-MPQUIC-SW-023]** The client stripe engine shall maintain a per-pipe health mask, recomputed on every keepalive tick from the timestamp of the last packet received on each pipe; pipe selection for flow-affinity (`stripe_flow_affinity`) shall be restricted to pipes marked healthy in this mask, and an all-unhealthy mask shall cause the engine to select among all pipes rather than suspend transmission.
+
+**[REQ-MPQUIC-SW-024]** The Hybrid ARQ TX subsystem shall not retransmit the same FEC GroupSeq more than once within a 100 ms interval, to prevent duplicate shard delivery caused by repeated NACKs for the same gap arriving faster than the round-trip time.
+
 ### 3.2 Security Requirements
 
 **[REQ-MPQUIC-SEC-001]** The QUIC transport shall use TLS 1.3 for all connections; the TLS handshake shall provide mutual peer authentication and session key establishment for all tunnel instances.
@@ -329,6 +343,18 @@ Operator runs `mpquic-update.sh`. The script performs: git pull, binary rebuild,
 
 **[REQ-MPQUIC-PERF-007]** The stripe session timeout without received traffic shall be 30 seconds; the client-to-server keepalive interval shall be 1 second; the server shall respond to keepalives only for known sessions.
 
+**[REQ-MPQUIC-PERF-008]** The client TX subsystem shall support kernel-level packet pacing via `SO_TXTIME`/`SCM_TXTIME` (Early Departure Time, `CLOCK_MONOTONIC`) on each pipe socket, with `SO_MAX_PACING_RATE` configured on the same socket as a backstop for any packet transmitted without an explicit EDT timestamp.
+
+**[REQ-MPQUIC-PERF-009]** The EDT pacing budget shall be advanced in proportion to the number of bytes transmitted (gap = packet length / 1402-byte shard-equivalent), not per packet, so that small non-data segments are not delayed by the same amount as full-size shards.
+
+**[REQ-MPQUIC-PERF-010]** The EDT pacing budget shall be shared across all pipes belonging to the same path, not allocated independently per pipe, so that the configured pacing rate reflects the aggregate capacity of the path rather than a fraction of it per pipe.
+
+**[REQ-MPQUIC-PERF-011]** The EDT debt, defined as the scheduled transmit time minus the current time, shall never exceed 15 ms; when advancing the budget would exceed this horizon, the pacer shall clamp the EDT to `now + 15 ms` and increment a dedicated counter, rather than allow the local queuing discipline to accumulate an unbounded backlog.
+
+**[REQ-MPQUIC-PERF-012]** The client TX subsystem shall exempt pure TCP acknowledgement segments of the tunnelled inner flow (no payload, no SYN/FIN/RST flags) from carrying an EDT pacing timestamp; the exemption decision shall be based on inspection of the inner (tunnelled) packet, not the wire-level shard size, so that it is unaffected by FEC parity padding.
+
+**[REQ-MPQUIC-PERF-013]** The byte length of an EDT-exempt packet shall nonetheless be charged to the pacing budget, so that the effective transmit rate observed on the wire does not exceed the configured pacing rate.
+
 ### 3.5 Configuration Requirements
 
 **[REQ-MPQUIC-CONF-001]** Each tunnel instance shall be configured by a dedicated YAML file, the path to which is passed via the `--config` CLI flag at process start; absence of the `--config` flag shall cause the process to terminate with a fatal error.
@@ -344,6 +370,16 @@ Operator runs `mpquic-update.sh`. The script performs: git pull, binary rebuild,
 **[REQ-MPQUIC-CONF-006]** The congestion algorithm shall default to `cubic` when the `congestion_algorithm` field is absent or empty; the accepted values are `cubic` and `bbr`.
 
 **[REQ-MPQUIC-CONF-007]** The transport mode shall default to `datagram` when the `transport_mode` field is absent or empty; the accepted values are `datagram`, `stream`, and `stripe`.
+
+**[REQ-MPQUIC-CONF-008]** The `stripe_pacing_rate` YAML field shall configure a session-level kernel TX pacing rate cap expressed in Mbps; a value of 0 shall disable kernel pacing for that session.
+
+**[REQ-MPQUIC-CONF-009]** The `pacing_rate` field within a `multipath_paths` entry shall, when non-zero, override `stripe_pacing_rate` for that specific path, enabling asymmetric pacing caps across paths with different uplink capacities.
+
+**[REQ-MPQUIC-CONF-010]** The `multipath_flow_sticky` YAML field (boolean, default `false`) shall enable per-flow path stickiness in the multipath client scheduler as described in [REQ-MPQUIC-SW-021].
+
+**[REQ-MPQUIC-CONF-011]** The `stripe_pacing_adaptive` YAML field (boolean, default `false`) shall enable the AIMD pacing-rate controller; when set to `false`, the pacing rate shall remain static at the configured cap (`stripe_pacing_rate` or per-path `pacing_rate`).
+
+**[REQ-MPQUIC-CONF-012]** Kernel TX pacing via `SO_TXTIME` shall require the `fq` (`sch_fq`) queuing discipline configured on the egress WAN interface; the deployment procedure shall document that `fq_codel` and other non-EDT-aware queuing disciplines cause the kernel to silently ignore `SO_TXTIME`/`SCM_TXTIME` and `SO_MAX_PACING_RATE`.
 
 ### 3.6 Operational Requirements
 
@@ -362,6 +398,10 @@ Operator runs `mpquic-update.sh`. The script performs: git pull, binary rebuild,
 **[REQ-MPQUIC-OPS-007]** The systemd service unit shall set `NoNewPrivileges=true`, `CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE`, and `AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE`; no other Linux capabilities shall be granted to the process.
 
 **[REQ-MPQUIC-OPS-008]** The `mpquic-update.sh` auto-update script shall set `LimitNOFILE=1048576` for the service to support up to 1,048,576 open file descriptors, required to sustain a large number of concurrent UDP sockets across all instances.
+
+**[REQ-MPQUIC-OPS-009]** Each WAN interface used for kernel TX pacing shall have the `fq` (`sch_fq`) queuing discipline applied (e.g., `tc qdisc replace dev <wan> root fq`), and the host default queuing discipline shall be persisted as `net.core.default_qdisc=fq` via sysctl so that the prerequisite survives interface re-creation.
+
+**[REQ-MPQUIC-OPS-010]** On stripe paths where the downlink exhibits bursty packet loss (e.g., GEO/LEO satellite links), the operator should configure `stripe_fec_mode: off` and rely on the Hybrid ARQ subsystem for loss recovery, avoiding the positive-feedback interaction between rising adaptive parity overhead and downlink congestion described in §4.2.3.
 
 ### 3.7 API and Metrics Requirements
 
@@ -484,8 +524,8 @@ The MPQUIC/STRIPES system is composed of the following components:
 
 | Property | Value |
 |----------|-------|
-| Sources | `cmd/mpquic/stripe.go`, `stripe_crypto.go`, `stripe_arq.go`, `stripe_gso_linux.go` |
-| Language | Go (~3400 LOC total) |
+| Sources | `cmd/mpquic/stripe.go`, `stripe_crypto.go`, `stripe_arq.go`, `stripe_gso_linux.go`, `stripe_client.go`, `stripe_txtime_linux.go`, `stripe_affinity.go` |
+| Language | Go (~3400 LOC total pre-v5.2; v5.2 pacing/ordering subsystem adds ~640 lines across 9 files, see §4.2.7) |
 | Implements | `datagramConn` interface (transparent to the multipath system) |
 
 **Sub-components:**
@@ -506,6 +546,12 @@ The MPQUIC/STRIPES system is composed of the following components:
 | sendmmsg TX (server) | `stripe.go` | `WriteBatch` for multi-destination TX |
 | Keepalive loop | `stripe.go` | 1 s interval; session timeout 30 s; periodic REGISTER refresh 30 s |
 | Path health check loop | `stripe.go` | 500 ms interval; blackhole detection within 3.5 s |
+| Kernel TX pacing (SO_TXTIME/EDT) | `stripe_txtime_linux.go`, `stripe_client.go` | Byte-proportional EDT, 15 ms horizon clamp, pure-ACK exemption (v5.2, see §4.2.7) |
+| Per-flow path stickiness | `client.go: selectBestPath`, `stripe_affinity.go: innerFlowHash` | Structural-score tie-break on 5-tuple hash (v5.2, see §4.2.7) |
+| Per-pipe health-gated flow affinity | `stripe_client.go: dataPipeIdx`, `refreshPipeHealthMask` | Keepalive-driven healthy-pipe mask (v5.2, see §4.2.7) |
+| ARQ retransmission dedup | `stripe_arq.go: shouldRetx` | Minimum 100 ms between retransmissions of the same GroupSeq (v5.2, see §4.2.7) |
+
+**Operational note — adaptive FEC on bursty downlinks (v5.2, incident TS-031):** field measurement on both the TBOX-EVO bench and IBLEA-M production showed that `stripe_fec_mode: adaptive` forms a positive-feedback loop on a bursty satellite downlink: a loss burst raises `effective_M`, the added parity and padding increase load on an already-congested downlink, which raises loss further and keeps `M` elevated; back-to-back runs decayed monotonically (256 → 132 → 79 Mbps on the bench) while the same runs with `stripe_fec_mode: off` stayed stable (235–277 Mbps). This confirms, in the adaptive mode specifically, the general finding of incident TS-013 that added FEC parity can worsen an already-congested link. Loss recovery on both production instances of `mp1` (client and server) is now provided by the Hybrid ARQ subsystem alone, per [REQ-MPQUIC-OPS-010]; [REQ-MPQUIC-SW-010] continues to govern the behaviour of adaptive mode where it is selected.
 
 #### 4.2.4 mpquic-mgmt REST daemon
 
@@ -550,6 +596,33 @@ A `wanN` table belongs to the physical WAN interface, not to whichever tunnel in
 
 Conditioning the host route on a single tunnel's `have_tun_up` breaks this separation: stopping that one tunnel removes the VPS host route for every other tunnel sharing the table, even though their own TUN is still up. This was the root cause of incident TS-014 (`docs/TROUBLESHOOTING_HISTORY.md`): stopping `mpquic@6` deleted the `wan6` host route, blackholing the co-located `mp1` tunnel for 18.4 s. Fixed by decoupling the host route condition from `have_tun_up`; the tunnel default/blackhole route keeps the combined condition, which is correct since it is exclusive to that tunnel. Validated on IBLEA-M, 2026-07-22 — see [TC-MPQUIC-NET-001] in §6.2 and [REQ-MPQUIC-NET-007].
 
+#### 4.2.7 Client kernel TX pacing and flow-ordering subsystem (v5.2)
+
+| Property | Value |
+|----------|-------|
+| Sources | `cmd/mpquic/stripe_txtime_linux.go`, `cmd/mpquic/stripe_client.go`, `cmd/mpquic/stripe_affinity.go`, `cmd/mpquic/client.go`, `cmd/mpquic/stripe.go`, `cmd/mpquic/stripe_arq.go` |
+| Scope | Client TX path only (`mpquic@N` single-path and `mp1` multipath instances) |
+| Introduced | Release `v5.2`, branch `feat/ts031-upload-pacing`, 9 commits from `3a31bf9`, binary `60965c62` |
+| Role | Kernel-level TX pacing, per-flow path/pipe ordering, ARQ retransmission dedup, all on the upload (client → server) direction |
+
+This subsystem closes incident TS-031 (`docs/TROUBLESHOOTING_HISTORY.md`): upload throughput inside `mp1` collapsed under load (measured 22.7 Mbps decaying toward 0 with 2,180 spurious TCP retransmissions against a 342 Mbps physical uplink) even though the STRIPES transport itself dropped nothing (baseline instrumentation: 33,150 packets sent, 33,152 received, ARQ NACKs ≈ 0). The retransmissions were induced entirely by TX-side burstiness and packet reordering, not by loss.
+
+**Key behaviours:**
+- Each pipe socket is configured with `SO_TXTIME` (EDT, `CLOCK_MONOTONIC`) and `SO_MAX_PACING_RATE` as a backstop for packets sent without an explicit `SCM_TXTIME` timestamp ([REQ-MPQUIC-PERF-008]).
+- The EDT budget advances proportionally to bytes transmitted (`gap = len/1402`), not per packet: an earlier per-packet implementation throttled small inner ACKs as if they were full 1402-byte shards, which measurably capped the return-ACK rate and collapsed download throughput from 271 to 128 Mbps in the same test window ([REQ-MPQUIC-PERF-009]).
+- The EDT clock is shared across all pipes of a path rather than divided per pipe, because the pacing budget belongs to the path's uplink capacity; a per-pipe clock had capped every flow with pipe affinity at roughly 1/12th of the path rate ([REQ-MPQUIC-PERF-010]).
+- Pure TCP ACK segments of the tunnelled inner flow (`isPureAck`: IPv4/IPv6, TCP, zero payload, no SYN/FIN/RST) are exempted from carrying an EDT timestamp so that TCP feedback is not queued behind data, but their bytes are still charged to the pacing budget (`txtimeChargeLocked`) so the wire rate stays at or below the configured cap; the decision is made on the inner packet so it is unaffected by FEC padding ([REQ-MPQUIC-PERF-012], [REQ-MPQUIC-PERF-013]).
+- An adaptive AIMD rate controller exists behind the `stripe_pacing_adaptive` flag, default off: the `peerLossRate` signal it would use is currently degraded on the server side (`computeSessionRxLoss` consumes the delta window such that 11 of every 12 keepalive reports read 0), so the controller is kept disabled and the rate stays static at the configured cap pending a server-side fix (tracked as open item "C2" in the TS-031 record).
+- `multipath_flow_sticky` pins each internal flow to one path by 5-tuple hash among the candidates at minimum *structural* score (priority/weight only); the transient `consecutiveFails` penalty is excluded from the tie-break so a single failed send does not migrate the whole flow population to another path ([REQ-MPQUIC-SW-021], [REQ-MPQUIC-SW-022]).
+- `stripe_flow_affinity` on the client is gated by a per-pipe health mask (`pipeHealthyMask`), recomputed every keepalive tick from `pipeLastRx`; only pipes that answered a keepalive within the last 3 intervals are eligible for affinity hashing, closing the failure mode of incident TS-024 where a flow pinned to a dead CGNAT-bound pipe lost 100% of its traffic ([REQ-MPQUIC-SW-023]).
+- The ARQ TX ring suppresses repeated retransmission of the same GroupSeq within 100 ms (`shouldRetx`), since the receiver re-issues a NACK for an unresolved gap roughly every 30 ms while the RTT is 40–70 ms, producing 2–3 redundant copies per gap in an unmitigated run (measured: 1,411 duplicates filtered in one test) ([REQ-MPQUIC-SW-024]).
+
+**Design invariant — the pacer is a burst smoother, not an admission control [I1]:**
+
+An earlier version of the EDT scheduler allowed the debt (scheduled transmit time minus now) to grow without bound whenever offered load exceeded the configured rate. Under `sch_fq`, whose per-pipe `flow_limit` is 100 packets, this drove the local queue to saturation and caused **silent packet drops inside the qdisc itself** — measured on the bench as 479 dropped packets plus 95 `horizon_drops` on a single WAN in one run, with packets timestamped more than 10 seconds into the future. This self-inflicted loss was then read by any loss-based control loop as congestion, closing a positive-feedback cycle. The fix ([REQ-MPQUIC-PERF-011]) clamps the EDT debt to a 15 ms horizon (`stripeEDTHorizonNs`): once the horizon is reached, the pacer stops limiting rather than let the queue grow, a recoverable failure mode instead of a self-amplifying one. Every clamp event increments a counter (`edtClamped`) for observability.
+
+**Operational prerequisite:** kernel TX pacing has no effect unless the egress WAN queuing discipline is `fq` (`sch_fq`); with `fq_codel` — the interface default on most of the fleet — the kernel accepts and silently ignores `SO_TXTIME`/`SCM_TXTIME` and `SO_MAX_PACING_RATE`. This was itself a root cause of the initial TS-031 symptom: pacing had been configured in YAML but was never actually active on the bench until `sch_fq` was applied and persisted via `net.core.default_qdisc=fq` ([REQ-MPQUIC-OPS-009], [REQ-MPQUIC-CONF-012]).
+
 ### 4.3 Data Flow
 
 #### 4.3.1 Client TX path (LAN → WAN)
@@ -567,21 +640,43 @@ TUN interface mpq{i} or mp1 (10.200.x.y/24 or /30)
 mpquic dataplane (main.go: tunReadLoop)
   │ IP packet buffer (MTU ≤ 1300 bytes)
   ▼
-[if transport_mode == stripe]
-Stripe Engine (stripe.go: SendDatagram)
+[if multipath_enabled] multipathConn.SendDatagram (client.go)
   │
-  ├─ FEC Encoder (Reed-Solomon K=10, effective_M shards)
+  ├─ [multipath_flow_sticky=true] selectBestPath: 5-tuple hash tie-break
+  │    on minimum STRUCTURAL score (priority/weight only)      §4.2.7
+  └─ [multipath_flow_sticky=false, or retry after TX error] selectBestPath:
+       classic score (priority + weight + consecutiveFails)
+  │
+  ▼
+[if transport_mode == stripe]
+Stripe Engine (stripe_client.go: stripeClientConn.SendDatagram)
+  │
+  ├─ FEC Encoder (Reed-Solomon K=10, effective_M shards; stripe_fec_mode)
   │    → produces 1 DATA shard + M PARITY shards per group
+  │    (production mp1, v5.2: stripe_fec_mode=off, ARQ-only — §4.2.3)
   │
   ├─ AES-256-GCM Encrypt (stripe_crypto.go)
   │    → 16B stripe header + ciphertext + 16B GCM tag
   │
-  ├─ ARQ TX ring buffer store (plaintext, for future retransmission)
+  ├─ ARQ TX ring buffer store (plaintext, for future retransmission;
+  │    shouldRetx dedup ≤ 1 retx / 100 ms per GroupSeq)              §4.2.7
   │
-  └─ TX dispatch (round-robin over txActivePipes)
+  ├─ Pipe selection (dataPipeIdx)
+  │    ├─ [stripe_flow_affinity=true, pipeHealthyMask≠0] hash on healthy pipes only
+  │    └─ [otherwise] round-robin over txActivePipes
+  │
+  ├─ EDT pacing decision per packet (stripe_txtime_linux.go)          §4.2.7
+  │    ├─ [isPureAck(inner)=true] no SCM_TXTIME stamp; txtimeChargeLocked
+  │    │    still advances the budget by the packet's byte length
+  │    └─ [isPureAck=false] next EDT = max(now, budget); clamp to
+  │         now + 15 ms (stripeEDTHorizonNs) if exceeded; edtClamped++
+  │
+  └─ TX dispatch
        │
-       ├─ [Linux] UDP GSO: coalesce N shards → 1 sendmsg per pipe
-       └─ Socket (SO_BINDTODEVICE=enp7s7, buf=7MB)
+       ├─ [Linux] UDP GSO: coalesce N shards → 1 sendmsg per pipe,
+       │    carrying SCM_TXTIME where applicable
+       └─ Socket (SO_BINDTODEVICE=enp7s7, buf=7MB, SO_MAX_PACING_RATE backstop)
+            │ sch_fq qdisc (required — REQ-MPQUIC-OPS-009)
             │ UDP datagrams → Internet → VPS :46017
 ```
 
@@ -754,6 +849,88 @@ The `quicSecret` derivation is unchanged from pre-CAL (QUIC TLS Exporter per REQ
 
 ---
 
+### 4.5 Client TX Pacing and Flow-Ordering Pipeline (v5.2)
+
+This section details, as three diagrams, the client TX subsystem introduced in §4.2.7 to close incident TS-031.
+
+#### 4.5.1 TX pipeline — decision points from TUN read to WAN egress
+
+```mermaid
+flowchart TD
+    A[LAN host packet] --> B["OpenWrt → TUN mp1 / mpqN"]
+    B --> C["tunReadLoop: IP packet"]
+    C --> D{"multipath_flow_sticky?"}
+    D -- "true, tie on structural score" --> E["selectBestPath: sticky\ninnerFlowHash % candidates"]
+    D -- "false, or retry after TX error" --> F["selectBestPath: classic\npriority + weight + consecutiveFails"]
+    E --> G["stripeClientConn.SendDatagram"]
+    F --> G
+    G --> H["FEC Reed-Solomon encode\n(stripe_fec_mode; off on production mp1)"]
+    H --> I["AES-256-GCM encrypt"]
+    I --> J["ARQ TX ring store\n(shouldRetx dedup, 100ms)"]
+    J --> K{"stripe_flow_affinity\nand pipeHealthyMask != 0?"}
+    K -- yes --> L["dataPipeIdx: hash on\nhealthy pipes only"]
+    K -- "no / mask == 0" --> M["dataPipeIdx: round robin\nover all pipes"]
+    L --> N{"isPureAck(inner)?"}
+    M --> N
+    N -- yes --> O["no SCM_TXTIME stamp\ntxtimeChargeLocked: charge bytes only"]
+    N -- no --> P["next EDT = max(now, budget)"]
+    P --> Q{"next > now + 15ms\n(stripeEDTHorizonNs)?"}
+    Q -- yes --> R["clamp: next = now + 15ms\nedtClamped++"]
+    Q -- no --> S["SCM_TXTIME = next"]
+    R --> S
+    O --> T["UDP GSO: coalesce shards\ninto 1 sendmsg per pipe"]
+    S --> T
+    T --> U["socket: SO_BINDTODEVICE\nSO_MAX_PACING_RATE backstop"]
+    U --> V["sch_fq qdisc\n(REQ-MPQUIC-OPS-009)"]
+    V --> W["WAN egress → VPS :46017"]
+```
+
+#### 4.5.2 Keepalive-driven per-pipe health gating
+
+```mermaid
+sequenceDiagram
+    participant C as Client stripeClientConn
+    participant S as Server stripeSession
+    loop every keepaliveInterval (1s)
+        C->>S: KEEPALIVE on pipe i
+        S-->>C: KEEPALIVE-ACK on the same pipe i
+        C->>C: pipeLastRx[i] = now
+    end
+    Note over C: keepaliveLoop tick
+    C->>C: refreshPipeHealthMask()
+    C->>C: pipeHealthyMask = pipes with\n(now - pipeLastRx[i]) < 3 x keepaliveInterval
+    alt mask == 0 (no pipe answered recently)
+        C->>C: degrade to all-pipes candidable (never blackout TX)
+    else mask != 0
+        C->>C: dataPipeIdx restricted to healthy pipes only
+    end
+```
+
+#### 4.5.3 Pacing rate control states
+
+```mermaid
+stateDiagram-v2
+    [*] --> StaticAtCap: stripe_pacing_adaptive = false (default)
+    StaticAtCap --> StaticAtCap: rate = pacing_rate (per-path) or stripe_pacing_rate (global)
+    StaticAtCap --> AIMDGuarded: stripe_pacing_adaptive = true (opt-in)
+    state AIMDGuarded {
+        [*] --> Hold
+        Hold --> Decrease: peerLossRate > 2%
+        Decrease --> Hold: rate *= 0.7 (floor 2 Mbit)
+        Hold --> Increase: peerLossRate < 0.5%
+        Increase --> Hold: rate += 1 Mbit per tick, capped at configured rate
+    }
+    note right of AIMDGuarded
+        peerLossRate is degraded server-side today:
+        computeSessionRxLoss consumes the delta window
+        so 11 of 12 keepalive reports read 0.
+        Kept disabled by default until the server-side
+        fix (open item "C2" in TS-031) lands.
+    end note
+```
+
+---
+
 ## 5. Interface Design
 
 ### 5.1 YAML Instance Configuration
@@ -793,8 +970,10 @@ Each instance is configured by a YAML file rendered from a `.yaml.tpl` template 
 | `stripe_pipes` | int | 4 | UDP pipes per path |
 | `stripe_fec_data_shards` | int | 10 | FEC K parameter |
 | `stripe_fec_parity_shards` | int | 2 | FEC M parameter |
-| `stripe_fec_mode` | string | `adaptive` | `none`, `static`, `adaptive` |
+| `stripe_fec_mode` | string | `adaptive` | `none`, `static`, `adaptive`, `off` (`off` recommended on bursty downlinks — see [REQ-MPQUIC-OPS-010]) |
 | `stripe_rate_mbps` | int | 0 | TX rate limiter (0 = disabled) |
+| `stripe_pacing_rate` | int | 0 | Kernel TX pacing (SO_TXTIME/EDT) rate cap in Mbps, session-global; 0 = disabled (v5.2, [REQ-MPQUIC-CONF-008]); requires `fq` qdisc on the WAN interface ([REQ-MPQUIC-CONF-012]) |
+| `stripe_pacing_adaptive` | bool | `false` | Enable the AIMD pacing-rate controller; `false` keeps the rate static at the configured cap (v5.2, [REQ-MPQUIC-CONF-011]) |
 
 #### Multipath fields
 
@@ -802,7 +981,8 @@ Each instance is configured by a YAML file rendered from a `.yaml.tpl` template 
 |-------|------|-------------|
 | `multipath_enabled` | bool | Enable multipath mode |
 | `multipath_policy` | string | `priority`, `failover`, `balanced` |
-| `multipath_paths` | list | Per-path: `name`, `bind_ip`, `remote_addr`, `remote_port`, `priority`, `weight` |
+| `multipath_flow_sticky` | bool | Default `false`. Per-flow path stickiness at parity of structural score (v5.2, [REQ-MPQUIC-CONF-010]) |
+| `multipath_paths` | list | Per-path: `name`, `bind_ip`, `remote_addr`, `remote_port`, `priority`, `weight`, `pacing_rate` (Mbps, overrides `stripe_pacing_rate` for this path when non-zero — v5.2, [REQ-MPQUIC-CONF-009]) |
 
 #### Management fields
 
@@ -1038,9 +1218,9 @@ Testing is performed at three levels:
 
 | Level | Method | Files |
 |-------|--------|-------|
-| Unit | Go test (`go test ./cmd/mpquic/... ./internal/mpquic/crypto/...`) | `stripe_test.go` (14 functions), `crypto_test.go`, `kex_*_test.go`, `external_loader_test.go` |
+| Unit | Go test (`go test ./cmd/mpquic/... ./internal/mpquic/crypto/...`) | `stripe_test.go` (14 functions), `crypto_test.go`, `kex_*_test.go`, `external_loader_test.go`, `flow_path_affinity_test.go`, `pipe_health_test.go`, `edt_pacing_test.go` (v5.2) |
 | Integration | Manual end-to-end on lab environment (VM MPQUIC + VPS) | `scripts/mpquic-multipath-smoke.sh` |
-| System | Performance benchmark on production hardware | Lab infrastructure (dual Starlink) |
+| System | Performance benchmark on production hardware | Lab infrastructure (dual Starlink); bench collaudo TBOX-EVO and production IBLEA-M (v5.2) |
 
 **Unit test scope (stripe_test.go):**
 - FEC encode/decode round-trip with and without loss
@@ -1048,6 +1228,11 @@ Testing is performed at three levels:
 - ARQ NACK encode/decode
 - Deduplication bitmap behaviour
 - Wire protocol header encode/decode
+
+**Unit test scope (v5.2 pacing and flow-ordering, `go test -race` verified clean):**
+- `flow_path_affinity_test.go`: deterministic per-flow stickiness, distribution across candidates, rehash on path degradation, structural priority overriding the hash tie-break
+- `pipe_health_test.go`: pipe selection respects the healthy-pipe mask, selection is deterministic per flow, TX is never blacked out even with an all-unhealthy mask
+- `edt_pacing_test.go`: EDT debt stays within the configured horizon under a 10x offered-load test, byte-based charging of exempt packets, `isPureAck` classification table (ACK / payload / SYN / FIN / RST / non-TCP)
 
 **Integration test scope:**
 - Tunnel establishment (TUN creation, QUIC handshake, REGISTER flow)
@@ -1058,6 +1243,7 @@ Testing is performed at three levels:
 **System test scope:**
 - Aggregate throughput ≥ 300 Mbps on 3-path stripe (validated: 303 Mbps)
 - ARQ improvement: ≥ 30% throughput gain on dual Starlink with ARQ enabled (validated: +48%, 239→354 Mbps)
+- v5.2 upload/download pacing and ordering, validated with the client's collaudo method (OpenWrt → public IP, back-to-back plus 30 s soak): see [TC-MPQUIC-PERF-004] (bench) and [TC-MPQUIC-PERF-005] (production)
 
 ### 6.2 Test Cases
 
@@ -1135,6 +1321,42 @@ Testing is performed at three levels:
 
 ---
 
+**[TC-MPQUIC-SW-007]** — Per-flow path stickiness (`multipath_flow_sticky`)
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that packets of the same internal flow are consistently assigned to the same path at parity of structural score, and that priority overrides the hash tie-break |
+| Preconditions | Unit test `flow_path_affinity_test.go`; two or more paths at equal `priority`/`weight` |
+| Procedure | Run `go test -race ./cmd/mpquic/... -run FlowPathAffinity`; assert stickiness across repeated calls with the same 5-tuple, distribution across a population of distinct flows, rehash when a candidate path becomes degraded, and correct override when one path has strictly lower structural score |
+| Expected result | Same-flow calls return the same path index; distribution spreads across candidates for a varied flow population; rehash occurs only when the candidate set changes; a lower-priority path is never selected over a strictly better one |
+| Verifies | [REQ-MPQUIC-SW-021], [REQ-MPQUIC-SW-022] |
+
+---
+
+**[TC-MPQUIC-SW-008]** — Per-pipe health-gated flow affinity
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that pipe selection under `stripe_flow_affinity` is restricted to pipes marked healthy, and that an all-unhealthy mask degrades to selection among all pipes rather than blocking TX |
+| Preconditions | Unit test `pipe_health_test.go`; `pipeHealthyMask` set to a partial and a full pattern |
+| Procedure | Run `go test -race ./cmd/mpquic/... -run PipeHealth`; assert `dataPipeIdx` only returns indices set in the mask, that selection is deterministic for a fixed flow, and that a zero mask still returns a valid pipe index |
+| Expected result | Selected pipe index is always a bit set in `pipeHealthyMask` when the mask is non-zero; identical flow always selects the same pipe; a zero mask never results in a blocked or dropped send |
+| Verifies | [REQ-MPQUIC-SW-023] |
+
+---
+
+**[TC-MPQUIC-SW-009]** — ARQ retransmission dedup (`shouldRetx`)
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that the ARQ TX subsystem does not retransmit the same GroupSeq more than once within 100 ms |
+| Preconditions | Unit test in `stripe_arq_test.go`; a stored GroupSeq with a simulated repeated NACK arrival every 30 ms over an RTT range of 40–70 ms |
+| Procedure | Call `shouldRetx(seq, 100ms)` repeatedly at 30 ms intervals for the same seq; count how many calls return `true` |
+| Expected result | Only one retransmission is triggered per 100 ms window per GroupSeq, regardless of NACK repetition rate; field measurement on the bench with this fix active: 1,411 duplicate retransmissions filtered in one run |
+| Verifies | [REQ-MPQUIC-SW-024] |
+
+---
+
 **[TC-MPQUIC-SEC-001]** — TLS 1.3 handshake and certificate validation
 
 | Field | Value |
@@ -1180,6 +1402,57 @@ Testing is performed at three levels:
 | Procedure | Run `iperf3 -c 10.200.17.254 -P 4 -t 60 -B 10.200.17.1` from VM MPQUIC; record TCP throughput |
 | Expected result | Measured aggregate throughput ≥ 300 Mbps sustained over 60 seconds |
 | Verifies | [REQ-MPQUIC-PERF-001] |
+
+---
+
+**[TC-MPQUIC-PERF-002]** — EDT pacing debt bounded to the configured horizon
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that the EDT debt never exceeds the 15 ms horizon under sustained offered load above the pacing rate |
+| Preconditions | Unit test `edt_pacing_test.go`; a `stripeClientConn` configured with a fixed pacing rate and offered load at 10x that rate |
+| Procedure | Run `go test -race ./cmd/mpquic/... -run EDTPacing`; feed packets at 10x the configured rate; sample the EDT debt (`next EDT - now`) after each send; assert `edtClamped` increments once the horizon is reached |
+| Expected result | EDT debt never exceeds `stripeEDTHorizonNs` (15 ms); `edtClamped` counter increments monotonically once the horizon is reached and stops growing the debt further |
+| Verifies | [REQ-MPQUIC-PERF-011] |
+
+---
+
+**[TC-MPQUIC-PERF-003]** — EDT byte-based charge and pure-ACK exemption
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify that EDT-exempt packets (pure ACKs) still charge their byte length to the pacing budget, and that `isPureAck` correctly classifies inner packets |
+| Preconditions | Unit test `edt_pacing_test.go`; table of IPv4/IPv6 TCP packets covering pure ACK, ACK+payload, SYN, FIN, RST, and non-TCP cases |
+| Procedure | Run `go test -race ./cmd/mpquic/... -run EDTPacing`; call `isPureAck` against each table entry; call `txtimeChargeLocked` with a known byte count and verify the budget advances by that amount |
+| Expected result | `isPureAck` returns `true` only for zero-payload TCP segments with no SYN/FIN/RST; `txtimeChargeLocked` advances the pacing budget by exactly the charged byte count regardless of the exemption decision |
+| Verifies | [REQ-MPQUIC-PERF-012], [REQ-MPQUIC-PERF-013] |
+
+---
+
+**[TC-MPQUIC-PERF-004]** — Bench collaudo (TBOX-EVO), client method, back-to-back plus soak
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify upload and download throughput of the v5.2 pacing/ordering release using the client's own collaudo method rather than a developer-convenient shortcut, per the corrective methodology adopted after the TS-031 false-success episode |
+| Preconditions | Bench TBOX-EVO, binary `60965c62` on client (VM 200 lab) and VPS lab; production config: `stripe_fec_mode: off`, `stripe_pacing_rate` static caps, `sch_fq` applied; test executed from OpenWrt via `mwan3 use BOND1`, `iperf3` to the VPS **public** IP, back-to-back runs plus a 30 s soak |
+| Procedure | Run repeated back-to-back `iperf3` upload and download sessions from OpenWrt to the VPS public IP; record every interval, not only the average; run a 30 s soak in addition to the short back-to-back runs |
+| Expected result | No session collapsing to 0 Mbps; throughput sustained across back-to-back runs without monotonic decay |
+| Actual result (bench, 2026-07-29) | Download 232 Mbps average over the 30 s soak (minimum interval 163 Mbps, with full recovery); upload 65 Mbps average over the soak (minimum interval 48.2 Mbps); zero sessions at 0 Mbps; against targets of 200 Mbps download / 50 Mbps upload |
+| Verifies | [REQ-MPQUIC-PERF-008] .. [REQ-MPQUIC-PERF-013], [REQ-MPQUIC-SW-021] .. [REQ-MPQUIC-SW-024], [REQ-MPQUIC-OPS-009], [REQ-MPQUIC-OPS-010] |
+
+---
+
+**[TC-MPQUIC-PERF-005]** — Production validation (IBLEA-M), client method, post-deploy
+
+| Field | Value |
+|-------|-------|
+| Objective | Verify upload and download throughput of the v5.2 release in production, against the physical uplink ceiling measured in the same time window |
+| Preconditions | IBLEA-M production, `mp1` on binary `60965c62`, config: `stripe_fec_mode: off` on both sides, `stripe_pacing_rate: 80` on the client, `sch_fq` on `enp7s8` with `net.core.default_qdisc=fq` persisted; deployed 2026-07-29 under a dead-man switch, single instance restarted |
+| Procedure | From TBOX-IBLEAM, `mwan3 use BOND1`, run back-to-back `iperf3` upload and download against the VPS public IP; measure the physical ceiling via `STARLINK_PHY` in the same minute |
+| Expected result | Upload and download throughput improved relative to the pre-fix baseline (22.7 Mbps upload decaying toward ~1 Mbps with 2,180 retransmissions), with no session collapsing to 0 |
+| Actual result (production, 2026-07-29) | Upload 42.9 and 43.5 Mbps back-to-back (every interval 40–58 Mbps, no stalls) against a physical ceiling of 65.4 Mbps (66%); download climbing 145 → 163 Mbps back-to-back against a physical ceiling of 277 Mbps (59%), with no decay across the run |
+| Verifies | [REQ-MPQUIC-PERF-008] .. [REQ-MPQUIC-PERF-013], [REQ-MPQUIC-OPS-009], [REQ-MPQUIC-OPS-010] |
+| Known limitation | Download efficiency (59% of physical ceiling) and single-flow (P1) throughput remain open tuning items; AIMD pacing reactivation is pending the server-side `computeSessionRxLoss` fix (open item "C2") — not blocking, tracked in `docs/TROUBLESHOOTING_HISTORY.md` |
 
 ---
 
@@ -1345,6 +1618,10 @@ Testing is performed at three levels:
 | REQ-MPQUIC-SW-018 | Path down/cooldown/recovery | §4.2.1 | `cmd/mpquic/main.go: reconnectPath` | — | Draft |
 | REQ-MPQUIC-SW-019 | Flow-hash FNV-1a 5-tuple | §4.3.3 | `cmd/mpquic/stripe.go: flowHash` | TC-MPQUIC-SW-002 | Draft |
 | REQ-MPQUIC-SW-020 | Token-bucket pacer | §4.2.3 | `cmd/mpquic/stripe.go: stripePacer` | — | Draft |
+| REQ-MPQUIC-SW-021 | Per-flow path stickiness (structural score) | §4.2.7, §4.5.1 | `cmd/mpquic/client.go: selectBestPath, pathStructuralScore` | TC-MPQUIC-SW-007 | Draft |
+| REQ-MPQUIC-SW-022 | Sticky flow fallback to classic on TX error | §4.2.7 | `cmd/mpquic/client.go: SendDatagram` | TC-MPQUIC-SW-007 | Draft |
+| REQ-MPQUIC-SW-023 | Per-pipe health-gated flow affinity | §4.2.7, §4.5.2 | `cmd/mpquic/stripe_client.go: dataPipeIdx, refreshPipeHealthMask` | TC-MPQUIC-SW-008 | Draft |
+| REQ-MPQUIC-SW-024 | ARQ retransmission dedup (100 ms) | §4.2.7 | `cmd/mpquic/stripe_arq.go: shouldRetx` | TC-MPQUIC-SW-009 | Draft |
 | REQ-MPQUIC-SEC-001 | TLS 1.3 mutual auth | §4.2.1, §4.2.2 | `cmd/mpquic/main.go: tlsConfig` | TC-MPQUIC-SEC-001 | Draft |
 | REQ-MPQUIC-SEC-002 | CA + CN certificate verify | §4.2.1 | `cmd/mpquic/main.go: tlsConfig.RootCAs` | TC-MPQUIC-SEC-001 | Draft |
 | REQ-MPQUIC-SEC-003 | tls_insecure_skip_verify=false | §5.1 | `cmd/mpquic/main.go: loadConfig` | TC-MPQUIC-SEC-001 | Draft |
@@ -1369,6 +1646,12 @@ Testing is performed at three levels:
 | REQ-MPQUIC-PERF-005 | sendmmsg server TX | §4.2.3 | `cmd/mpquic/stripe.go: WriteBatch` | TC-MPQUIC-PERF-001 | Draft |
 | REQ-MPQUIC-PERF-006 | sync/atomic counters, no alloc | §4.2.3 | `cmd/mpquic/stripe.go: atomic.AddUint64` | TC-MPQUIC-PERF-001 | Draft |
 | REQ-MPQUIC-PERF-007 | Timeout 30s / keepalive 1s | §4.2.3 | `cmd/mpquic/stripe.go: stripeSessionTimeout` | — | Draft |
+| REQ-MPQUIC-PERF-008 | Kernel TX pacing via SO_TXTIME/EDT + SO_MAX_PACING_RATE backstop | §4.2.7, §4.5.1 | `cmd/mpquic/stripe_txtime_linux.go` | TC-MPQUIC-PERF-004, TC-MPQUIC-PERF-005 | Draft |
+| REQ-MPQUIC-PERF-009 | EDT budget advances proportional to bytes | §4.2.7 | `cmd/mpquic/stripe_client.go: txtimeChargeLocked` | TC-MPQUIC-PERF-003 | Draft |
+| REQ-MPQUIC-PERF-010 | EDT clock shared per path, not per pipe | §4.2.7 | `cmd/mpquic/stripe_client.go` | TC-MPQUIC-PERF-004 | Draft |
+| REQ-MPQUIC-PERF-011 | EDT debt clamped to 15 ms horizon | §4.2.7 | `cmd/mpquic/stripe_client.go: stripeEDTHorizonNs, edtClamped` | TC-MPQUIC-PERF-002 | Draft |
+| REQ-MPQUIC-PERF-012 | Pure-ACK exemption decided on inner packet | §4.2.7 | `cmd/mpquic/stripe.go: isPureAck` | TC-MPQUIC-PERF-003 | Draft |
+| REQ-MPQUIC-PERF-013 | Exempt packet bytes still charged to budget | §4.2.7 | `cmd/mpquic/stripe_client.go: txtimeChargeLocked` | TC-MPQUIC-PERF-003 | Draft |
 | REQ-MPQUIC-CONF-001 | YAML per-instance config | §5.1 | `cmd/mpquic/main.go: loadConfig` | TC-MPQUIC-SW-002 | Draft |
 | REQ-MPQUIC-CONF-002 | Mandatory YAML fields | §5.1 | `cmd/mpquic/main.go: validateConfig` | TC-MPQUIC-SW-002 | Draft |
 | REQ-MPQUIC-CONF-003 | render_config.sh env substitution | §5.2 | `scripts/render_config.sh` | TC-MPQUIC-OPS-001 | Draft |
@@ -1376,6 +1659,11 @@ Testing is performed at three levels:
 | REQ-MPQUIC-CONF-005 | metrics_listen auto resolution | §5.3 | `cmd/mpquic/main.go: startMetricsServer` | TC-MPQUIC-API-001 | Draft |
 | REQ-MPQUIC-CONF-006 | Congestion default cubic | §5.1 | `cmd/mpquic/main.go: main()` | — | Draft |
 | REQ-MPQUIC-CONF-007 | Transport default datagram | §5.1 | `cmd/mpquic/main.go: main()` | — | Draft |
+| REQ-MPQUIC-CONF-008 | `stripe_pacing_rate` session pacing cap | §5.1 | `cmd/mpquic/config.go: StripePacingRate` | TC-MPQUIC-PERF-004, TC-MPQUIC-PERF-005 | Draft |
+| REQ-MPQUIC-CONF-009 | Per-path `pacing_rate` override | §5.1 | `cmd/mpquic/config.go: MultipathPathConfig.PacingRate` | TC-MPQUIC-PERF-005 | Draft |
+| REQ-MPQUIC-CONF-010 | `multipath_flow_sticky` YAML field | §5.1 | `cmd/mpquic/config.go: MultipathFlowSticky` | TC-MPQUIC-SW-007 | Draft |
+| REQ-MPQUIC-CONF-011 | `stripe_pacing_adaptive` YAML field | §5.1 | `cmd/mpquic/config.go: StripePacingAdaptive` | — | Draft |
+| REQ-MPQUIC-CONF-012 | `sch_fq` prerequisite for SO_TXTIME | §5.1, §4.2.7 | `cmd/mpquic/stripe_txtime_linux.go` | TC-MPQUIC-PERF-004 | Draft |
 | REQ-MPQUIC-OPS-001 | systemd template service | §5.2 | `deploy/systemd/mpquic@.service` | TC-MPQUIC-OPS-001 | Draft |
 | REQ-MPQUIC-OPS-002 | Restart=always RestartSec=2 | §5.2 | `deploy/systemd/mpquic@.service` | TC-MPQUIC-OPS-001 | Draft |
 | REQ-MPQUIC-OPS-003 | TUN idempotent ExecStartPre | §5.2 | `scripts/ensure_tun.sh` | TC-MPQUIC-SW-001 | Draft |
@@ -1384,6 +1672,8 @@ Testing is performed at three levels:
 | REQ-MPQUIC-OPS-006 | 10s hard shutdown deadline | §4.2.1 | `cmd/mpquic/main.go: main()` | — | Draft |
 | REQ-MPQUIC-OPS-007 | NoNewPrivileges + min caps | §5.2 | `deploy/systemd/mpquic@.service` | TC-MPQUIC-OPS-001 | Draft |
 | REQ-MPQUIC-OPS-008 | LimitNOFILE=1048576 | §5.2 | `deploy/systemd/mpquic@.service` | — | Draft |
+| REQ-MPQUIC-OPS-009 | `sch_fq` qdisc + persisted `default_qdisc` sysctl | §4.2.7 | Deployment procedure (WAN `tc qdisc`, `net.core.default_qdisc`) | TC-MPQUIC-PERF-004 | Draft |
+| REQ-MPQUIC-OPS-010 | `stripe_fec_mode: off` on bursty downlinks (should) | §4.2.3 | `deploy/config/client/mp1.yaml`, `deploy/config/server/mp1.yaml` | TC-MPQUIC-PERF-004, TC-MPQUIC-PERF-005 | Draft |
 | REQ-MPQUIC-API-001 | Prometheus /metrics endpoint | §5.5 | `cmd/mpquic/main.go: startMetricsServer` | TC-MPQUIC-API-002 | Draft |
 | REQ-MPQUIC-API-002 | JSON /api/v1/stats endpoint | §5.3 | `cmd/mpquic/main.go: statsHandler` | TC-MPQUIC-API-001 | Draft |
 | REQ-MPQUIC-API-003 | Server session metrics labels | §5.5 | `cmd/mpquic/main.go: registerMetrics` | TC-MPQUIC-API-002 | Draft |
@@ -1407,7 +1697,8 @@ Testing is performed at three levels:
 | 1 | 0 | 2026-05-14 | Initial draft — ECSS-compliant TDD for MPQUIC/STRIPES system. Covers: system overview, 60 requirements (SW/SEC/NET/PERF/CONF/OPS/API), architecture design, interface design, 13 test cases, full RTM. | Telespazio Engineering Team |
 | 1 | 1 | 2026-06-04 | Crypto Abstraction Layer (CAL) — v5.0. Added: §4.4 CAL architecture (phases A–G, tag v5.0, 58/58 PASS); §5.6 crypto YAML schema; §6.3 six CAL test cases (TC-MPQUIC-CAL-001..006); §3.2 security requirements REQ-MPQUIC-SEC-011..017 (crypto profiles, epoch management, key zeroization); §7 RTM rows for SEC-011..017; §1.3 RD-11 (CIFRANTE_STRIPES.md) and RD-12 (External Provider Spec); acronyms CAL/KEX/KEM/ML-KEM/PQC/HKDF. Security audit (Fasi A–G): SEC-G02 and SEC-G04 fixed; SEC-D01 and SEC-D03 fixed in Phase D; SEC-G01/G03 and SEC-D02/D04 accepted as Phase H deferred items. | Telespazio Engineering Team |
 | 1 | 2 | 2026-07-23 | Incident TS-014 closure — per-WAN policy routing shared-resource fix. Added: §2.2 in-scope component `mpquic-policy-routing.sh`; §4.2.6 new component description with design invariant (per-WAN host route vs. per-tunnel default/blackhole route); §3.3 REQ-MPQUIC-NET-007 (host route decoupled from single-TUN state); §6.2 TC-MPQUIC-NET-001 with field validation numbers (IBLEA-M, 2026-07-22: host route present 38/38 samples post-fix, max 1 consecutive FAIL vs 14/18.4 s pre-fix); §7 RTM row for NET-007. Root cause: `mpquic-policy-routing.sh` conditioned the shared VPS host route in table `wan6` on `have_tun_up(mpq6)`, so stopping the WAN-owning tunnel blackholed the co-located `mp1` tunnel. Open technical debt (non-blocking, tracked outside this document): bats regression test for the TS-014 scenario, `flock` guard on the script. | Telespazio Engineering Team |
+| 1 | 3 | 2026-07-29 | Release `v5.2` (incident TS-031) — client upload pacing and per-flow ordering, in production on IBLEA-M since 2026-07-29. Added: §4.2.7 new component description for the client kernel TX pacing/flow-ordering subsystem (SO_TXTIME/EDT with 15 ms horizon clamp, byte-proportional and per-path-shared pacing budget, pure-ACK exemption with byte charge, per-flow path stickiness, per-pipe health-gated flow affinity, ARQ retransmission dedup); §4.5 three Mermaid diagrams (TX pipeline flowchart, keepalive/health-gating sequence, pacing-rate state diagram); §4.3.1 data flow updated for path/pipe selection and EDT/exempt/clamp/`sch_fq` steps; §3.1 REQ-MPQUIC-SW-021..024 (flow stickiness, sticky fallback, health-gated affinity, ARQ dedup); §3.4 REQ-MPQUIC-PERF-008..013 (SO_TXTIME pacing, byte-proportional and per-path-shared EDT budget, horizon clamp, pure-ACK exemption and byte charge); §3.5 REQ-MPQUIC-CONF-008..012 (`stripe_pacing_rate`, per-path `pacing_rate`, `multipath_flow_sticky`, `stripe_pacing_adaptive`, `sch_fq` prerequisite); §3.6 REQ-MPQUIC-OPS-009/010 (`sch_fq` + `net.core.default_qdisc=fq` persistence, `stripe_fec_mode: off` recommendation on bursty downlinks); §5.1 four new YAML fields; §6.2 TC-MPQUIC-SW-007..009, TC-MPQUIC-PERF-002..005 with bench (TBOX-EVO) and production (IBLEA-M) validation numbers; §7 RTM rows for all of the above; §1.3 RD-13..RD-15; acronyms EDT, AIMD. Root cause (TS-031): the client TX path had neither pacing nor per-flow ordering, so per-packet round-robin across 12–24 pipes and unpaced GSO bursts on a narrow uplink (~50 Mbps) were read by the tunnelled TCP as loss (measured 2,180–5,975 spurious retransmissions against near-zero transport-level loss). Root cause of the initial fix regression (same-day addendum): an unbounded EDT debt saturated the `sch_fq` per-pipe `flow_limit`, causing silent local qdisc drops (479 dropped + 95 `horizon_drops` measured on one WAN) that any loss-based control loop read as congestion; fixed by the 15 ms horizon clamp. A pre-existing but previously latent defect — `stripe_fec_mode: adaptive` forming a positive-feedback loop with downlink congestion (256→132→79 Mbps decay across back-to-back runs) — was uncovered during validation and closed operationally via [REQ-MPQUIC-OPS-010] (`stripe_fec_mode: off` on `mp1`, both sides). Validated on the TBOX-EVO bench with the client's own collaudo method (download 232 Mbps / upload 65 Mbps average over a 30 s soak, zero sessions at 0) and in IBLEA-M production post-deploy (upload 42.9/43.5 Mbps against a 65.4 Mbps physical ceiling — 66%; download 145→163 Mbps against 277 Mbps — 59%). Open, non-blocking: server-side `computeSessionRxLoss` fix ("C2") required before the AIMD pacing controller (`stripe_pacing_adaptive`) can be enabled; download efficiency and single-flow (P1) throughput remain tuning items. | Telespazio Engineering Team |
 
 ---
 
-*End of Document — TPZ-MPQUIC-TDD-001 Issue 1, Rev 0*
+*End of Document — TPZ-MPQUIC-TDD-001 Issue 1, Rev 3*

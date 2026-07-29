@@ -15,6 +15,8 @@ _Ultima revisione: 14 maggio 2026_
 5. [Metriche Zabbix e TBOX](#5-metriche-zabbix-e-tbox)
 6. [Installazione e configurazione](#6-installazione-e-configurazione)
 7. [Operazioni e debug tunnel](#7-operazioni-e-debug-tunnel)
+8. [Crypto Abstraction Layer](#8-crypto-abstraction-layer)
+9. [Trasporto in salita v5.2 — pacing, ordinamento per-flusso e il caso TS-031](#9-trasporto-in-salita-v52--pacing-ordinamento-per-flusso-e-il-caso-ts-031)
 
 ---
 
@@ -4996,3 +4998,277 @@ Livelli di integrazione previsti:
 - **Go 1.24+** obbligatorio per il profilo `hybrid_security` (`crypto/mlkem` richiede Go 1.24)
 - Build corrente: Go 1.26.0 su VPS (172.238.232.223) e VM client (10.10.11.100)
 - Tutti e 36 i test del package crypto passano con `-race` (zero data races)
+
+---
+
+## 9. Trasporto in salita v5.2 — pacing, ordinamento per-flusso e il caso TS-031
+
+> Release `v5.2` (branch `feat/ts031-upload-pacing`, 9 commit da `3a31bf9`, binario `60965c62`).
+> In produzione su IBLEA-M dal 2026-07-29. Riferimento incidenti: `docs/TROUBLESHOOTING_HISTORY.md` TS-031 (+ addendum).
+> Questa sezione spiega **perché** l'upload era rotto, **come** è stato curato, e gli **invarianti** che il codice ora garantisce.
+
+### 9.1 Il problema: ritrasmissioni spurie, non perdita
+
+L'upload dentro `mp1` rendeva il 25-30% del tetto fisico con migliaia di ritrasmissioni TCP,
+mentre il download andava bene. La baseline strumentata (contatori `/api/v1/stats` sui due lati)
+ha mostrato il fatto chiave: **il trasporto consegnava tutto** (33.150 pacchetti inviati, 33.152
+ricevuti, NACK≈0) eppure iperf contava ~6.000 ritrasmissioni. Erano tutte **spurie**: prodotte
+da riordino e da burst, non da perdita reale.
+
+Tre cause concorrenti, tutte nel TX del client:
+
+```mermaid
+flowchart TD
+    subgraph CAUSE["Le tre cause del collasso in salita"]
+        C1["1 · TX mai pacato\nbatch GSO fino a 64KB\na line-rate virtio ~10G\ndentro uplink ~50 Mbit"]
+        C2["2 · Alternanza path per-pacchetto\nselectBestPath ruotava m.rr\nogni pacchetto: wan5 RTT 67ms\n↔ wan6 RTT 29ms"]
+        C3["3 · Round-robin per-pacchetto\nsulle 12 pipe della sessione\n(gia' noto da TS-013)"]
+    end
+    C1 -->|"burst loss\nin coda al dish"| E1["TCP interno:\ncwnd collassa"]
+    C2 -->|"riordino\ncross-path"| E2["dupACK →\nfast-retransmit spuri"]
+    C3 -->|"riordino\nintra-path"| E2
+    E1 --> R["Upload al 25-30% del fisico\n~6000 retx spurie"]
+    E2 --> R
+```
+
+### 9.2 La pipeline TX del client v5.2
+
+Ogni pacchetto che entra dal TUN attraversa ora questa catena di decisioni:
+
+```mermaid
+flowchart TD
+    TUN["Pacchetto IP dal TUN"] --> CLS["resolvePacketClass\n(classi dataplane QoS)"]
+    CLS --> STICKY{"multipath_flow_sticky\n&& innerFlowHash ok?"}
+    STICKY -- "sì" --> HASH["Tie-break per-flusso:\nhash FNV-1a del 5-tuple\nsui candidati a score\nSTRUTTURALE minimo"]
+    STICKY -- "no (default)" --> RR["Round-robin storico\ntra i path a pari score"]
+    HASH --> PATH["Path scelto\n(stripeClientConn)"]
+    RR --> PATH
+    PATH --> MODE{"effectiveM == 0?\n(FEC off / adattiva a riposo)"}
+    MODE -- "M=0 fast path" --> PIPE["dataPipeIdx:\naffinity? hash sulle\nSOLE pipe sane\n(pipeHealthyMask)\naltrimenti RR"]
+    MODE -- "M>0" --> GRP["Accumulo gruppo FEC\nK shard + M parity\n(padding a maxLen)"]
+    GRP --> PIPE
+    PIPE --> ACK{"isPureAck(inner)?\nTCP, zero payload,\nno SYN/FIN/RST"}
+    ACK -- "sì (esente)" --> CHARGE["txtimeChargeLocked:\naddebita i byte al budget\nEDT ma NON stampa\n→ WriteToUDP diretta"]
+    ACK -- "no" --> GSO["gsoAccumLocked:\nbatch per pipe, omogeneo\nper taglia E per esenzione"]
+    GSO --> EDT["txtimeNextEDT:\nEDT condiviso per path,\navanzamento A BYTE,\nclamp orizzonte 15ms"]
+    EDT --> FQ["sch_fq sulla WAN:\nrilascia al timestamp\nSCM_TXTIME"]
+    CHARGE --> NIC["NIC / uplink"]
+    FQ --> NIC
+```
+
+I punti di decisione sono trattati uno per uno nelle sottosezioni che seguono.
+
+### 9.3 Pacing kernel: EDT a byte, budget per path, clamp dell'orizzonte
+
+**Meccanismo.** Con `stripe_pacing_rate` (o `pacing_rate` per-path) attivo e `sch_fq` sulla WAN,
+ogni pacchetto dati viene stampato con un *Earliest Departure Time* (`SCM_TXTIME`,
+`CLOCK_MONOTONIC`): il kernel lo trattiene fino a quell'istante. Tre proprietà non negoziabili,
+tutte pagate sul campo:
+
+| Proprietà | Perché (misura che l'ha imposta) |
+|---|---|
+| L'EDT avanza **in byte** (`gap × len/1402`) | Per-pacchetto, un ACK da 90B consumava il gap di uno shard da 1402B: canale ACK cappato in pps, download 271→128 Mbit |
+| Il clock EDT è **per path**, non per pipe | Per-pipe a rate/12, un flusso con affinity restava cappato a rate/12: 8 Mbit con cap 50 |
+| Il debito EDT è **limitato a 15ms** (clamp) | Senza limite, con offerta > rate il contatore corre nel futuro: coda fq satura (`flow_limit` 100p/pipe) e il kernel droppa in silenzio — misurati 479 dropped + 95 horizon_drops |
+
+```mermaid
+sequenceDiagram
+    participant App as SendDatagram
+    participant EDT as txtimeNextEDT
+    participant FQ as sch_fq
+    participant NIC as uplink
+
+    Note over EDT: debito = txtimeEDT − now
+    App->>EDT: shard 1402B
+    EDT->>EDT: next = edt + gap·1402/1402
+    EDT-->>FQ: stamp SCM_TXTIME=edt
+    FQ->>NIC: rilascio a t=edt (pacing reale)
+    App->>EDT: burst oltre il rate…
+    EDT->>EDT: next supererebbe now+15ms
+    EDT->>EDT: CLAMP: next = now+15ms (edtClamped++)
+    Note over EDT,FQ: oltre l'orizzonte il pacer SMETTE di limitare:<br/>meglio un burst che un drop silenzioso in coda locale
+```
+
+**L'anti-pattern che il clamp elimina** (causa primaria del collasso del primo tentativo):
+
+```mermaid
+flowchart LR
+    A["Offerta TCP\n> rate pacato"] --> B["Debito EDT corre\nnel futuro (no limite)"]
+    B --> C["Coda fq satura\nflow_limit 100p/pipe"]
+    C --> D["Drop SILENZIOSI\nnel qdisc locale\n(+horizon_drop oltre 10s)"]
+    D --> E["Il ricevitore vede loss\n→ NACK / segnale AIMD"]
+    E --> F["Controller riduce il rate"]
+    F --> B
+    style D fill:#f8d0d0
+    style F fill:#f8d0d0
+```
+
+È un anello di retroazione positiva: la perdita è **auto-inflitta** dal pacer, ma qualunque
+segnale di loss la attribuisce alla rete. Invariante v5.2: *il pacer è uno smussatore di burst,
+non un controllo d'ammissione* — in sovraccarico smette di limitare (guasto recuperabile),
+non accoda mai oltre l'orizzonte.
+
+### 9.4 Esenzione ACK-puri: il feedback non si accoda dietro i dati
+
+Durante un download il canale client→server trasporta quasi solo ACK del TCP interno. Se gli
+ACK condividono la coda EDT coi dati, qualunque riduzione del rate strozza il *feedback* di un
+traffico che il pacing nemmeno governa. La v5.2 li esenta dal timestamp, con due paletti:
+
+1. **La decisione è sul pacchetto interno, non sulla taglia wire**: `isPureAck()` richiede TCP,
+   zero payload, niente SYN/FIN/RST. Un segmento piccolo *con* payload che scavalcasse i
+   segmenti grandi dello stesso flusso genererebbe dupACK e fast-retransmit spuri (RFC 5681);
+   un ACK cumulativo vecchio invece è innocuo. La scelta sull'inner regge anche al padding FEC.
+2. **I byte esenti si addebitano comunque** al budget EDT (`txtimeChargeLocked`): il rate sul
+   filo resta ≤ target per costruzione, esenzione o no.
+
+```mermaid
+flowchart TD
+    P["Pacchetto interno"] --> Q{"isPureAck?"}
+    Q -- "ACK puro" --> E["NIENTE stamp EDT\n+ addebito byte al budget\n(pacedExemptByte++)"]
+    Q -- "dati / SYN / FIN / RST\n/ non-TCP" --> S["Stamp EDT normale\n(in coda al pacing)"]
+    E --> W["WriteToUDP"]
+    S --> W2["WriteMsgUDP + SCM_TXTIME"]
+```
+
+### 9.5 Ordinamento per-flusso: stickiness di path e affinity di pipe con health-gating
+
+Due livelli di scelta, entrambi resi per-flusso (hash FNV-1a del 5-tuple interno), entrambi
+**opt-in da config** e con protezioni contro i due modi di guasto scoperti sul campo:
+
+```mermaid
+flowchart TD
+    subgraph L1["Livello 1 · scelta del PATH (multipath_flow_sticky)"]
+        A1["Candidati = path vivi,\nnon degradati, fuori cooldown"] --> A2["Score STRUTTURALE\n(priority·1000 − weightBonus)\nSENZA failPenalty"]
+        A2 --> A3{"più candidati\na pari score?"}
+        A3 -- "sì" --> A4["idx = cands[hash % n]\n(ordine di indice stabile)"]
+        A3 -- "no" --> A5["unico best"]
+    end
+    subgraph L2["Livello 2 · scelta della PIPE (stripe_flow_affinity)"]
+        B1["pipeHealthyMask\n(bit per pipe, refresh 1Hz\ndal keepaliveLoop)"] --> B2{"mask valida?"}
+        B2 -- "sì" --> B3["k-esimo bit acceso,\nk = hash % popcount(mask)"]
+        B2 -- "vuota/non init" --> B4["tutte candidabili\n(mai azzerare il TX)"]
+    end
+    A4 --> L2
+    A5 --> L2
+```
+
+**Perché lo score strutturale**: il primo taglio usava lo score con `consecutiveFails` — un
+singolo errore transiente di send spostava in massa *tutti* i flussi sull'altro path e li
+riportava indietro al reset (misurato: 86% degli ACK concentrati su un path, tempesta di
+riordino a ogni flip). Con lo score strutturale la mappa hash→path cambia solo su un vero
+cambio di stato (path degradato/cooldown), che è l'unico momento in cui un rehash è giustificato.
+
+**Perché l'health-gating**: TS-024 aveva vietato l'affinity client — un flusso inchiodato a una
+pipe col binding CGNAT morto muore al 100%, dove il round-robin ne perdeva 1/12 (rivisto
+identico anche col pacing: ACK di un flusso su pipe marcia = download di quel flusso a 387 Kbit).
+La chiave che la rende sicura: **il server risponde a ogni keepalive sulla stessa pipe** (1 Hz),
+quindi la vitalità per-pipe è osservabile dal client.
+
+```mermaid
+sequenceDiagram
+    participant KL as keepaliveLoop (client, 1Hz)
+    participant P0 as pipe 0 (sana)
+    participant P7 as pipe 7 (binding CGNAT morto)
+    participant SRV as server
+
+    KL->>P0: KEEPALIVE [idx=0, rxLoss]
+    P0->>SRV: arriva
+    SRV-->>P0: eco KEEPALIVE (stessa pipe)
+    Note over P0: pipeLastRx[0] = now
+    KL->>P7: KEEPALIVE [idx=7, rxLoss]
+    P7--xSRV: perso (uplink/binding morto)
+    Note over P7: nessun eco → pipeLastRx[7] invecchia
+    KL->>KL: refreshPipeHealthMask()<br/>RX entro 3 intervalli → bit acceso
+    Note over KL: mask = …11101111 (pipe 7 esclusa)<br/>dataPipeIdx hasha SOLO sulle sane<br/>mask vuota ⇒ tutte candidabili
+```
+
+### 9.6 Il cricchetto della FEC adattiva (perché su mp1 è spenta)
+
+Il decadimento del download «primo run pulito, i successivi sempre peggio» (256→132→79 Mbit
+back-to-back) non era ambiente né codice nuovo: è la **dinamica intrinseca della FEC adattiva
+su un downlink bursty**:
+
+```mermaid
+flowchart LR
+    A["Burst di loss\n(Starlink)"] --> B["Stima loss FEC-based\nschizza (fino a 100%)"]
+    B --> C["adaptive_m sale\n(più shard di parità)"]
+    C --> D["+20-30% overhead\n+ padding dei gruppi"]
+    D --> E["Downlink già in affanno\nperde di più"]
+    E --> B
+    E -.-> F["In IDLE la loss torna 0\n→ M si rilassa\n→ il PRIMO run è pulito"]
+    style C fill:#f8d0d0
+    style E fill:#f8d0d0
+    style F fill:#d0e8d0
+```
+
+La prova che ha deciso (e che scagiona substrato e stato CGNAT in un colpo solo) è la
+**tripletta back-to-back**: fisico diretto stabile (385/255/402) · tunnel con FEC adaptive che
+decade (256→132→79) · tunnel con `stripe_fec_mode: off` stabile (246/235/245/277). Su mp1 la
+FEC resta **off su entrambi i lati**: il recupero perdita è dell'ARQ (NACK selettivi, ora con
+dedup per-seq a 100ms — il ricevitore ri-NACKa ogni 30ms con RTT 40-70ms, e senza dedup ogni
+buco vero produceva 2-3 copie).
+
+È la lezione TS-013 («la FEC alta peggiora il link congestionato») portata alla conseguenza
+architetturale: la modalità adaptive, per tornare in campo su questi profili, dovrà avere
+isteresi, cap di M e soglie ripensate.
+
+### 9.7 Il controller adattivo (presente, spento, e perché)
+
+`dynamicPacingLoop` implementa un AIMD sul rate di pacing (decrease ×0.8 sopra soglia di loss,
+increase +2 Mbit/tick, range [cap/8, cap]) pilotato da `peerLossRate` — la loss che il server
+misura sui dati ricevuti e riporta nell'eco keepalive. È **dietro `stripe_pacing_adaptive`,
+default off**, per una ragione misurata: il segnale oggi è degradato lato server
+(`computeSessionRxLoss` consuma i delta di finestra alla prima chiamata, e i 12 keepalive
+per-pipe arrivano in burst: 11 risposte su 12 valgono 0). Finché il fix server (cache
+idempotente in finestra, "C2" della review di trasporto) non è deployato, il rate statico al
+cap col clamp dell'orizzonte è la configurazione onesta.
+
+```mermaid
+stateDiagram-v2
+    [*] --> StaticoAlCap: default (flag off)
+    StaticoAlCap: rate = pacing_rate (cap), clamp orizzonte attivo
+    StaticoAlCap --> AIMD: stripe_pacing_adaptive true (richiede fix C2 server)
+    AIMD: EWMA su peerLossRate
+    AIMD --> Decrease: lossEwma > 5% (max 1 volta/s, ×0.8)
+    AIMD --> Increase: lossEwma < 2% (+2 Mbit/tick)
+    Decrease --> AIMD
+    Increase --> AIMD
+```
+
+### 9.8 Configurazione di riferimento (v5.2 in produzione IBLEA-M)
+
+```yaml
+# mp1.yaml client (estratto delle chiavi v5.2)
+stripe_fec_mode: off          # cricchetto adaptive: vedi 9.6 (off ANCHE sul server)
+stripe_pacing_rate: 80        # cap Mbit; il clamp gestisce l'overshoot
+# multipath_flow_sticky: true # solo multi-path (sul banco EVO dual-WAN)
+# stripe_flow_affinity: true  # solo con health-gating v5.2+; off in prod (conservativo)
+# per-path (banco EVO):
+#   - name: wan5
+#     pacing_rate: 25         # override per uplink asimmetrici
+```
+
+Prerequisito operativo, **senza il quale il pacing è un no-op silenzioso**:
+
+```bash
+tc qdisc replace dev <wan> root fq          # sch_fq: SO_TXTIME/EDT onorati
+echo "net.core.default_qdisc=fq" > /etc/sysctl.d/99-mpquic-fq.conf   # persistenza
+tc -s qdisc show dev <wan>                  # verifica: dropped/horizon_drops = spie del debito EDT
+```
+
+### 9.9 Risultati misurati
+
+Metodo di collaudo: **quello del cliente** — dal router OpenWrt, `mwan3 use BOND1 iperf3 -c <IP
+pubblico VPS>`, run back-to-back e soak 30s, con tetto fisico misurato nello stesso minuto.
+
+| Ambiente | Direzione | Prima | Dopo (v5.2) | Fisico same-minute |
+|---|---|---|---|---|
+| Banco EVO | download | decadeva run-su-run | **232 medi** (soak 30s, min 163) | ~280 |
+| Banco EVO | upload | 22-29, ~6000 retx | **65 medi** (soak 30s, min 48, zero stalli) | 65-76 |
+| IBLEA-M | download | decadeva | **145→163 back-to-back** (niente cricchetto) | 277 |
+| IBLEA-M | upload | 22.7 → moriva a ~1 (2180 retx) | **42.9/43.5 back-to-back, zero stalli** | 65.4 (66%) |
+
+Aperti (non bloccanti, tracciati in TS-031): fix C2 del segnale di loss server per riattivare
+l'AIMD, esclusione dei seq NACKati dalle statistiche `maxOOO` del tracker ARQ, ritrasmissione
+sulla pipe originale, metriche Prometheus del pacing (`edt_debt_ms`, `pacing_rate_mbit`,
+`paced_exempt_bytes`, `retx_suppressed`), single-flow P1 in salita.
