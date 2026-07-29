@@ -91,9 +91,11 @@ type stripeClientConn struct {
 	edtClamped      uint64 // atomic: volte in cui il debito EDT ha toccato l'orizzonte (pacer saturo)
 	pacedExemptByte uint64 // atomic: byte spediti senza stampa EDT (ACK puri) ma addebitati al budget
 
-	kexGroup     string // gruppo TLS del key exchange (es. X25519MLKEM768) — solo lettura post-init
-	kexPQ        bool   // true se il KEX della sessione è ibrido post-quantum
-	lastPeerLoss int64  // atomic: unix-nano of last nonzero peer loss report
+	kexGroup string // gruppo TLS del key exchange (es. X25519MLKEM768) — solo lettura post-init
+	kexPQ    bool   // true se il KEX della sessione è ibrido post-quantum
+
+	edtDebtNs    int64 // atomic: txtimeEDT − now all\'ultimo invio (se sale, il pacer sta shapando sotto la domanda)
+	lastPeerLoss int64 // atomic: unix-nano of last nonzero peer loss report
 
 	// Loss computation: previous window values (updated each keepalive cycle)
 	rxLossPrevSeqHigh    uint64
@@ -1040,6 +1042,7 @@ func (scc *stripeClientConn) txtimeNextEDT(_ int, nbytes int) int64 {
 		atomic.AddUint64(&scc.edtClamped, 1)
 	}
 	scc.txtimeEDT = next
+	atomic.StoreInt64(&scc.edtDebtNs, next-now)
 	return edt
 }
 

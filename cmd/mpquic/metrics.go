@@ -251,6 +251,11 @@ type PathStats struct {
 	StripeTxtimeGapNs          int64   `json:"stripe_txtime_gap_ns,omitempty"`
 	StripeKexGroup             string  `json:"stripe_kex_group,omitempty"`
 	StripeKexPQ                bool    `json:"stripe_kex_pq,omitempty"`
+	StripeCryptoEpoch          int     `json:"stripe_crypto_epoch"`
+	StripeCryptoRekeys         uint64  `json:"stripe_crypto_rekey_total"`
+	StripeEDTDebtMs            float64 `json:"stripe_edt_debt_ms"`
+	StripeEDTClamped           uint64  `json:"stripe_edt_clamped_total"`
+	StripePacedExemptB         uint64  `json:"stripe_paced_exempt_bytes_total"`
 	StripeXorActive            int     `json:"stripe_xor_active,omitempty"`
 	StripeXorEmitted           uint64  `json:"stripe_xor_emitted,omitempty"`
 	StripeXorRecovered         uint64  `json:"stripe_xor_recovered,omitempty"`
@@ -425,6 +430,13 @@ func snapshotClientPaths(mc *multipathConn) []PathStats {
 			ps.StripeTxtimeGapNs = atomic.LoadInt64(&p.stripeConn.txtimeGapNs)
 			ps.StripeKexGroup = p.stripeConn.kexGroup
 			ps.StripeKexPQ = p.stripeConn.kexPQ
+			if p.stripeConn.txCipher != nil && p.stripeConn.txCipher.cryptoM != nil {
+				ps.StripeCryptoEpoch = int(p.stripeConn.txCipher.cryptoM.ActiveEpoch)
+				ps.StripeCryptoRekeys = p.stripeConn.txCipher.cryptoM.TotalRekeyEvents.Load()
+			}
+			ps.StripeEDTDebtMs = float64(atomic.LoadInt64(&p.stripeConn.edtDebtNs)) / 1e6
+			ps.StripeEDTClamped = atomic.LoadUint64(&p.stripeConn.edtClamped)
+			ps.StripePacedExemptB = atomic.LoadUint64(&p.stripeConn.pacedExemptByte)
 			ps.StripeXorActive = int(atomic.LoadInt32(&p.stripeConn.xorActive))
 			ps.StripeRLCActive = int(atomic.LoadInt32(&p.stripeConn.rlcActive))
 			if p.stripeConn.xorTx != nil {
@@ -969,6 +981,32 @@ func handlePrometheus(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_peer_loss_rate_pct gauge\n")
 		for _, p := range gs.Paths {
 			fmt.Fprintf(w, "mpquic_path_stripe_peer_loss_rate_pct{path=\"%s\",bind=\"%s\"} %d\n", p.Name, p.BindIP, p.StripePeerLossRate)
+		}
+
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_crypto_epoch Epoch attivo della CryptoSession per path (0 = legacy/prima epoca).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_crypto_epoch gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_crypto_epoch{path=%q,bind=%q} %d\n", p.Name, p.BindIP, p.StripeCryptoEpoch)
+		}
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_crypto_rekey_total Rekey completati dalla CryptoSession per path.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_crypto_rekey_total counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_crypto_rekey_total{path=%q,bind=%q} %d\n", p.Name, p.BindIP, p.StripeCryptoRekeys)
+		}
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_edt_debt_ms Debito EDT (txtimeEDT-now) all'ultimo invio, in ms: se sale il pacer sta shapando sotto la domanda.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_edt_debt_ms gauge\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_edt_debt_ms{path=%q,bind=%q} %.3f\n", p.Name, p.BindIP, p.StripeEDTDebtMs)
+		}
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_edt_clamped_total Volte in cui il debito EDT ha toccato l'orizzonte (pacer saturo).\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_edt_clamped_total counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_edt_clamped_total{path=%q,bind=%q} %d\n", p.Name, p.BindIP, p.StripeEDTClamped)
+		}
+		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_paced_exempt_bytes_total Byte esenti dallo stamp EDT (ACK puri) ma addebitati al budget.\n")
+		fmt.Fprintf(w, "# TYPE mpquic_path_stripe_paced_exempt_bytes_total counter\n")
+		for _, p := range gs.Paths {
+			fmt.Fprintf(w, "mpquic_path_stripe_paced_exempt_bytes_total{path=%q,bind=%q} %d\n", p.Name, p.BindIP, p.StripePacedExemptB)
 		}
 
 		fmt.Fprintf(w, "\n# HELP mpquic_path_stripe_kex_pq 1 se il key exchange TLS della sessione stripe e' ibrido post-quantum (X25519MLKEM768).\n")

@@ -21,9 +21,12 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
-	mpquiccrypto "mpquic/internal/mpquic/crypto"
+	"log"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	mpquiccrypto "mpquic/internal/mpquic/crypto"
 )
 
 const (
@@ -104,6 +107,11 @@ func (pk *stripePendingKeys) Delete(sessionID uint32) {
 type stripeCipher struct {
 	aead    cipher.AEAD
 	txNonce uint64 // atomic: next TX sequence number
+
+	// cryptoM: metriche della CryptoSession (nil col cifrante legacy).
+	// Espone epoch attivo e rekey completati a log e Prometheus — il rekey
+	// senza traccia osservabile è il caveat aperto della validazione ML-KEM.
+	cryptoM *mpquiccrypto.CryptoMetrics
 }
 
 // newStripeCipher creates an AES-256-GCM cipher from a 32-byte key.
@@ -301,7 +309,34 @@ func newStripeCiphersFromCryptoSession(cfg *Config, keys *stripeKeyMaterial, isS
 	if err != nil {
 		return nil, nil, err
 	}
-	return &stripeCipher{aead: cs}, &stripeCipher{aead: cs}, nil
+	m := cs.Metrics()
+	side := "client"
+	if isServer {
+		side = "server"
+	}
+	// Watcher del rekey: il RekeyManager lavora in silenzio (solo contatori
+	// atomici); questo goroutine trasforma il cambio di TotalRekeyEvents in
+	// una riga di journal per lato, così la transizione di epoca è provabile
+	// dai log oltre che dalle metriche.
+	go func() {
+		var lastRekey, lastFail uint64
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			if r := m.TotalRekeyEvents.Load(); r != lastRekey {
+				log.Printf("INFO stripe crypto (%s): rekey #%d completato, epoch attivo=%d profile=%s",
+					side, r, m.ActiveEpoch, m.ActiveProfile)
+				lastRekey = r
+			}
+			if f := m.TotalKEXFailures.Load(); f != lastFail {
+				log.Printf("ERROR stripe crypto (%s): KEX failure durante rekey (totale=%d)", side, f)
+				lastFail = f
+			}
+		}
+	}()
+	tx := &stripeCipher{aead: cs, cryptoM: m}
+	rx := &stripeCipher{aead: cs, cryptoM: m}
+	return tx, rx, nil
 }
 
 func newStripeCiphersLegacy(keys *stripeKeyMaterial, isServer bool) (*stripeCipher, *stripeCipher, error) {
