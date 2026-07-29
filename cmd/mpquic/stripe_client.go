@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math/bits"
 	"net"
 	"strings"
 	"sync"
@@ -53,14 +54,15 @@ type stripeClientConn struct {
 	arqRx *arqRxTracker // RX gap detector + NACK generator
 
 	// TX state
-	txSeq      uint32 // atomic: next data sequence number
-	txPipe     uint32 // atomic: round-robin pipe selector
-	txGroup    [][]byte
-	txGrpSeq   uint32
-	txMu       sync.Mutex
-	txTimer    *time.Timer
-	txShardBuf []byte // reusable M=0 shard buffer (under txMu, avoids alloc/pkt)
-	txEncBuf   []byte // reusable encrypt output buffer (under txMu, client only)
+	txSeq        uint32 // atomic: next data sequence number
+	txPipe       uint32 // atomic: round-robin pipe selector
+	flowAffinity bool   // stripe_flow_affinity: flusso interno inchiodato a una pipe
+	txGroup      [][]byte
+	txGrpSeq     uint32
+	txMu         sync.Mutex
+	txTimer      *time.Timer
+	txShardBuf   []byte // reusable M=0 shard buffer (under txMu, avoids alloc/pkt)
+	txEncBuf     []byte // reusable encrypt output buffer (under txMu, client only)
 
 	// RX state
 	rxCh     chan []byte // decoded IP packets delivered here
@@ -75,7 +77,20 @@ type stripeClientConn struct {
 
 	// Peer-reported loss (loss on data WE send, reported BY server → we adjust our TX M)
 	peerLossRate uint32 // atomic: 0-100
-	lastPeerLoss int64  // atomic: unix-nano of last nonzero peer loss report
+	arqRetxSent  uint64 // atomic: pacchetti ritrasmessi su NACK del server (segnale di loss upload per l'AIMD)
+
+	// Salute per-pipe: il server risponde a ogni keepalive sulla stessa pipe
+	// (1 Hz), quindi una pipe che non riceve nulla da pipeStaleAfter mentre
+	// le altre ricevono ha il binding NAT o l'uplink morto. pipeHealthyMask
+	// (bit i = pipe i sana) è ricalcolata dal keepaliveLoop a ogni tick; la
+	// flow-affinity hasha SOLO sulle pipe sane, così un flusso inchiodato
+	// non muore mai su una pipe marcia (lezione TS-024).
+	pipeLastRx      []int64 // atomic per pipe: unix-nano ultimo pacchetto valido
+	pipeHealthyMask uint32  // atomic: bit per pipe, 0 = maschera non inizializzata (tutte valide)
+
+	edtClamped      uint64 // atomic: volte in cui il debito EDT ha toccato l'orizzonte (pacer saturo)
+	pacedExemptByte uint64 // atomic: byte spediti senza stampa EDT (ACK puri) ma addebitati al budget
+	lastPeerLoss    int64  // atomic: unix-nano of last nonzero peer loss report
 
 	// Loss computation: previous window values (updated each keepalive cycle)
 	rxLossPrevSeqHigh    uint64
@@ -97,9 +112,9 @@ type stripeClientConn struct {
 	// carries an EDT (Earliest Departure Time) so sch_fq holds the packet
 	// until that instant.  Replaces the software stripePacer with nanosecond
 	// kernel-level precision.
-	txtimeEnabled bool    // SO_TXTIME probed OK on first pipe
-	txtimeEDT     []int64 // per-pipe next EDT (ns, CLOCK_MONOTONIC)
-	txtimeGapNs   int64   // inter-packet gap (ns) derived from pacing rate
+	txtimeEnabled bool  // SO_TXTIME probed OK on first pipe
+	txtimeEDT     int64 // prossimo EDT condiviso del path (ns, CLOCK_MONOTONIC): il budget di pacing è dell'uplink, non della singola pipe
+	txtimeGapNs   int64 // inter-packet gap (ns) derived from pacing rate
 
 	// Stats (atomic)
 	txPkts   uint64
@@ -135,6 +150,7 @@ type gsoTxPipeBuf struct {
 	buf     []byte
 	count   int
 	segSize int
+	exempt  bool // batch di soli ACK puri: niente stampa EDT (ma i byte si addebitano)
 }
 
 // SecurityStats returns the decrypt failure counter.
@@ -280,28 +296,36 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	}
 
 	scc := &stripeClientConn{
-		serverAddr: serverAddr,
-		sessionID:  sessionID,
-		tunIPU32:   ipToUint32(tunIP),
-		dataK:      dataK,
-		parityM:    parityM,
-		enc:        enc,
-		fecMode:    fecMode,
-		fecType:    fecType,
-		txGroup:    make([][]byte, 0, dataK),
-		rxCh:       make(chan []byte, 512),
-		rxGroups:   make(map[uint32]*fecGroup),
-		closeCh:    make(chan struct{}),
-		logger:     logger,
-		txCipher:   txCipher,
-		rxCipher:   rxCipher,
+		serverAddr:   serverAddr,
+		sessionID:    sessionID,
+		tunIPU32:     ipToUint32(tunIP),
+		dataK:        dataK,
+		parityM:      parityM,
+		enc:          enc,
+		fecMode:      fecMode,
+		fecType:      fecType,
+		flowAffinity: cfg.StripeFlowAffinity,
+		txGroup:      make([][]byte, 0, dataK),
+		rxCh:         make(chan []byte, 512),
+		rxGroups:     make(map[uint32]*fecGroup),
+		closeCh:      make(chan struct{}),
+		logger:       logger,
+		txCipher:     txCipher,
+		rxCipher:     rxCipher,
 		// lastRxNsPtr is wired here (before any recv goroutine is spawned)
 		// so healthCheckLoop sees a stable, race-free pointer.
 		lastRxNsPtr: lastRxNsPtr,
 	}
 	atomic.StoreInt32(&scc.adaptiveM, initialAdaptiveM)
 	atomic.StoreInt64(&scc.lastRx, time.Now().UnixNano())
-	scc.pacer = newStripePacer(cfg.StripePacingRate)
+	// Rate di pacing per questo path: l'override per-path vince sul globale,
+	// così due WAN con uplink diversi (es. 50 e 15 Mbit) non condividono un
+	// unico rate sbagliato per una delle due.
+	pacingRate := cfg.StripePacingRate
+	if pathCfg.PacingRate > 0 {
+		pacingRate = pathCfg.PacingRate
+	}
+	scc.pacer = newStripePacer(pacingRate)
 	if cfg.StripeFastKeepaliveInterval > 0 {
 		scc.keepaliveInterval = cfg.StripeFastKeepaliveInterval
 	} else {
@@ -377,6 +401,12 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		logger.Infof("stripe pipe %d: local=%s → remote=%s dev=%s", i, conn.LocalAddr(), serverAddr, ifName)
 	}
 
+	scc.pipeLastRx = make([]int64, len(scc.pipes))
+	nowInit := time.Now().UnixNano()
+	for i := range scc.pipeLastRx {
+		atomic.StoreInt64(&scc.pipeLastRx[i], nowInit)
+	}
+
 	// Probe GSO (UDP_SEGMENT) support on the first pipe.
 	// If supported, allocate per-pipe accumulation buffers for batch TX.
 	if !cfg.StripeDisableGSO && len(scc.pipes) > 0 && stripeGSOProbe(scc.pipes[0]) {
@@ -391,15 +421,21 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	// If supported, enable SO_TXTIME on ALL pipes and compute inter-packet gap.
 	// Kernel pacing replaces the software stripePacer with nanosecond-precision
 	// sch_fq scheduling, eliminating burst-induced retransmits.
-	if cfg.StripePacingRate > 0 && len(scc.pipes) > 0 && stripeTxtimeProbe(scc.pipes[0]) {
-		numPipes := len(scc.pipes)
-		rateBytesPerPipe := uint64(cfg.StripePacingRate) * 1e6 / 8 / uint64(numPipes)
+	if pacingRate > 0 && len(scc.pipes) > 0 && stripeTxtimeProbe(scc.pipes[0]) {
+		// EDT condiviso a livello di path: il gap è quello del rate INTERO,
+		// qualunque pipe trasmetta. Il vecchio schema per-pipe (rate/N per
+		// pipe) cappava a rate/N ogni flusso inchiodato dalla flow-affinity
+		// (misurato: 8 Mbit con affinity + pacing 50 su 12 pipe).
+		// SO_MAX_PACING_RATE resta come backstop per i pacchetti senza
+		// SCM_TXTIME (es. retx ARQ): a rate pieno per socket, perché con
+		// l'affinity una singola pipe può legittimamente portare tutto il
+		// rate del path (fq applica comunque min(EDT, maxrate) per flusso).
+		rateBytesFull := uint64(pacingRate) * 1e6 / 8
 		// Typical shard: stripeHdrLen + 2 + MTU + AES-GCM overhead ≈ 1402 bytes
-		scc.txtimeGapNs = int64(float64(1402*8) / (float64(cfg.StripePacingRate) * 1e6 / float64(numPipes)) * 1e9)
-		scc.txtimeEDT = make([]int64, numPipes)
+		scc.txtimeGapNs = int64(float64(stripePacedRefBytes*8) / (float64(pacingRate) * 1e6) * 1e9)
 		allOK := true
 		for i, pipe := range scc.pipes {
-			if err := stripeTxtimeSetup(pipe, rateBytesPerPipe); err != nil {
+			if err := stripeTxtimeSetup(pipe, rateBytesFull); err != nil {
 				logger.Errorf("stripe: SO_TXTIME pipe %d failed: %v (disabling kernel pacing)", i, err)
 				allOK = false
 				break
@@ -471,8 +507,13 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	}
 
 	// Start dynamic pacing adaptation (Step 4.29)
-	if scc.txtimeEnabled && cfg.StripePacingRate > 0 {
-		go scc.dynamicPacingLoop(ctx, cfg.StripePacingRate)
+	if scc.txtimeEnabled && pacingRate > 0 && cfg.StripePacingAdaptive {
+		// AIMD opt-in: il segnale peerLossRate oggi è degradato dal
+		// consumo dei delta su 12 keepalive (11 risposte su 12 valgono 0):
+		// finché non è corretto lato server, il rate statico al cap col
+		// clamp dell'orizzonte è la configurazione onesta (Opzione A della
+		// review di trasporto TS-031).
+		go scc.dynamicPacingLoop(ctx, pacingRate)
 	}
 
 	// Flush timer for partial FEC groups
@@ -480,9 +521,9 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 
 	pacingStr := "off"
 	if scc.txtimeEnabled {
-		pacingStr = fmt.Sprintf("kernel@%dMbps(gap=%dns)", cfg.StripePacingRate, scc.txtimeGapNs)
-	} else if cfg.StripePacingRate > 0 {
-		pacingStr = fmt.Sprintf("sw@%dMbps", cfg.StripePacingRate)
+		pacingStr = fmt.Sprintf("kernel@%dMbps(gap=%dns)", pacingRate, scc.txtimeGapNs)
+	} else if pacingRate > 0 {
+		pacingStr = fmt.Sprintf("sw@%dMbps", pacingRate)
 	}
 	arqStr := "off"
 	if cfg.StripeARQ {
@@ -553,12 +594,12 @@ func (scc *stripeClientConn) SendDatagram(pkt []byte) error {
 		if scc.pacer != nil {
 			scc.pacer.pace(len(wirePkt))
 		}
-		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
-		pipeIdx := int(idx) % len(scc.pipes)
+		pipeIdx := scc.dataPipeIdx(pkt)
+		exempt := isPureAck(pkt)
 		if scc.gsoEnabled && atomic.LoadUint32(&scc.gsoDisabled) == 0 {
-			scc.gsoAccumLocked(pipeIdx, wirePkt)
+			scc.gsoAccumLocked(pipeIdx, wirePkt, exempt)
 		} else {
-			scc.writePacedUDP(pipeIdx, wirePkt)
+			scc.writePacedUDP(pipeIdx, wirePkt, exempt)
 		}
 
 		atomic.AddUint64(&scc.txPkts, 1)
@@ -718,12 +759,12 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 		if scc.pacer != nil {
 			scc.pacer.pace(len(wirePkt))
 		}
-		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
-		pipeIdx := int(idx) % len(scc.pipes)
+		pipeIdx := scc.dataPipeIdx(scc.txGroup[i][2:])
+		exempt := isPureAck(scc.txGroup[i][2:])
 		if gsoActive {
-			scc.gsoAccumLocked(pipeIdx, wirePkt)
+			scc.gsoAccumLocked(pipeIdx, wirePkt, exempt)
 		} else {
-			scc.writePacedUDP(pipeIdx, wirePkt)
+			scc.writePacedUDP(pipeIdx, wirePkt, exempt)
 		}
 	}
 
@@ -745,9 +786,9 @@ func (scc *stripeClientConn) sendFECGroupLocked() {
 		idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 		pipeIdx := int(idx) % len(scc.pipes)
 		if gsoActive {
-			scc.gsoAccumLocked(pipeIdx, wirePkt)
+			scc.gsoAccumLocked(pipeIdx, wirePkt, false)
 		} else {
-			scc.writePacedUDP(pipeIdx, wirePkt)
+			scc.writePacedUDP(pipeIdx, wirePkt, false)
 		}
 	}
 
@@ -773,9 +814,9 @@ func (scc *stripeClientConn) sendXorRepairLocked(firstSeq uint32, window uint8, 
 	idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 	pipeIdx := int(idx) % len(scc.pipes)
 	if scc.gsoEnabled && atomic.LoadUint32(&scc.gsoDisabled) == 0 {
-		scc.gsoAccumLocked(pipeIdx, wirePkt)
+		scc.gsoAccumLocked(pipeIdx, wirePkt, false)
 	} else {
-		scc.writePacedUDP(pipeIdx, wirePkt)
+		scc.writePacedUDP(pipeIdx, wirePkt, false)
 	}
 }
 
@@ -798,9 +839,9 @@ func (scc *stripeClientConn) sendRLCRepairLocked(firstSeq uint32, window uint8, 
 	idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 	pipeIdx := int(idx) % len(scc.pipes)
 	if scc.gsoEnabled && atomic.LoadUint32(&scc.gsoDisabled) == 0 {
-		scc.gsoAccumLocked(pipeIdx, wirePkt)
+		scc.gsoAccumLocked(pipeIdx, wirePkt, false)
 	} else {
-		scc.writePacedUDP(pipeIdx, wirePkt)
+		scc.writePacedUDP(pipeIdx, wirePkt, false)
 	}
 }
 
@@ -822,9 +863,9 @@ func (scc *stripeClientConn) sendRSILParityLocked(p rsilParity) {
 	idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 	pipeIdx := int(idx) % len(scc.pipes)
 	if scc.gsoEnabled && atomic.LoadUint32(&scc.gsoDisabled) == 0 {
-		scc.gsoAccumLocked(pipeIdx, wirePkt)
+		scc.gsoAccumLocked(pipeIdx, wirePkt, false)
 	} else {
-		scc.writePacedUDP(pipeIdx, wirePkt)
+		scc.writePacedUDP(pipeIdx, wirePkt, false)
 	}
 }
 
@@ -894,13 +935,14 @@ func (scc *stripeClientConn) getEffectiveM() int {
 // gsoAccumLocked appends an encrypted wire packet to the per-pipe GSO buffer.
 // If the new packet's size differs from the current segment size, the buffer
 // is flushed first (GSO requires uniform segment sizes).
-func (scc *stripeClientConn) gsoAccumLocked(pipeIdx int, wirePkt []byte) {
+func (scc *stripeClientConn) gsoAccumLocked(pipeIdx int, wirePkt []byte, exempt bool) {
 	gb := &scc.gsoBufs[pipeIdx]
-	if gb.count > 0 && len(wirePkt) != gb.segSize {
+	if gb.count > 0 && (len(wirePkt) != gb.segSize || exempt != gb.exempt) {
 		scc.gsoFlushPipeLocked(pipeIdx)
 	}
 	if gb.count == 0 {
 		gb.segSize = len(wirePkt)
+		gb.exempt = exempt
 	}
 	gb.buf = append(gb.buf, wirePkt...)
 	gb.count++
@@ -919,20 +961,29 @@ func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
 	pipe := scc.pipes[pipeIdx]
 
 	if gb.count == 1 {
-		// Single segment — no GSO overhead.
-		if scc.txtimeEnabled {
-			edt := scc.txtimeNextEDT(pipeIdx, 1)
+		// Single segment — no GSO overhead. Esenzione per-batch decisa
+		// sul pacchetto interno (vedi writePacedUDP).
+		if scc.txtimeEnabled && !gb.exempt {
+			edt := scc.txtimeNextEDT(pipeIdx, len(gb.buf))
 			oob := stripeTxtimeBuildOOB(edt)
 			_, _, _ = pipe.WriteMsgUDP(gb.buf, oob, scc.serverAddr)
 		} else {
+			if gb.exempt {
+				scc.txtimeChargeLocked(len(gb.buf))
+			}
 			_, _ = pipe.WriteToUDP(gb.buf, scc.serverAddr)
 		}
 	} else {
 		// GSO: single sendmsg, kernel splits at segSize boundaries.
+		// I batch sono omogenei per taglia E per esenzione (gsoAccum
+		// flusha al cambio di flag): un batch di ACK puri parte senza
+		// stampa EDT ma coi byte addebitati.
 		oob := stripeGSOBuildOOB(uint16(gb.segSize))
-		if scc.txtimeEnabled {
-			edt := scc.txtimeNextEDT(pipeIdx, gb.count)
+		if scc.txtimeEnabled && !gb.exempt {
+			edt := scc.txtimeNextEDT(pipeIdx, len(gb.buf))
 			oob = stripeTxtimeAppendOOB(oob, edt)
+		} else if gb.exempt {
+			scc.txtimeChargeLocked(len(gb.buf))
 		}
 		_, _, err := pipe.WriteMsgUDP(gb.buf, oob, scc.serverAddr)
 		if err != nil && stripeGSOIsError(err) {
@@ -954,30 +1005,70 @@ func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
 	gb.segSize = 0
 }
 
-// txtimeNextEDT returns the next Earliest Departure Time for a pipe and
-// advances the per-pipe EDT counter by numPkts * txtimeGapNs.
+// txtimeNextEDT returns the next Earliest Departure Time and advances the
+// shared per-path EDT counter in proporzione ai BYTE trasmessi
+// (gap pieno = un pacchetto da stripePacedRefBytes). L'avanzamento per
+// pacchetto spaziava un ACK da 90B come un data-shard da 1402B: il ritorno
+// ACK di un download veniva cappato in pps e strozzava il TCP interno
+// (misurato sul banco: download 271→128 Mbit). Il cap deve restare in
+// byte/s, non in pacchetti/s.
 // Ensures the EDT is never in the past (clamps to now + small delta).
 // Caller must hold txMu.
-func (scc *stripeClientConn) txtimeNextEDT(pipeIdx int, numPkts int) int64 {
+func (scc *stripeClientConn) txtimeNextEDT(_ int, nbytes int) int64 {
 	now := monoNowNs()
-	edt := scc.txtimeEDT[pipeIdx]
+	edt := scc.txtimeEDT
 	if edt < now {
 		edt = now + 1000 // 1 µs ahead to avoid immediate delivery
 	}
-	scc.txtimeEDT[pipeIdx] = edt + int64(numPkts)*scc.txtimeGapNs
+	gap := atomic.LoadInt64(&scc.txtimeGapNs)
+	next := edt + gap*int64(nbytes)/stripePacedRefBytes
+	// Clamp dell'orizzonte: il pacer è uno smussatore di burst, non un
+	// controllo d'ammissione. Senza limite, con offerta sopra il rate il
+	// debito EDT corre nel futuro, la coda fq satura flow_limit (100p per
+	// pipe) e il kernel droppa in silenzio nel qdisc locale — perdita
+	// auto-inflitta che qualunque segnale di loss scambia per congestione
+	// (misurati 95 horizon_drops e 479 dropped su wan5 del banco). Oltre
+	// l'orizzonte il pacing smette di limitare: modo di guasto
+	// recuperabile, non un buco nero.
+	if next > now+stripeEDTHorizonNs {
+		next = now + stripeEDTHorizonNs
+		atomic.AddUint64(&scc.edtClamped, 1)
+	}
+	scc.txtimeEDT = next
 	return edt
+}
+
+// txtimeChargeLocked addebita al budget EDT i byte di un pacchetto spedito
+// SENZA stampa (ACK puri): il rate sul filo non deve superare il target per
+// costruzione, esenzione o no. Caller must hold txMu.
+func (scc *stripeClientConn) txtimeChargeLocked(nbytes int) {
+	if !scc.txtimeEnabled {
+		return
+	}
+	_ = scc.txtimeNextEDT(0, nbytes)
+	atomic.AddUint64(&scc.pacedExemptByte, uint64(nbytes))
 }
 
 // writePacedUDP sends a single packet via a pipe, using SCM_TXTIME when
 // kernel pacing is active — otherwise falls back to plain WriteToUDP.
 // Caller must hold txMu.
-func (scc *stripeClientConn) writePacedUDP(pipeIdx int, pkt []byte) {
+func (scc *stripeClientConn) writePacedUDP(pipeIdx int, pkt []byte, exempt bool) {
 	pipe := scc.pipes[pipeIdx]
-	if scc.txtimeEnabled {
-		edt := scc.txtimeNextEDT(pipeIdx, 1)
+	// Gli ACK puri del TCP interno non si stampano con l'EDT: il feedback
+	// non deve accodarsi dietro il pacing dei dati. La scelta è sul
+	// pacchetto INTERNO (nessun payload, niente SYN/FIN/RST), non sulla
+	// taglia wire: un segmento piccolo CON payload che scavalca i grandi
+	// dello stesso flusso genererebbe dupACK e fast-retransmit spuri.
+	// I byte esenti si addebitano comunque al budget (il rate sul filo
+	// resta ≤ target per costruzione).
+	if scc.txtimeEnabled && !exempt {
+		edt := scc.txtimeNextEDT(pipeIdx, len(pkt))
 		oob := stripeTxtimeBuildOOB(edt)
 		_, _, _ = pipe.WriteMsgUDP(pkt, oob, scc.serverAddr)
 	} else {
+		if exempt {
+			scc.txtimeChargeLocked(len(pkt))
+		}
 		_, _ = pipe.WriteToUDP(pkt, scc.serverAddr)
 	}
 }
@@ -1009,6 +1100,60 @@ func (scc *stripeClientConn) sendToPipe(pkt []byte) {
 	pipe := scc.pipes[int(idx)%len(scc.pipes)]
 	pkt = stripeEncrypt(scc.txCipher, pkt)
 	_, _ = pipe.WriteToUDP(pkt, scc.serverAddr)
+}
+
+// dataPipeIdx sceglie la pipe per uno shard DATA. Con flow-affinity attiva
+// usa l'hash del 5-tuple del pacchetto interno (ordine preservato per flusso);
+// altrimenti, o se il pacchetto non e' parsabile, round-robin classico.
+func (scc *stripeClientConn) dataPipeIdx(inner []byte) int {
+	if scc.flowAffinity && len(scc.pipes) > 1 {
+		if h, ok := innerFlowHash(inner); ok {
+			mask := atomic.LoadUint32(&scc.pipeHealthyMask)
+			if mask == 0 {
+				// Maschera non ancora calcolata (o nessuna pipe sana):
+				// tutte candidabili, come prima.
+				return int(h % uint32(len(scc.pipes)))
+			}
+			n := bits.OnesCount32(mask)
+			// k-esimo bit acceso, con k = hash % numero di pipe sane
+			k := int(h % uint32(n))
+			for i := 0; i < len(scc.pipes); i++ {
+				if mask&(1<<uint(i)) != 0 {
+					if k == 0 {
+						return i
+					}
+					k--
+				}
+			}
+		}
+	}
+	idx := atomic.AddUint32(&scc.txPipe, 1) - 1
+	return int(idx) % len(scc.pipes)
+}
+
+// refreshPipeHealthMask ricalcola la maschera delle pipe sane (eco keepalive
+// o qualunque RX entro pipeStaleAfter). Se nessuna pipe risulta sana la
+// maschera resta piena: meglio degradare come il vecchio RR che azzerare
+// il TX. Chiamata dal keepaliveLoop a ogni tick.
+func (scc *stripeClientConn) refreshPipeHealthMask() {
+	if scc.pipeLastRx == nil {
+		return
+	}
+	staleNs := int64(3 * scc.keepaliveInterval)
+	if staleNs <= 0 {
+		staleNs = int64(3 * time.Second)
+	}
+	cut := time.Now().UnixNano() - staleNs
+	var mask uint32
+	for i := range scc.pipeLastRx {
+		if atomic.LoadInt64(&scc.pipeLastRx[i]) >= cut {
+			mask |= 1 << uint(i)
+		}
+	}
+	if mask == 0 {
+		mask = (1 << uint(len(scc.pipeLastRx))) - 1
+	}
+	atomic.StoreUint32(&scc.pipeHealthyMask, mask)
 }
 
 // ─── Client RX internals ──────────────────────────────────────────────────
@@ -1074,6 +1219,7 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 
 			nowNs := time.Now().UnixNano()
 			atomic.StoreInt64(&scc.lastRx, nowNs)
+			atomic.StoreInt64(&scc.pipeLastRx[pipeIdx], nowNs)
 			if scc.lastRxNsPtr != nil {
 				atomic.StoreInt64(scc.lastRxNsPtr, nowNs)
 			}
@@ -1436,6 +1582,8 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 				}
 			}
 
+			scc.refreshPipeHealthMask()
+
 			for i, pipe := range scc.pipes {
 				// Keepalive payload: [pipe_index: 1B][rx_loss_pct: 1B]
 				pkt := make([]byte, stripeHdrLen+2)
@@ -1719,6 +1867,12 @@ func (scc *stripeClientConn) handleNack(hdr stripeHdr, payload []byte) {
 		if !found {
 			continue
 		}
+		// Il server ri-NACKa gli stessi seq ogni 30ms mentre l'RTT è
+		// 40-70ms: senza dedup ogni buco vero genera 2-3 ritrasmissioni
+		// (misurati 1411 duplicati filtrati al server in un run).
+		if !scc.arqTx.shouldRetx(seq, arqRetxMinInterval) {
+			continue
+		}
 		// Re-encrypt with fresh nonce and send on round-robin pipe
 		wirePkt := stripeEncryptShard(scc.txCipher, &stripeHdr{
 			Magic:      stripeMagic,
@@ -1737,6 +1891,7 @@ func (scc *stripeClientConn) handleNack(hdr stripeHdr, payload []byte) {
 	}
 
 	if retxCount > 0 {
+		atomic.AddUint64(&scc.arqRetxSent, uint64(retxCount))
 		scc.logger.Debugf("stripe ARQ: retransmitted %d packets (base=%d)", retxCount, baseSeq)
 	}
 }
@@ -1791,27 +1946,62 @@ func (scc *stripeClientConn) dynamicPacingLoop(ctx context.Context, baseRate int
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
-	// Target base pacing converted to nanoseconds
-	baseNs := int64(1000000000 / baseRate)
+	// Controller AIMD sul rate di pacing. Il rate statico funziona solo
+	// finché sta sotto la capacità istantanea del link (su Starlink
+	// l'uplink oscilla di 3x in minuti). Il segnale è peerLossRate: la
+	// loss % che il SERVER misura sui dati ricevuti da noi (seq-gap su
+	// finestra 1s, arriva nell'eco keepalive). NON si usano i retx da
+	// NACK: misurano il riordino (NACK spurie del tracker) e la
+	// ripetizione dei NACK (cooldown 30ms < RTT), non la perdita — è il
+	// segnale avvelenato che al primo giro collassava il rate durante i
+	// download strozzando il canale ACK. Il seq-gap conta gli in-flight
+	// di fine finestra come persi (~RTT/finestra ≈ 4%): la soglia di
+	// decrease sta sopra quel bias. EWMA su 3 campioni contro i picchi
+	// singoli; il sentinel 255 (segnale di sospensione XOR) si ignora.
+	baseGap := atomic.LoadInt64(&scc.txtimeGapNs)
+	if baseGap <= 0 {
+		return
+	}
+	maxRate := float64(baseRate)
+	rate := maxRate
+	minRate := maxRate / 8
+	if minRate < 10 {
+		minRate = 10
+	}
+	if minRate > maxRate {
+		minRate = maxRate
+	}
+
+	var lossEwma float64
+	lastDecrease := time.Now()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Minimal dynamic pacing:
-			// In Phase 4d we scale pacing off RTT jitter & loss.
-			// Currently this is a base implementation avoiding panic.
-			// TODO: Add real scaling based on srtt and ewma bandwidth
-			targetNs := baseNs
-
-			// Increase pacing gap slightly if loss is high
 			loss := atomic.LoadUint32(&scc.peerLossRate)
-			if loss > 0 && loss < 255 {
-				targetNs += targetNs * int64(loss) / 100 // up to 2x slower
+			if loss == 255 {
+				continue // sentinel XOR, non è una misura di loss
 			}
+			lossEwma = lossEwma*2/3 + float64(loss)/3
 
-			atomic.StoreInt64(&scc.txtimeGapNs, targetNs)
+			switch {
+			case lossEwma > 5:
+				if time.Since(lastDecrease) >= time.Second {
+					rate *= 0.8
+					lastDecrease = time.Now()
+				}
+			case lossEwma < 2:
+				rate += 2
+			}
+			if rate > maxRate {
+				rate = maxRate
+			}
+			if rate < minRate {
+				rate = minRate
+			}
+			atomic.StoreInt64(&scc.txtimeGapNs, int64(float64(baseGap)*maxRate/rate))
 		}
 	}
 }

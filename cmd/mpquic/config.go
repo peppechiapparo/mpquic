@@ -23,6 +23,7 @@ type Config struct {
 	MultiConnEnabled      bool                  `yaml:"multi_conn_enabled"`
 	MultipathEnabled      bool                  `yaml:"multipath_enabled"`
 	MultipathPolicy       string                `yaml:"multipath_policy"`
+	MultipathFlowSticky   bool                  `yaml:"multipath_flow_sticky"` // pin per-flusso del path a parità di priorità (upload senza riordino cross-path)
 	DataplaneConfigFile   string                `yaml:"dataplane_config_file"`
 	Dataplane             DataplaneConfig       `yaml:"dataplane"`
 	MultipathPaths        []MultipathPathConfig `yaml:"multipath_paths"`
@@ -45,13 +46,15 @@ type Config struct {
 	StripePort            int                   `yaml:"stripe_port"`
 	StripeDataShards      int                   `yaml:"stripe_data_shards"`
 	StripeParityShards    int                   `yaml:"stripe_parity_shards"`
-	StripeFECMode         string                `yaml:"stripe_fec_mode"` // "always" (default), "adaptive", "off"
-	StripePacingRate      int                   `yaml:"stripe_pacing_rate"` // Mbps per session (0 = disabled)
-	StripeARQ             bool                  `yaml:"stripe_arq"`         // Hybrid ARQ with NACK retransmission
-	StripeDisableGSO      bool                  `yaml:"stripe_disable_gso"` // Disable UDP GSO (for A/B testing)
-	StripeFECType         string                `yaml:"stripe_fec_type"`    // "rs" (default), "xor" (legacy), "rlc"
-	StripeFECWindow       int                   `yaml:"stripe_fec_window"`  // Sliding-window size W (default 10, used by xor/rlc)
-	StripeFECInterleave   int                   `yaml:"stripe_fec_interleave"` // RS interleave depth (0=block RS, >0=interleaved, default 4)
+	StripeFECMode         string                `yaml:"stripe_fec_mode"`        // "always" (default), "adaptive", "off"
+	StripePacingRate      int                   `yaml:"stripe_pacing_rate"`     // Mbps per session (0 = disabled)
+	StripeARQ             bool                  `yaml:"stripe_arq"`             // Hybrid ARQ with NACK retransmission
+	StripeFlowAffinity    bool                  `yaml:"stripe_flow_affinity"`   // Pin di ogni flusso interno su una sola pipe (niente riordino da striping)
+	StripePacingAdaptive  bool                  `yaml:"stripe_pacing_adaptive"` // AIMD sul rate di pacing (default off: rate statico al cap)
+	StripeDisableGSO      bool                  `yaml:"stripe_disable_gso"`     // Disable UDP GSO (for A/B testing)
+	StripeFECType         string                `yaml:"stripe_fec_type"`        // "rs" (default), "xor" (legacy), "rlc"
+	StripeFECWindow       int                   `yaml:"stripe_fec_window"`      // Sliding-window size W (default 10, used by xor/rlc)
+	StripeFECInterleave   int                   `yaml:"stripe_fec_interleave"`  // RS interleave depth (0=block RS, >0=interleaved, default 4)
 	StripeEnabled         bool                  `yaml:"stripe_enabled"`
 	MetricsListen         string                `yaml:"metrics_listen"` // e.g. "10.200.17.254:9090" — bind to tunnel IP only
 
@@ -72,8 +75,9 @@ type MultipathPathConfig struct {
 	Priority   int    `yaml:"priority"`
 	Weight     int    `yaml:"weight"`
 	Pipes      int    `yaml:"pipes"`
-	BasePath   string `yaml:"-"`        // original path name before pipe expansion
-	Transport  string `yaml:"transport"` // "quic" (default), "stripe", or "auto"
+	PacingRate int    `yaml:"pacing_rate"` // Mbps per questo path; 0 = usa stripe_pacing_rate globale
+	BasePath   string `yaml:"-"`           // original path name before pipe expansion
+	Transport  string `yaml:"transport"`   // "quic" (default), "stripe", or "auto"
 }
 
 type DataplaneConfig struct {

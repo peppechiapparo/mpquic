@@ -150,7 +150,7 @@ func TestSelectBestPathExcludesDegraded(t *testing.T) {
 
 	m := newTestMultipathConn(t, []*multipathPathState{p0, p1})
 
-	idx, conn := m.selectBestPath(DataplaneClassPolicy{}, nil)
+	idx, conn := m.selectBestPath(DataplaneClassPolicy{}, nil, 0, false)
 	if idx != 1 {
 		t.Fatalf("selectBestPath idx = %d, want 1 (p0 degraded)", idx)
 	}
@@ -173,7 +173,7 @@ func TestSelectBestPathBestOfBad(t *testing.T) {
 
 	m := newTestMultipathConn(t, []*multipathPathState{p0, p1})
 
-	idx, _ := m.selectBestPath(DataplaneClassPolicy{}, nil)
+	idx, _ := m.selectBestPath(DataplaneClassPolicy{}, nil, 0, false)
 	if idx != 1 {
 		t.Fatalf("selectBestPath idx = %d, want 1 (freshest lastRx)", idx)
 	}
@@ -194,7 +194,7 @@ func TestSelectBestPathBestOfBad_TiebreakConsecutiveFails(t *testing.T) {
 
 	m := newTestMultipathConn(t, []*multipathPathState{p0, p1})
 
-	idx, _ := m.selectBestPath(DataplaneClassPolicy{}, nil)
+	idx, _ := m.selectBestPath(DataplaneClassPolicy{}, nil, 0, false)
 	if idx != 1 {
 		t.Fatalf("selectBestPath idx = %d, want 1 (lower consecutiveFails)", idx)
 	}
