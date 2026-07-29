@@ -953,8 +953,9 @@ func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
 	pipe := scc.pipes[pipeIdx]
 
 	if gb.count == 1 {
-		// Single segment — no GSO overhead.
-		if scc.txtimeEnabled {
+		// Single segment — no GSO overhead. I segmenti piccoli non si
+		// stampano con l'EDT (vedi writePacedUDP).
+		if scc.txtimeEnabled && len(gb.buf) >= stripePacedMinBytes {
 			edt := scc.txtimeNextEDT(pipeIdx, len(gb.buf))
 			oob := stripeTxtimeBuildOOB(edt)
 			_, _, _ = pipe.WriteMsgUDP(gb.buf, oob, scc.serverAddr)
@@ -963,8 +964,10 @@ func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
 		}
 	} else {
 		// GSO: single sendmsg, kernel splits at segSize boundaries.
+		// Il batch ha segSize uniforme: se i segmenti sono piccoli
+		// (raffica di ACK) l'intero batch è esente dall'EDT.
 		oob := stripeGSOBuildOOB(uint16(gb.segSize))
-		if scc.txtimeEnabled {
+		if scc.txtimeEnabled && gb.segSize >= stripePacedMinBytes {
 			edt := scc.txtimeNextEDT(pipeIdx, len(gb.buf))
 			oob = stripeTxtimeAppendOOB(oob, edt)
 		}
@@ -1013,7 +1016,11 @@ func (scc *stripeClientConn) txtimeNextEDT(_ int, nbytes int) int64 {
 // Caller must hold txMu.
 func (scc *stripeClientConn) writePacedUDP(pipeIdx int, pkt []byte) {
 	pipe := scc.pipes[pipeIdx]
-	if scc.txtimeEnabled {
+	// I pacchetti piccoli (ACK TCP interni ~130B, NACK, keepalive) non si
+	// stampano con l'EDT: il canale di feedback del TCP non deve MAI
+	// restare in coda dietro il pacing dei dati, qualunque cosa faccia
+	// l'AIMD. Il backstop SO_MAX_PACING_RATE per socket resta a coprirli.
+	if scc.txtimeEnabled && len(pkt) >= stripePacedMinBytes {
 		edt := scc.txtimeNextEDT(pipeIdx, len(pkt))
 		oob := stripeTxtimeBuildOOB(edt)
 		_, _, _ = pipe.WriteMsgUDP(pkt, oob, scc.serverAddr)
@@ -1816,6 +1823,12 @@ func (scc *stripeClientConn) handleNack(hdr stripeHdr, payload []byte) {
 		if !found {
 			continue
 		}
+		// Il server ri-NACKa gli stessi seq ogni 30ms mentre l'RTT è
+		// 40-70ms: senza dedup ogni buco vero genera 2-3 ritrasmissioni
+		// (misurati 1411 duplicati filtrati al server in un run).
+		if !scc.arqTx.shouldRetx(seq, arqRetxMinInterval) {
+			continue
+		}
 		// Re-encrypt with fresh nonce and send on round-robin pipe
 		wirePkt := stripeEncryptShard(scc.txCipher, &stripeHdr{
 			Magic:      stripeMagic,
@@ -1890,48 +1903,53 @@ func (scc *stripeClientConn) dynamicPacingLoop(ctx context.Context, baseRate int
 	defer ticker.Stop()
 
 	// Controller AIMD sul rate di pacing. Il rate statico funziona solo
-	// finché sta sotto la capacità istantanea del link: su Starlink la
-	// capacità di uplink oscilla anche di 3x nell'arco di minuti (misurato
-	// 44↔76 Mbit sul banco), e un pacing sopra capacità ripristina proprio
-	// i burst persi che il pacing doveva evitare. Il segnale di loss più
-	// diretto per l'upload sono i NACK del server: arqRetxSent conta i
-	// pacchetti ritrasmessi su richiesta, il rapporto con i pacchetti dati
-	// del periodo è la stima di loss. Sopra il 2%: rate *= 0.7; sotto lo
-	// 0.5%: +1 Mbit per tick, fino al cap di config (pacing_rate).
-	// Il gap EDT scala inversamente al rate sul valore byte-corretto
-	// della setup.
+	// finché sta sotto la capacità istantanea del link (su Starlink
+	// l'uplink oscilla di 3x in minuti). Il segnale è peerLossRate: la
+	// loss % che il SERVER misura sui dati ricevuti da noi (seq-gap su
+	// finestra 1s, arriva nell'eco keepalive). NON si usano i retx da
+	// NACK: misurano il riordino (NACK spurie del tracker) e la
+	// ripetizione dei NACK (cooldown 30ms < RTT), non la perdita — è il
+	// segnale avvelenato che al primo giro collassava il rate durante i
+	// download strozzando il canale ACK. Il seq-gap conta gli in-flight
+	// di fine finestra come persi (~RTT/finestra ≈ 4%): la soglia di
+	// decrease sta sopra quel bias. EWMA su 3 campioni contro i picchi
+	// singoli; il sentinel 255 (segnale di sospensione XOR) si ignora.
 	baseGap := atomic.LoadInt64(&scc.txtimeGapNs)
 	if baseGap <= 0 {
 		return
 	}
 	maxRate := float64(baseRate)
 	rate := maxRate
-	const minRate = 2.0
+	minRate := maxRate / 8
+	if minRate < 10 {
+		minRate = 10
+	}
+	if minRate > maxRate {
+		minRate = maxRate
+	}
 
-	var lastTx, lastRetx uint64
+	var lossEwma float64
+	lastDecrease := time.Now()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			tx := atomic.LoadUint64(&scc.txPkts)
-			retx := atomic.LoadUint64(&scc.arqRetxSent)
-			dTx := tx - lastTx
-			dRetx := retx - lastRetx
-			lastTx, lastRetx = tx, retx
+			loss := atomic.LoadUint32(&scc.peerLossRate)
+			if loss == 255 {
+				continue // sentinel XOR, non è una misura di loss
+			}
+			lossEwma = lossEwma*2/3 + float64(loss)/3
 
-			if dTx < 20 {
-				// Quasi idle: nessun segnale utile, risali piano verso il cap.
-				rate += 0.5
-			} else {
-				lossPct := float64(dRetx) * 100 / float64(dTx+dRetx)
-				switch {
-				case lossPct > 2:
-					rate *= 0.7
-				case lossPct < 0.5:
-					rate++
+			switch {
+			case lossEwma > 5:
+				if time.Since(lastDecrease) >= time.Second {
+					rate *= 0.8
+					lastDecrease = time.Now()
 				}
+			case lossEwma < 2:
+				rate += 2
 			}
 			if rate > maxRate {
 				rate = maxRate

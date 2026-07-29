@@ -74,6 +74,7 @@ const (
 	stripeMaxPayload          = 1500
 	stripeFlushInterval       = 5 * time.Millisecond
 	stripePacedRefBytes       = 1402 // shard tipico su filo: riferimento per l'EDT a byte del pacing
+	stripePacedMinBytes       = 600  // sotto questa taglia wire niente EDT: il feedback TCP non si mette in coda dietro i dati
 	stripeKeepaliveInterval   = 1 * time.Second
 	stripeReregisterInterval  = 30 * time.Second // periodic REGISTER refresh in keepaliveLoop
 	stripeSessionTimeout      = 30 * time.Second

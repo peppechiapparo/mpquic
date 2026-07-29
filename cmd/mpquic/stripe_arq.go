@@ -35,8 +35,13 @@ const (
 	// arqNackThresh is now dynamically computed in arqRxTracker (defaulting to 96)
 	arqNackInterval   time.Duration = 5 * time.Millisecond  // NACK check/send interval
 	arqNackCooldown   time.Duration = 30 * time.Millisecond // min time between NACKs (~1 Starlink RTT)
-	arqNackMaxBits                  = 64                   // max missing seqs per NACK packet
-	arqNackPayloadLen               = 12                   // [base_seq 4B][bitmap 8B]
+	arqNackMaxBits                  = 64                    // max missing seqs per NACK packet
+	arqNackPayloadLen               = 12                    // [base_seq 4B][bitmap 8B]
+
+	// arqRetxMinInterval: lo stesso seq non si ritrasmette più spesso di
+	// così. Il cooldown NACK del ricevitore (30ms) è sotto l'RTT tipico
+	// (40-70ms): senza questo dedup ogni perdita vera produce 2-3 copie.
+	arqRetxMinInterval = 100 * time.Millisecond
 )
 
 // ─── TX retransmit buffer ─────────────────────────────────────────────────
@@ -46,6 +51,7 @@ type arqTxEntry struct {
 	shardData []byte // [2B length prefix][IP packet] — plaintext
 	dataLen   uint16
 	valid     bool
+	lastRetx  int64 // unix-nano dell'ultima ritrasmissione di questo seq (dedup NACK ripetuti)
 }
 
 // arqTxBuf is a fixed-size ring buffer of recently sent M=0 packets.
@@ -69,6 +75,23 @@ func (b *arqTxBuf) store(seq uint32, shardData []byte, dataLen uint16) {
 	b.mu.Unlock()
 }
 
+// shouldRetx marca il seq come ritrasmesso ORA se dall'ultima volta è
+// passato almeno minInterval; altrimenti risponde false (NACK ripetuto).
+func (b *arqTxBuf) shouldRetx(seq uint32, minInterval time.Duration) bool {
+	now := time.Now().UnixNano()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	e := &b.ring[seq&arqBufMask]
+	if !e.valid || e.seq != seq {
+		return false
+	}
+	if now-e.lastRetx < int64(minInterval) {
+		return false
+	}
+	e.lastRetx = now
+	return true
+}
+
 // lookup retrieves a previously stored packet by GroupSeq.
 // Returns nil shardData if the entry was overwritten or never stored.
 func (b *arqTxBuf) lookup(seq uint32) (shardData []byte, dataLen uint16, ok bool) {
@@ -88,9 +111,9 @@ func (b *arqTxBuf) lookup(seq uint32) (shardData []byte, dataLen uint16, ok bool
 // Thread-safe via internal mutex.
 type arqRxTracker struct {
 	mu      sync.Mutex
-	base    uint32                 // first potentially missing seq (window start)
-	highest uint32                 // highest seq received so far
-	bitmap  [arqWinWords]uint64    // circular bitmap: bit set = received
+	base    uint32              // first potentially missing seq (window start)
+	highest uint32              // highest seq received so far
+	bitmap  [arqWinWords]uint64 // circular bitmap: bit set = received
 	started bool
 
 	// Dynamic NACK threshold (Step 4.30)
