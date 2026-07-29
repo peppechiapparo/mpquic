@@ -1821,24 +1821,27 @@ func (scc *stripeClientConn) dynamicPacingLoop(ctx context.Context, baseRate int
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
-	// Target base pacing converted to nanoseconds
-	baseNs := int64(1000000000 / baseRate)
+	// Il gap di riferimento è quello calcolato alla setup (byte-corretto,
+	// per-pipe). Il vecchio stub ricalcolava 1e9/rate = 20ms a rate 50:
+	// finché l'EDT era ignorato (niente sch_fq sulle NIC) il danno non si
+	// vedeva, con fq installato avrebbe cappato i data-shard a ~0.5 Mbit
+	// per pipe. Qui si scala solo il gap iniziale in base alla loss
+	// riportata dal peer (fino a 2x più lento).
+	baseNs := atomic.LoadInt64(&scc.txtimeGapNs)
+	if baseNs <= 0 {
+		return
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// Minimal dynamic pacing:
-			// In Phase 4d we scale pacing off RTT jitter & loss.
-			// Currently this is a base implementation avoiding panic.
-			// TODO: Add real scaling based on srtt and ewma bandwidth
 			targetNs := baseNs
 
-			// Increase pacing gap slightly if loss is high
 			loss := atomic.LoadUint32(&scc.peerLossRate)
 			if loss > 0 && loss < 255 {
-				targetNs += targetNs * int64(loss) / 100 // up to 2x slower
+				targetNs += targetNs * int64(loss) / 100 // fino a 2x più lento
 			}
 
 			atomic.StoreInt64(&scc.txtimeGapNs, targetNs)
