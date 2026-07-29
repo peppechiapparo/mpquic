@@ -74,7 +74,7 @@ const (
 	stripeMaxPayload          = 1500
 	stripeFlushInterval       = 5 * time.Millisecond
 	stripePacedRefBytes       = 1402 // shard tipico su filo: riferimento per l'EDT a byte del pacing
-	stripePacedMinBytes       = 600  // sotto questa taglia wire niente EDT: il feedback TCP non si mette in coda dietro i dati
+	stripeEDTHorizonNs        = 15_000_000 // 15ms: massimo debito EDT vs now (sopra: clamp, il pacer smette di limitare invece di far droppare fq)
 	stripeKeepaliveInterval   = 1 * time.Second
 	stripeReregisterInterval  = 30 * time.Second // periodic REGISTER refresh in keepaliveLoop
 	stripeSessionTimeout      = 30 * time.Second
@@ -246,4 +246,47 @@ func (g *fecGroup) addShard(idx int, data []byte) bool {
 		g.maxLen = len(data)
 	}
 	return g.received >= g.dataK
+}
+
+// isPureAck riconosce un segmento TCP interno senza payload e senza
+// SYN/FIN/RST: l'unico traffico che può scavalcare i dati dello stesso
+// flusso senza generare dupACK al peer (un ACK cumulativo vecchio si
+// ignora, non conta come duplicato). Tutto il resto — DNS, SYN, VoIP,
+// piccole POST — resta sotto pacing.
+func isPureAck(pkt []byte) bool {
+	if len(pkt) < 40 {
+		return false
+	}
+	switch pkt[0] >> 4 {
+	case 4:
+		ihl := int(pkt[0]&0x0f) * 4
+		if ihl < 20 || pkt[9] != 6 || len(pkt) < ihl+20 {
+			return false
+		}
+		totalLen := int(pkt[2])<<8 | int(pkt[3])
+		dataOff := int(pkt[ihl+12]>>4) * 4
+		if dataOff < 20 {
+			return false
+		}
+		flags := pkt[ihl+13]
+		if flags&0x07 != 0 { // FIN|SYN|RST
+			return false
+		}
+		return totalLen == ihl+dataOff
+	case 6:
+		if len(pkt) < 60 || pkt[6] != 6 {
+			return false
+		}
+		payloadLen := int(pkt[4])<<8 | int(pkt[5])
+		dataOff := int(pkt[52]>>4) * 4
+		if dataOff < 20 {
+			return false
+		}
+		flags := pkt[53]
+		if flags&0x07 != 0 {
+			return false
+		}
+		return payloadLen == dataOff
+	}
+	return false
 }
