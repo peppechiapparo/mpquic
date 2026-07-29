@@ -99,9 +99,9 @@ type stripeClientConn struct {
 	// carries an EDT (Earliest Departure Time) so sch_fq holds the packet
 	// until that instant.  Replaces the software stripePacer with nanosecond
 	// kernel-level precision.
-	txtimeEnabled bool    // SO_TXTIME probed OK on first pipe
-	txtimeEDT     []int64 // per-pipe next EDT (ns, CLOCK_MONOTONIC)
-	txtimeGapNs   int64   // inter-packet gap (ns) derived from pacing rate
+	txtimeEnabled bool  // SO_TXTIME probed OK on first pipe
+	txtimeEDT     int64 // prossimo EDT condiviso del path (ns, CLOCK_MONOTONIC): il budget di pacing è dell'uplink, non della singola pipe
+	txtimeGapNs   int64 // inter-packet gap (ns) derived from pacing rate
 
 	// Stats (atomic)
 	txPkts   uint64
@@ -406,14 +406,20 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 	// Kernel pacing replaces the software stripePacer with nanosecond-precision
 	// sch_fq scheduling, eliminating burst-induced retransmits.
 	if pacingRate > 0 && len(scc.pipes) > 0 && stripeTxtimeProbe(scc.pipes[0]) {
-		numPipes := len(scc.pipes)
-		rateBytesPerPipe := uint64(pacingRate) * 1e6 / 8 / uint64(numPipes)
+		// EDT condiviso a livello di path: il gap è quello del rate INTERO,
+		// qualunque pipe trasmetta. Il vecchio schema per-pipe (rate/N per
+		// pipe) cappava a rate/N ogni flusso inchiodato dalla flow-affinity
+		// (misurato: 8 Mbit con affinity + pacing 50 su 12 pipe).
+		// SO_MAX_PACING_RATE resta come backstop per i pacchetti senza
+		// SCM_TXTIME (es. retx ARQ): a rate pieno per socket, perché con
+		// l'affinity una singola pipe può legittimamente portare tutto il
+		// rate del path (fq applica comunque min(EDT, maxrate) per flusso).
+		rateBytesFull := uint64(pacingRate) * 1e6 / 8
 		// Typical shard: stripeHdrLen + 2 + MTU + AES-GCM overhead ≈ 1402 bytes
-		scc.txtimeGapNs = int64(float64(1402*8) / (float64(pacingRate) * 1e6 / float64(numPipes)) * 1e9)
-		scc.txtimeEDT = make([]int64, numPipes)
+		scc.txtimeGapNs = int64(float64(stripePacedRefBytes*8) / (float64(pacingRate) * 1e6) * 1e9)
 		allOK := true
 		for i, pipe := range scc.pipes {
-			if err := stripeTxtimeSetup(pipe, rateBytesPerPipe); err != nil {
+			if err := stripeTxtimeSetup(pipe, rateBytesFull); err != nil {
 				logger.Errorf("stripe: SO_TXTIME pipe %d failed: %v (disabling kernel pacing)", i, err)
 				allOK = false
 				break
@@ -966,8 +972,8 @@ func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
 	gb.segSize = 0
 }
 
-// txtimeNextEDT returns the next Earliest Departure Time for a pipe and
-// advances the per-pipe EDT counter in proporzione ai BYTE trasmessi
+// txtimeNextEDT returns the next Earliest Departure Time and advances the
+// shared per-path EDT counter in proporzione ai BYTE trasmessi
 // (gap pieno = un pacchetto da stripePacedRefBytes). L'avanzamento per
 // pacchetto spaziava un ACK da 90B come un data-shard da 1402B: il ritorno
 // ACK di un download veniva cappato in pps e strozzava il TCP interno
@@ -975,14 +981,14 @@ func (scc *stripeClientConn) gsoFlushPipeLocked(pipeIdx int) {
 // byte/s, non in pacchetti/s.
 // Ensures the EDT is never in the past (clamps to now + small delta).
 // Caller must hold txMu.
-func (scc *stripeClientConn) txtimeNextEDT(pipeIdx int, nbytes int) int64 {
+func (scc *stripeClientConn) txtimeNextEDT(_ int, nbytes int) int64 {
 	now := monoNowNs()
-	edt := scc.txtimeEDT[pipeIdx]
+	edt := scc.txtimeEDT
 	if edt < now {
 		edt = now + 1000 // 1 µs ahead to avoid immediate delivery
 	}
 	gap := atomic.LoadInt64(&scc.txtimeGapNs)
-	scc.txtimeEDT[pipeIdx] = edt + gap*int64(nbytes)/stripePacedRefBytes
+	scc.txtimeEDT = edt + gap*int64(nbytes)/stripePacedRefBytes
 	return edt
 }
 
