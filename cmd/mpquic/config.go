@@ -23,6 +23,7 @@ type Config struct {
 	MultiConnEnabled      bool                  `yaml:"multi_conn_enabled"`
 	MultipathEnabled      bool                  `yaml:"multipath_enabled"`
 	MultipathPolicy       string                `yaml:"multipath_policy"`
+	MultipathFlowSticky   bool                  `yaml:"multipath_flow_sticky"` // pin per-flusso del path a parità di priorità (upload senza riordino cross-path)
 	DataplaneConfigFile   string                `yaml:"dataplane_config_file"`
 	Dataplane             DataplaneConfig       `yaml:"dataplane"`
 	MultipathPaths        []MultipathPathConfig `yaml:"multipath_paths"`

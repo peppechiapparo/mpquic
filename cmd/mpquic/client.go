@@ -359,32 +359,36 @@ func (m *multipathConn) SendDatagram(pkt []byte) error {
 		return m.sendDuplicate(pkt, className, classPolicy)
 	}
 
-	// Path-stickiness per flusso: i pacchetti dello stesso flusso interno
-	// escono sempre dallo stesso path. L'alternanza per-pacchetto tra path
-	// con RTT diversi consegna al peer un riordino che il TCP interno paga
-	// in ritrasmissioni spurie (misurato: upload dimezzato sul banco dual-WAN).
-	flowHash, flowOK := innerFlowHash(pkt)
+	// Path-stickiness per flusso (opt-in da config): i pacchetti dello stesso
+	// flusso interno escono sempre dallo stesso path. L'alternanza per-pacchetto
+	// tra path con RTT diversi consegna al peer un riordino che il TCP interno
+	// paga in ritrasmissioni spurie (misurato: upload dimezzato sul banco
+	// dual-WAN). Dopo un errore di TX si ricade sulla selezione classica.
+	flowOK := false
+	var flowHash uint32
+	if m.cfg.MultipathFlowSticky {
+		flowHash, flowOK = innerFlowHash(pkt)
+	}
 
 	deadline := time.Now().Add(1200 * time.Millisecond)
 	for {
 		idx, conn := m.selectBestPath(classPolicy, nil, flowHash, flowOK)
-		if idx < 0 || conn == nil {
-			if time.Now().After(deadline) {
-				m.markClassError(className)
-				return fmt.Errorf("multipath: no active path available")
+
+		if idx >= 0 && conn != nil {
+			if err := conn.SendDatagram(pkt); err != nil {
+				m.markTxError(idx, err)
+				flowOK = false // retry: selezione classica, non ri-inchiodare
+				continue
 			}
-			time.Sleep(100 * time.Millisecond)
-			continue
+			m.markTxSuccess(idx)
+			m.markClassTx(className)
+			return nil
 		}
-
-		if err := conn.SendDatagram(pkt); err != nil {
-			m.markTxError(idx, err)
-			continue
+		if time.Now().After(deadline) {
+			m.markClassError(className)
+			return fmt.Errorf("multipath: no active path available")
 		}
-
-		m.markTxSuccess(idx)
-		m.markClassTx(className)
-		return nil
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -462,11 +466,13 @@ func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip ma
 	}
 	preferredOnly := len(preferred) > 0
 
-	var tieCands []int // candidati a punteggio minimo, in ordine di indice stabile
+	var tieCands []int // candidati a punteggio strutturale minimo
+	bestStructScore := int(^uint(0) >> 1)
 
 	for pass := 0; pass < 2; pass++ {
 		bestIdx = -1
 		bestScore = int(^uint(0) >> 1)
+		bestStructScore = int(^uint(0) >> 1)
 		tieCands = tieCands[:0]
 
 		for i := 0; i < len(m.paths); i++ {
@@ -511,9 +517,13 @@ func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip ma
 			if score < bestScore {
 				bestScore = score
 				bestIdx = idx
+			}
+			structScore := pathStructuralScore(policy, p)
+			if structScore < bestStructScore {
+				bestStructScore = structScore
 				tieCands = tieCands[:0]
 				tieCands = append(tieCands, idx)
-			} else if score == bestScore {
+			} else if structScore == bestStructScore {
 				tieCands = append(tieCands, idx)
 			}
 		}
@@ -573,6 +583,30 @@ func (m *multipathConn) selectBestPath(classPolicy DataplaneClassPolicy, skip ma
 
 	m.rr = (bestIdx + 1) % len(m.paths)
 	return bestIdx, m.paths[bestIdx].dc
+}
+
+// pathStructuralScore è pathPolicyScore senza la penalità sui fallimenti
+// consecutivi: è la chiave del tie-break sticky, che deve restare stabile
+// sotto errori transitori (un flip di failPenalty non deve far migrare in
+// massa i flussi da un path all'altro).
+func pathStructuralScore(policy string, p *multipathPathState) int {
+	base := p.cfg.Priority * 1000
+	switch policy {
+	case "failover":
+		return base
+	case "balanced":
+		weightBonus := 0
+		if p.cfg.Weight > 1 {
+			weightBonus = (p.cfg.Weight - 1) * 120
+		}
+		return base - weightBonus
+	default:
+		weightBonus := 0
+		if p.cfg.Weight > 1 {
+			weightBonus = (p.cfg.Weight - 1) * 10
+		}
+		return base - weightBonus
+	}
 }
 
 func pathPolicyScore(policy string, p *multipathPathState) int {
