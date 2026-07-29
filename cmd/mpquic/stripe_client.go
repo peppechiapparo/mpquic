@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math/bits"
 	"net"
 	"strings"
 	"sync"
@@ -77,7 +78,16 @@ type stripeClientConn struct {
 	// Peer-reported loss (loss on data WE send, reported BY server → we adjust our TX M)
 	peerLossRate uint32 // atomic: 0-100
 	arqRetxSent  uint64 // atomic: pacchetti ritrasmessi su NACK del server (segnale di loss upload per l'AIMD)
-	lastPeerLoss int64  // atomic: unix-nano of last nonzero peer loss report
+
+	// Salute per-pipe: il server risponde a ogni keepalive sulla stessa pipe
+	// (1 Hz), quindi una pipe che non riceve nulla da pipeStaleAfter mentre
+	// le altre ricevono ha il binding NAT o l'uplink morto. pipeHealthyMask
+	// (bit i = pipe i sana) è ricalcolata dal keepaliveLoop a ogni tick; la
+	// flow-affinity hasha SOLO sulle pipe sane, così un flusso inchiodato
+	// non muore mai su una pipe marcia (lezione TS-024).
+	pipeLastRx      []int64 // atomic per pipe: unix-nano ultimo pacchetto valido
+	pipeHealthyMask uint32  // atomic: bit per pipe, 0 = maschera non inizializzata (tutte valide)
+	lastPeerLoss    int64   // atomic: unix-nano of last nonzero peer loss report
 
 	// Loss computation: previous window values (updated each keepalive cycle)
 	rxLossPrevSeqHigh    uint64
@@ -389,6 +399,12 @@ func newStripeClientConn(ctx context.Context, cfg *Config, pathCfg MultipathPath
 		}
 		scc.pipes = append(scc.pipes, conn)
 		logger.Infof("stripe pipe %d: local=%s → remote=%s dev=%s", i, conn.LocalAddr(), serverAddr, ifName)
+	}
+
+	scc.pipeLastRx = make([]int64, len(scc.pipes))
+	nowInit := time.Now().UnixNano()
+	for i := range scc.pipeLastRx {
+		atomic.StoreInt64(&scc.pipeLastRx[i], nowInit)
 	}
 
 	// Probe GSO (UDP_SEGMENT) support on the first pipe.
@@ -1041,11 +1057,52 @@ func (scc *stripeClientConn) sendToPipe(pkt []byte) {
 func (scc *stripeClientConn) dataPipeIdx(inner []byte) int {
 	if scc.flowAffinity && len(scc.pipes) > 1 {
 		if h, ok := innerFlowHash(inner); ok {
-			return int(h % uint32(len(scc.pipes)))
+			mask := atomic.LoadUint32(&scc.pipeHealthyMask)
+			if mask == 0 {
+				// Maschera non ancora calcolata (o nessuna pipe sana):
+				// tutte candidabili, come prima.
+				return int(h % uint32(len(scc.pipes)))
+			}
+			n := bits.OnesCount32(mask)
+			// k-esimo bit acceso, con k = hash % numero di pipe sane
+			k := int(h % uint32(n))
+			for i := 0; i < len(scc.pipes); i++ {
+				if mask&(1<<uint(i)) != 0 {
+					if k == 0 {
+						return i
+					}
+					k--
+				}
+			}
 		}
 	}
 	idx := atomic.AddUint32(&scc.txPipe, 1) - 1
 	return int(idx) % len(scc.pipes)
+}
+
+// refreshPipeHealthMask ricalcola la maschera delle pipe sane (eco keepalive
+// o qualunque RX entro pipeStaleAfter). Se nessuna pipe risulta sana la
+// maschera resta piena: meglio degradare come il vecchio RR che azzerare
+// il TX. Chiamata dal keepaliveLoop a ogni tick.
+func (scc *stripeClientConn) refreshPipeHealthMask() {
+	if scc.pipeLastRx == nil {
+		return
+	}
+	staleNs := int64(3 * scc.keepaliveInterval)
+	if staleNs <= 0 {
+		staleNs = int64(3 * time.Second)
+	}
+	cut := time.Now().UnixNano() - staleNs
+	var mask uint32
+	for i := range scc.pipeLastRx {
+		if atomic.LoadInt64(&scc.pipeLastRx[i]) >= cut {
+			mask |= 1 << uint(i)
+		}
+	}
+	if mask == 0 {
+		mask = (1 << uint(len(scc.pipeLastRx))) - 1
+	}
+	atomic.StoreUint32(&scc.pipeHealthyMask, mask)
 }
 
 // ─── Client RX internals ──────────────────────────────────────────────────
@@ -1111,6 +1168,7 @@ func (scc *stripeClientConn) recvPipeLoop(ctx context.Context, pipeIdx int, conn
 
 			nowNs := time.Now().UnixNano()
 			atomic.StoreInt64(&scc.lastRx, nowNs)
+			atomic.StoreInt64(&scc.pipeLastRx[pipeIdx], nowNs)
 			if scc.lastRxNsPtr != nil {
 				atomic.StoreInt64(scc.lastRxNsPtr, nowNs)
 			}
@@ -1472,6 +1530,8 @@ func (scc *stripeClientConn) keepaliveLoop(ctx context.Context) {
 					_, _ = pipe.WriteToUDP(pkt, scc.serverAddr)
 				}
 			}
+
+			scc.refreshPipeHealthMask()
 
 			for i, pipe := range scc.pipes {
 				// Keepalive payload: [pipe_index: 1B][rx_loss_pct: 1B]
