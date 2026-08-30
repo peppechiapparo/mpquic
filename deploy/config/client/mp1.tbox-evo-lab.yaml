@@ -1,0 +1,54 @@
+# mp1 client del banco TBOX-EVO (lab) — dual WAN (wan5 LTE enp7s7 + wan6 Starlink enp7s8).
+# Differenze dal mp1.yaml canonico: tuning IBLEA-M/TS-031 v9 (FEC off, pacing 80, reseq off),
+# sezione crypto speculare al server mp1 della VPS lab (branch ottavionovella, hybrid_security),
+# remote_addr hardcoded sulla VPS lab (TS-034). Se la VPS lab torna senza CAL, togliere la sezione crypto.
+role: client
+multipath_enabled: true
+multipath_policy: balanced
+tun_name: mp1
+tun_cidr: 10.200.17.1/24
+metrics_listen: auto
+log_level: info
+tls_ca_file: /etc/mpquic/tls/ca.crt
+tls_server_name: mpquic-server
+tls_insecure_skip_verify: false
+congestion_algorithm: bbr
+transport_mode: reliable
+stripe_port: 46017
+stripe_data_shards: 10
+stripe_parity_shards: 2
+stripe_fec_mode: off
+stripe_fec_type: rs
+stripe_fec_window: 10
+stripe_arq: true
+stripe_pacing_rate: 80
+stripe_reseq_disable: true
+multipath_paths:
+- name: wan5
+  bind_ip: if:enp7s7
+  remote_addr: 104.105.82.146
+  remote_port: 45017
+  priority: 1
+  weight: 1
+  pipes: 12
+  transport: stripe
+- name: wan6
+  bind_ip: if:enp7s8
+  remote_addr: 104.105.82.146
+  remote_port: 45017
+  priority: 1
+  weight: 1
+  pipes: 12
+  transport: stripe
+
+stripe_crypto_enabled: true
+crypto:
+  enabled: true
+  profile: hybrid_security
+  rekey:
+    enabled: true
+    interval_seconds: 300
+    max_packets: 1000000000
+    max_bytes: 1073741824
+    on_epoch_change: true
+    anti_flapping_seconds: 10
